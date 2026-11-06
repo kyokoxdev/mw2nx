@@ -10,6 +10,14 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SDK="$ROOT/sdk"
 CLANG_DIR="${CLANG_DIR:-$HOME/tools/clang/usr/lib/llvm-21/bin}"
 export PATH="$CLANG_DIR:$PATH"
+# X11/Wayland dev files the SDK's rexui wants, when they are not installed system-wide: DEVROOT is a dpkg -x of
+# Ubuntu's libx11-xcb-dev, libwayland-dev and their deps, with each .pc prefix rewritten to point inside it.
+DEVROOT="${DEVROOT:-$HOME/tools/devroot}"
+if [ -d "$DEVROOT" ]; then
+  export PKG_CONFIG_PATH="$DEVROOT/usr/lib/x86_64-linux-gnu/pkgconfig:$DEVROOT/usr/share/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+  # rexui links pkg-config's library names without its -L, so the folder goes to the linker here.
+  DEVROOT_LDFLAGS="-L$DEVROOT/usr/lib/x86_64-linux-gnu -Wl,-rpath-link,$DEVROOT/usr/lib/x86_64-linux-gnu"
+fi
 
 # Always: resumable and cached in out/rexglue-sdk-src, and a partial earlier copy must be completed.
 (cd "$ROOT" && python3 tools/fetch_thirdparty.py)
@@ -20,7 +28,7 @@ for d in "$SDK"/thirdparty/*/; do [ -e "$d.git" ] || mkdir "$d.git"; done
 cmake -S "$SDK" -B "$ROOT/out/host-linux" -G Ninja \
   -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ \
-  -DCMAKE_EXE_LINKER_FLAGS=-fuse-ld=lld -DCMAKE_SHARED_LINKER_FLAGS=-fuse-ld=lld \
+  "-DCMAKE_EXE_LINKER_FLAGS=-fuse-ld=lld ${DEVROOT_LDFLAGS:-}" "-DCMAKE_SHARED_LINKER_FLAGS=-fuse-ld=lld ${DEVROOT_LDFLAGS:-}" \
   -DCMAKE_C_FLAGS=-march=x86-64-v2 -DCMAKE_CXX_FLAGS=-march=x86-64-v2 \
   -DGIT_EXECUTABLE=/nonexistent/git \
   "-DCMAKE_PROJECT_ReXGlue_INCLUDE=$ROOT/cmake/host_tools_inject.cmake"

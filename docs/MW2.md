@@ -23,6 +23,8 @@ MW2 lives in `mw2mp/` (multiplayer, `default_mp.xex`) and later `mw2sp/`.
 - clang/lld 21: `apt-get download` of Ubuntu's `clang-21 lld-21 llvm-21 ...` debs, `dpkg -x` into
   `~/tools/clang`. Used by `tools/build_host_linux.sh` (bo2's `build_host.sh` is Windows-only; the SDK itself
   supports linux-amd64).
+- X11/Wayland dev files: same trick into `~/tools/devroot` (`libx11-xcb-dev`, `libwayland-dev` and deps, `.pc`
+  prefixes rewritten). Outputs: `sdk/out/linux-amd64/rexglue`, `out/host-linux/switch_bo2/xexdump`.
 - devkitA64 in `~/devkitpro` (GCC 15.2; bo2 used 16.1, watch for that).
 
 ## Milestones
@@ -41,5 +43,5 @@ MW2 lives in `mw2mp/` (multiplayer, `default_mp.xex`) and later `mw2sp/`.
 ## Status
 
 - [x] Repo, manifest, overrides seeded from mw2-recompiled `config/MW2MP.toml`
-- [ ] 1 host tools
+- [x] 1 host tools (Linux/WSL)
 - [ ] 2 codegen (blocked: needs the disc ISO)
