@@ -1,0 +1,51 @@
+# ============================================================================
+#  MW2 multiplayer (TU6 default_mp.xex) - manual declarations for the codegen
+#
+#  Starting point: addresses from PaulCombal/mw2-recompiled config/MW2MP.toml
+#  (XenonRecomp config, same TU6 image). Re-verify each against the dumped
+#  image (tools/inspect/ppc_dis.py) once work/dump_tu6 exists.
+# ============================================================================
+
+# --- setjmp / longjmp (root keys: must stay ABOVE [functions]) ---------------
+# Com_Error longjmps back to the frame loop's setjmp (same scheme as BO2).
+setjmp_address = 0x8241C710
+longjmp_address = 0x8241D470
+
+# Register locals, as in app/overrides.toml. mw2-recompiled runs the same set
+# (plus non_argument_as_local, left off here for the reason bo2 gives: r12 is
+# __savevmx_N's base).
+cr_as_local = true
+xer_as_local = true
+ctr_as_local = true
+non_volatile_as_local = true
+
+[functions]
+
+# --- Compact branch ladders the analyzer splits (mw2-recompiled) -------------
+"0x821486B8" = { size = 0x44 }
+"0x8210F468" = { size = 0x9C }
+
+# --- Leaf functions with jump tables, absent from .pdata (mw2-recompiled
+#     tools/fixbounds.py: bl targets, padding runs, case labels) -------------
+"0x820CC0F8" = { size = 0xA8 }
+"0x82115AA8" = { size = 0x60 }
+"0x82115B08" = { size = 0x70 }
+"0x82157640" = { size = 0x9C }
+"0x821AABB0" = { size = 0x118 }
+"0x821AACF0" = { size = 0x114 }
+"0x821AAE90" = { size = 0x3B8 }
+"0x82291288" = { size = 0x64 }
+"0x822DD760" = { size = 0xD4 }
+"0x822EB578" = { size = 0x88 }
+"0x822F3700" = { size = 0xE0 }
+"0x822F4D30" = { size = 0x94 }
+"0x82300E58" = { size = 0xD0 }
+"0x823011D8" = { size = 0x64 }
+"0x82301240" = { size = 0x74 }
+"0x823012C0" = { size = 0x60 }
+"0x82301320" = { size = 0x78 }
+"0x82301398" = { size = 0x68 }
+"0x8230C9D8" = { size = 0x20C }
+"0x8230CBE8" = { size = 0x1E0 }
+"0x8230FFB8" = { size = 0x1B0 }
+"0x823FEA58" = { size = 0x14C }

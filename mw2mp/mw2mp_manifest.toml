@@ -1,0 +1,12 @@
+# MW2 multiplayer (TU6 default_mp.xex) for ReXGlue v0.10.0, following app/bo2zm_manifest.toml.
+
+[project]
+name = "mw2mp"
+sdk_version = "0.10.0"
+game_root = "../work/load_tu6"
+
+[entrypoint]
+file_path = "../work/load_tu6/default_mp.xex"
+out_directory_path = "generated/default_mp"
+# overrides.toml: hand-written declarations, each with its evidence.
+includes = ["overrides.toml"]
