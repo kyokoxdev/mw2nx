@@ -49,3 +49,8 @@ non_volatile_as_local = true
 "0x8230CBE8" = { size = 0x1E0 }
 "0x8230FFB8" = { size = 0x1B0 }
 "0x823FEA58" = { size = 0x14C }
+
+# --- Standalone functions the analyzer never claimed -------------------------
+# Follows the thunk `addi r3,r3,0x6C; b 0x82367760` (ends 0x82368AE4); reached only by the tail branch in the
+# bdz jump ladder at 0x8236CE24.
+"0x82368AE8" = { }   # lis r8,0x8200; lwz r11,0x40(r3); lfs f13,0x44(r3) ...     <- 0x8236CE24

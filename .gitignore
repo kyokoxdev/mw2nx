@@ -1,6 +1,7 @@
 # Game data and anything derived from it: never commit
 game/
 work/
+iso/
 generated/
 **/generated/
 *.xex

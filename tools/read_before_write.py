@@ -227,6 +227,13 @@ KNOWN = {
     "sub_8282C2D8": "subfe r29,r29,r29: the result is -1 + CA whatever r29 held",
     "sub_82918CA0": "the game's setjmp itself (saves every register); every call goes through ppc_setjmp",
     "sub_8292FA64": "not code: the pointer 0x8292FA90 and a zero word before sub_8292FA6C, decoded as one lwz",
+    # MW2 multiplayer, TU6 (mw2mp/generated)
+    "sub_82211D08": "MW2: subfe r29,r29,r29: the result is -1 + CA whatever r29 held",
+    "sub_82350E50": "MW2: subfe r19,r19,r19: the result is -1 + CA whatever r19 held",
+    "sub_823A9D04": "MW2: VMX copy kernel: stvlx128 v64/v65 to the stack in its prologue (a save)",
+    "sub_823AA1D0": "MW2: VMX copy kernel: xor r30,r30,r30 (zero whatever r30 held)",
+    "sub_823AA560": "MW2: VMX copy kernel: stvlx128 saves of v64/v65 and xor r30,r30,r30",
+    "sub_8241C710": "MW2: the game's setjmp itself (saves every register); every call goes through ppc_setjmp",
 }
 
 
