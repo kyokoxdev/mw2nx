@@ -284,6 +284,16 @@ void XamLoaderLaunchTitle_entry(mapped_string raw_name_ptr, u32 flags) {
     assert_always("Game requested exit to dashboard via XamLoaderLaunchTitle");
   }
 
+  // A relaunch ends the process here, so say so: games pass the reason in the launch data (MW2's Sys_Error relaunches
+  // itself with "e<message>"). Printable bytes only.
+  std::string data;
+  for (uint8_t c : loader_data.launch_data) {
+    if (c >= 0x20 && c < 0x7F) data.push_back(char(c));
+    else if (!data.empty() && data.back() != ' ') data.push_back(' ');
+  }
+  REXKRNL_INFO("XamLoaderLaunchTitle('{}', flags {:08X}): ending the title; launch data ({} bytes): {}",
+               loader_data.launch_path, uint32_t(flags), loader_data.launch_data.size(), data);
+
   // This function does not return.
   REX_KERNEL_STATE()->TerminateTitle();
 }

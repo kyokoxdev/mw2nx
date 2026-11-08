@@ -90,7 +90,8 @@ struct Bo2zmBlockVs { float4 v[256]; };
 struct Bo2zmBlockPs { float4 v[256]; };
 // BO2ZM_RECOMP: 35, not 23. The renderer fills 31 (1/size of the 16 slots ends at byte 488) and BO2 adds the
 // slots' fetch scales (bytes 488-551). With 23, slot 2 and up read 1/size past the end of the array.
-struct Bo2zmBlockShared { float4 v[43]; };
+// mw2nx: 45: the renderer adds all 256 boolean constants at bytes 688-719 (g_BooleanBit).
+struct Bo2zmBlockShared { float4 v[45]; };
 [[vk::binding(0, 4)]] ConstantBuffer<Bo2zmBlockVs> g_UboVertex;
 [[vk::binding(1, 4)]] ConstantBuffer<Bo2zmBlockPs> g_UboPixel;
 [[vk::binding(2, 4)]] ConstantBuffer<Bo2zmBlockShared> g_UboShared;
@@ -99,6 +100,12 @@ struct Bo2zmBlockShared { float4 v[43]; };
 #define BO2ZM_SHARED_FLOAT(B) g_UboShared.v[(B) / 16][((B) % 16) / 4]
 
 #define g_Booleans                 (BO2ZM_UBO ? BO2ZM_SHARED_UINT(256) : vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 256))
+// mw2nx: float constant INDEX of a stage's constant file (0-255; outside it reads 0, as the declared arrays do), for
+// constants the CTAB does not declare and relative reads past a declared one.
+#define g_VsC(INDEX) select(uint(INDEX) < 256u, (BO2ZM_UBO ? g_UboVertex.v[min(uint(INDEX), 255u)] : vk::RawBufferLoad<float4>(g_PushConstants.VertexShaderConstants + min(uint(INDEX), 255u) * 16, 0x10)), 0.0)
+#define g_PsC(INDEX) select(uint(INDEX) < 256u, (BO2ZM_UBO ? g_UboPixel.v[min(uint(INDEX), 255u)] : vk::RawBufferLoad<float4>(g_PushConstants.PixelShaderConstants + min(uint(INDEX), 255u) * 16, 0x10)), 0.0)
+// mw2nx: boolean constant N (0-255, as the control flow numbers it) from the registers' full copy at byte 688.
+#define g_BooleanBit(N)            (((BO2ZM_UBO ? BO2ZM_SHARED_UINT(688 + ((N) >> 5) * 4) : vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 688 + ((N) >> 5) * 4)) >> ((N) & 31)) & 1u)
 #define g_SwappedTexcoords         (BO2ZM_UBO ? BO2ZM_SHARED_UINT(260) : vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 260))
 #define g_HalfPixelOffset          (BO2ZM_UBO ? float2(BO2ZM_SHARED_FLOAT(264), BO2ZM_SHARED_FLOAT(268)) : vk::RawBufferLoad<float2>(g_PushConstants.SharedConstants + 264))
 #define g_AlphaThreshold           (BO2ZM_UBO ? BO2ZM_SHARED_FLOAT(272) : vk::RawBufferLoad<float>(g_PushConstants.SharedConstants + 272))
@@ -127,7 +134,10 @@ struct Bo2zmBlockShared { float4 v[43]; };
     float g_AlphaThreshold : packoffset(c17.x); \
     uint g_AlphaFunction : packoffset(c17.y); \
     float2 g_NdcScale : packoffset(c17.z); \
-    float2 g_NdcOffset : packoffset(c18.x);
+    float2 g_NdcOffset : packoffset(c18.x); \
+    uint4 g_BooleansAll[2] : packoffset(c43);
+
+#define g_BooleanBit(N) ((g_BooleansAll[(N) >> 7][((N) >> 5) & 3] >> ((N) & 31)) & 1u)
 
 uint g_SpecConstants();
 
@@ -288,6 +298,12 @@ float4 tfetch2DBicubic(uint resourceDescriptorIndex, uint samplerDescriptorIndex
             g1x * texture.Sample(samplerState, float2(px + h1x, py + h1y) / float2(dimensions)));
 
     return r;
+}
+
+// mw2nx: 1D textures (MW2's light attenuation) as a 2D texture's single row.
+float4 tfetch1D(uint resourceDescriptorIndex, uint samplerDescriptorIndex, float texCoord)
+{
+    return g_Texture2DDescriptorHeap[resourceDescriptorIndex].Sample(g_SamplerDescriptorHeap[samplerDescriptorIndex], float2(texCoord, 0.5));
 }
 
 float4 tfetch3D(uint resourceDescriptorIndex, uint samplerDescriptorIndex, float3 texCoord)

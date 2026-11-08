@@ -190,6 +190,25 @@ static bool writesAnyComponent(uint32_t dstSwizzle)
     return false;
 }
 
+// mw2nx: float constant `reg` of this stage straight from its constant file (g_VsC / g_PsC, shader_common.h), with
+// the address register or loop counter added when the operand is relative.
+std::string ShaderRecompiler::rawConstant(uint32_t reg, bool relative, bool addressRegister) const
+{
+    return fmt::format("{}({}{})", isPixelShader ? "g_PsC" : "g_VsC", reg,
+        relative ? (addressRegister ? " + a0" : " + aL") : "");
+}
+
+// A boolean constant by its control-flow address (0-127 vertex, 128-255 pixel). One the CTAB declares within the
+// 16 bits per stage g_Booleans packs reads it there; any other reads the full 256-bit copy (g_BooleanBit, mw2nx: MW2
+// branches on the engine's booleans, which its CTABs do not declare, up to b212).
+std::string ShaderRecompiler::booleanTest(uint32_t address) const
+{
+    const auto found = boolConstants.find(address);
+    if (found != boolConstants.end() && (address & 127) < 16)
+        return fmt::format("(g_Booleans & {})", found->second);
+    return fmt::format("g_BooleanBit({})", address);
+}
+
 void ShaderRecompiler::recompile(const VertexFetchInstruction& instr, uint32_t address)
 {
     if (instr.isPredicated)
@@ -207,7 +226,7 @@ void ShaderRecompiler::recompile(const VertexFetchInstruction& instr, uint32_t a
 
     auto findResult = vertexElements.find(address);
     if (findResult == vertexElements.end())
-        throw std::runtime_error("vertex FETCH without a declared element");
+        throw std::runtime_error(fmt::format("vertex FETCH without a declared element (address {})", address));
 
 #ifdef BO2ZM_RECOMP
     // BO2ZM: D3D patches the fetch swizzle according to the vertex declaration; the
@@ -419,7 +438,9 @@ void ShaderRecompiler::recompile(const TextureFetchInstruction& instr, bool bicu
         lod_text = instr.useRegLod ? fmt::format(", tfetchLod + {}", lod_bias) : fmt::format(", {}", lod_bias);
     }
 
-    print("({0}_Texture{1}DescriptorIndex, {0}_SamplerDescriptorIndex, ", constNamePtr, dimension);
+    // mw2nx: a 1D texture is read through the 2D heap (tfetch1D, shader_common.h): Xenos keeps 1D textures as one row.
+    print("({0}_Texture{1}DescriptorIndex, {0}_SamplerDescriptorIndex, ", constNamePtr,
+          instr.dimension == TextureDimension::Texture1D ? std::string_view("2D") : dimension);
     // BO2ZM_RECOMP: unnormalized (texel) coordinates, used by BO2's post-processing (its luminance pass among
     // them). They were taken as 0..1, sampled off the image and read black: no exposure, a much too dark image.
     const bool denormalized = instr.texCoordDenorm && instr.dimension == TextureDimension::Texture2D;
@@ -579,17 +600,24 @@ void ShaderRecompiler::recompile(const AluInstruction& instr)
                                 reg - findResult->second->registerIndex, relativeAddr ? (instr.constAddressRegisterRelative ? " + a0" : " + aL") : "");
                         }
                     }
+                    else if (relativeAddr)
+                    {
+                        // mw2nx: indexing past a one-register constant reads the stage's raw constant file.
+                        regFormatted = rawConstant(reg, relativeAddr, instr.constAddressRegisterRelative);
+                    }
                     else
                     {
-                        if (relativeAddr)
-                            throw std::runtime_error("relative addressing of a scalar constant is not implemented");
                         regFormatted = constantName;
                     }
                 }
+                else if (relativeAddr || !literalConstants.contains(reg))
+                {
+                    // mw2nx: a constant the CTAB does not declare (MW2's engine constants) is read from the stage's
+                    // raw constant file by register; a literal (def) keeps its local.
+                    regFormatted = rawConstant(reg, relativeAddr, instr.constAddressRegisterRelative);
+                }
                 else
                 {
-                    if (relativeAddr)
-                        throw std::runtime_error("relative addressing without a declared constant is not implemented");
                     regFormatted = fmt::format("c{}", reg);
                 }
             }
@@ -1549,6 +1577,7 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
             {
                 println("\tfloat4 c{} = asfloat(uint4(0x{:X}, 0x{:X}, 0x{:X}, 0x{:X}));",
                     definition->registerIndex + i - (isPixelShader ? 256 : 0), value[0].get(), value[1].get(), value[2].get(), value[3].get());
+                literalConstants.insert(definition->registerIndex + i - (isPixelShader ? 256 : 0));
 
                 value += 4;
             }
@@ -1814,11 +1843,8 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
                 {
                     // The condition belongs to the whole EXEC block, including its
                     // return. Per-instruction ALU predication does not replace it.
-                    const auto boolConstant = boolConstants.find(cfInstr.condExec.boolAddress);
-                    if (boolConstant == boolConstants.end())
-                        throw std::runtime_error("conditional EXEC without a declared boolean constant");
                     indent();
-                    println("if ((g_Booleans & {}) {}= 0)", boolConstant->second, cfInstr.condExec.condition ? "!" : "=");
+                    println("if ({} {}= 0)", booleanTest(cfInstr.condExec.boolAddress), cfInstr.condExec.condition ? "!" : "=");
                     indent();
                     out += "{\n";
                     ++indentation;
@@ -1906,11 +1932,7 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
                     }
                     else
                     {
-                        auto findResult = boolConstants.find(cfInstr.condJmp.boolAddress);
-                        if (findResult != boolConstants.end())
-                            println("if ((g_Booleans & {}) {}= 0)", findResult->second, cfInstr.condJmp.condition ^ simpleControlFlow ? "!" : "=");
-                        else
-                            println("if (b{} {}= 0)", uint32_t(cfInstr.condJmp.boolAddress), cfInstr.condJmp.condition ^ simpleControlFlow ? "!" : "=");
+                        println("if ({} {}= 0)", booleanTest(cfInstr.condJmp.boolAddress), cfInstr.condJmp.condition ^ simpleControlFlow ? "!" : "=");
                     }
 
                     if (simpleControlFlow)

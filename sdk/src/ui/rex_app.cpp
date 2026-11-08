@@ -671,8 +671,10 @@ void ReXApp::OnDestroy() {
     window_->RemoveInputListener(this);
     window_->RemoveListener(this);
   }
-  window_.reset();
+  // Runtime first: its input drivers still point at the window when it was never closed (the guest's main thread
+  // ended on its own, so OnClosing never ran), and detach from it in their destructors.
   runtime_.reset();
+  window_.reset();
 }
 
 void ReXApp::SetGuestFrameStats(ui::DebugOverlayDialog::FrameStatsProvider provider) {

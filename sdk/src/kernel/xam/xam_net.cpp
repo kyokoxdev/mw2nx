@@ -766,9 +766,13 @@ u32 NetDll_socket_entry(u32 caller, u32 af, u32 type, u32 protocol) {
 
     uint32_t error = xboxkrnl::xeRtlNtStatusToDosError(result);
     XThread::SetLastError(error);
+    REXKRNL_WARN("NetDll_socket({}, {}, {}) failed: status {:08X} -> error {}", uint32_t(af), uint32_t(type),
+                 uint32_t(protocol), uint32_t(result), error);
     return -1;
   }
 
+  REXKRNL_INFO("NetDll_socket({}, {}, {}) -> handle {:08X}", uint32_t(af), uint32_t(type), uint32_t(protocol),
+               uint32_t(socket->handle()));
   return socket->handle();
 }
 
@@ -843,6 +847,8 @@ u32 NetDll_bind_entry(u32 caller, u32 socket_handle, ppc_ptr_t<XSOCKADDR_IN> nam
 
   N_XSOCKADDR_IN native_name(name);
   X_STATUS status = socket->Bind(&native_name, namelen);
+  REXKRNL_INFO("NetDll_bind(handle {:08X}, port {}) -> status {:08X}", socket_handle, uint16_t(native_name.sin_port),
+               uint32_t(status));
   if (XFAILED(status)) {
     XThread::SetLastError(xboxkrnl::xeRtlNtStatusToDosError(status));
     return -1;

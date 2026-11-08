@@ -24,8 +24,7 @@
 #define REX_FATAL(fmt, ...)                                     \
   do {                                                          \
     REXLOG_CRITICAL("[FATAL] " fmt __VA_OPT__(, ) __VA_ARGS__); \
-    if (auto _l = ::rex::GetLogger())                           \
-      _l->flush();                                              \
+    ::rex::FlushLogging();                                      \
     std::abort();                                               \
   } while (0)
 
@@ -33,8 +32,7 @@
 #define REX_FATAL_CAT(cat, fmt, ...)                                     \
   do {                                                                   \
     REXLOG_CAT_CRITICAL(cat, "[FATAL] " fmt __VA_OPT__(, ) __VA_ARGS__); \
-    if (auto* _l = ::rex::GetLoggerRaw(cat))                             \
-      _l->flush();                                                       \
+    ::rex::FlushLogging();                                               \
     std::abort();                                                        \
   } while (0)
 
@@ -42,8 +40,7 @@
 #define REX_FATAL_FN(fmt, ...)                                                    \
   do {                                                                            \
     REXLOG_CRITICAL("[FATAL] {}: " fmt, __FUNCTION__ __VA_OPT__(, ) __VA_ARGS__); \
-    if (auto _l = ::rex::GetLogger())                                             \
-      _l->flush();                                                                \
+    ::rex::FlushLogging();                                                        \
     std::abort();                                                                 \
   } while (0)
 
@@ -53,8 +50,7 @@
     if (!(cond)) {                                                  \
       REXLOG_CRITICAL("[FATAL] {}: check failed: " #cond " - " fmt, \
                       __FUNCTION__ __VA_OPT__(, ) __VA_ARGS__);     \
-      if (auto _l = ::rex::GetLogger())                             \
-        _l->flush();                                                \
+      ::rex::FlushLogging();                                        \
       std::abort();                                                 \
     }                                                               \
   } while (0)

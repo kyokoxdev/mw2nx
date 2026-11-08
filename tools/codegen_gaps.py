@@ -157,6 +157,22 @@ def native_functions(path):
     return found
 
 
+def declared_sizes(path):
+    """{start: size} from the [functions] section of an overrides.toml. A declared size is the function's end even when
+    the generated body doesn't mention its last bytes (jump-table cases), so that tail is not reported as a gap."""
+    found, section = {}, None
+    if os.path.exists(path):
+        for line in open(path, encoding="utf-8"):
+            line = line.split("#", 1)[0].strip()
+            if line.startswith("["):
+                section = line
+            elif section == "[functions]":
+                m = re.match(r'"(0x[0-9A-Fa-f]+)"\s*=\s*\{.*\bsize\s*=\s*(0x[0-9A-Fa-f]+|\d+)', line)
+                if m:
+                    found[int(m.group(1), 16)] = int(m.group(2), 0)
+    return found
+
+
 def main():
     ap = argparse.ArgumentParser()
     global GEN, IMAGE, OUT_TOML, OUT_REPORT, TEXT, IMAGE_RANGE, PREFIX, data
@@ -180,6 +196,9 @@ def main():
     native = native_functions(a.overrides)
 
     ends, mismatches = measure()
+    for start, size in declared_sizes(a.overrides).items():
+        if start in ends:
+            ends[start] = max(ends[start], start + size)
     starts = sorted(ends)
     toml, report = [], []
     counts = defaultdict(int)

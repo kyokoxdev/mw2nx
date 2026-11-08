@@ -995,6 +995,8 @@ X_STATUS XSocket::Initialize(AddressFamily af, Type type, Protocol proto) {
 
   native_handle_ = socket(af, type, proto);
   if (native_handle_ == -1) {
+    REXSYS_WARN("XSocket::Initialize: socket({}, {}, {}) failed: errno {} ({})", uint32_t(af), uint32_t(type),
+                uint32_t(proto), errno, std::strerror(errno));
     return X_STATUS_UNSUCCESSFUL;
   }
 
@@ -1057,6 +1059,8 @@ X_STATUS XSocket::SetOption(uint32_t level, uint32_t optname, void* optval_ptr, 
 #endif
   int ret = setsockopt(native_handle_, native_level, native_optname, (char*)optval_ptr, optlen);
   if (ret < 0) {
+    REXSYS_WARN("XSocket::SetOption: level {:X} option {:X} length {} failed: errno {} ({})", level, optname, optlen,
+                errno, std::strerror(errno));
     // TODO: WSAGetLastError()
     return X_STATUS_UNSUCCESSFUL;
   }
@@ -1075,6 +1079,7 @@ X_STATUS XSocket::IOControl(uint32_t cmd, uint8_t* arg_ptr) {
 #endif
   int ret = rex::net::socket_ioctl(native_handle_, cmd, arg_ptr);
   if (ret < 0) {
+    REXSYS_WARN("XSocket::IOControl: cmd {:08X} failed: errno {} ({})", cmd, errno, std::strerror(errno));
     // TODO: Get last error
     return X_STATUS_UNSUCCESSFUL;
   }

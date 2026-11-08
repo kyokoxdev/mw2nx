@@ -1,5 +1,7 @@
 #pragma once
 
+#include <unordered_set>
+
 #include "shader.h"
 #include "shader_code.h"
 
@@ -30,6 +32,9 @@ struct ShaderRecompiler : StringBuffer
     std::unordered_map<uint32_t, std::string> interpolators;
     std::unordered_map<uint32_t, const ConstantInfo*> float4Constants;
     std::unordered_map<uint32_t, const char*> boolConstants;
+    std::string booleanTest(uint32_t address) const;
+    std::string rawConstant(uint32_t reg, bool relative, bool addressRegister) const;
+    std::unordered_set<uint32_t> literalConstants;
     std::unordered_map<uint32_t, const char*> samplers;
     std::unordered_map<uint32_t, uint32_t> ifEndLabels;
     uint32_t specConstantsMask = 0;

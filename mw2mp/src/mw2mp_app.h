@@ -7,7 +7,17 @@
 
 #include <rex/filesystem.h>
 #include <rex/platform.h>
+#include <rex/logging.h>
 #include <rex/rex_app.h>
+
+#include "native/mw2mp_native_system.h"
+#include "native/render/mw2mp_native_precompile.h"
+
+#if REX_PLATFORM_SWITCH
+// libnx's (switch.h's typedefs collide with rex): starts the bsd service that BSD sockets need on Horizon.
+struct SocketInitConfig;
+extern "C" uint32_t socketInitialize(const SocketInitConfig* config);
+#endif
 
 class Mw2mpApp : public rex::ReXApp {
  public:
@@ -19,6 +29,28 @@ class Mw2mpApp : public rex::ReXApp {
 
   // The SDK loads game:\default.xex (the campaign); multiplayer is default_mp.xex.
   void OnLoadXexImage(std::string& xex_image) override { xex_image = "game:\\default_mp.xex"; }
+
+  // The emulated Xenos GPU unless the toml or command line names another (the cvar defaults to none: black screen).
+  // mw2mp_renderer = native/skeleton: the port's own graphics system (native/), and ReXApp loads no plugin.
+  void OnPreSetup(rex::RuntimeConfig& config) override {
+    if (mw2mp::native::Active()) {
+      config.graphics = mw2mp::native::CreateGraphicsSystem();
+    } else if (config.gpu_plugin.empty()) {
+      config.gpu_plugin = "xenos";
+    }
+#if REX_PLATFORM_SWITCH
+    // The runtime's NetDll_socket uses BSD sockets and nothing in it starts the service: without this every socket()
+    // fails with ENOENT and MW2 stops at init ("WARNING: Couldn't allocate IP port"), even offline.
+    if (const uint32_t rc = socketInitialize(nullptr); rc != 0) {
+      REXLOG_ERROR("[switch] socketInitialize failed: {:#x}", rc);
+    }
+#endif
+  }
+
+  // The native renderer compiles the pipelines earlier runs used before the game starts (mw2mp_native_precompile.h).
+  bool OnHoldModuleLaunch(std::function<void()> start) override {
+    return mw2mp::native::precompile::Hold(std::move(start), imgui_drawer());
+  }
 
   // Folders next to the NRO (hbmenu passes no command line):
   //   sdmc:/switch/mw2mp/mw2mp.nro
