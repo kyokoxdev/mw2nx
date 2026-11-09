@@ -75,8 +75,15 @@ inline bool CopyApprox(uint32_t format) {
 
 // The storage format of a color render target: formats that only differ in blending precision
 // (2_10_10_10_AS_10_10_10_10 -> 2_10_10_10, ...) share their EDRAM storage, so they must share one image.
+// mw2nx: 8_8_8_8_GAMMA too: EDRAM holds the gamma-encoded bytes (the pixel shader encodes them,
+// SPEC_CONSTANT_GAMMA_OUTPUT), and MW2 draws its effects over the scene at the same base as plain 8_8_8_8. Two images
+// lost the whole opaque scene (black silhouettes under the effects, run 023).
 inline uint32_t Storage(uint32_t format) {
-  return uint32_t(xenos::GetStorageColorFormat(xenos::ColorRenderTargetFormat(format)));
+  using F = xenos::ColorRenderTargetFormat;
+  if (F(format) == F::k_8_8_8_8_GAMMA) {
+    return uint32_t(F::k_8_8_8_8);
+  }
+  return uint32_t(xenos::GetStorageColorFormat(F(format)));
 }
 
 // log2 of the bytes per texel of a resolve destination, for its tiled address.

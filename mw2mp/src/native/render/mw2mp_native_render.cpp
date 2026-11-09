@@ -2753,12 +2753,25 @@ class NativeRenderSystem final : public rex::system::IGraphicsSystem {
     static const bool direct_active = REXCVAR_GET(mw2mp_native_memexport_fast);
     static const bool verify = REXCVAR_GET(mw2mp_native_memexport_verify);
     const uint64_t hash = XXH3_64bits(vs_microcode_.data(), vs_microcode_.size() * sizeof(uint32_t));
-    const uint32_t copy = !direct_active                     ? 0
-                           : hash == kMemexportCopy64Bytes  ? 1
-                           : hash == kMemexportCopy128Bytes ? 2
-                                                               : 0;
+    uint32_t copy = !direct_active                     ? 0
+                     : hash == kMemexportCopy64Bytes  ? 1
+                     : hash == kMemexportCopy128Bytes ? 2
+                                                         : 0;
+    // mw2nx: MW2's copy shaders have other microcode than BO2's (same layout in the trace: c255 = (0, 1, 4, 8), four
+    // 16_16_16_16 elements per group), so every one went through the interpreter (0.32 us per element; a 22,528-vertex
+    // streaming draw held the ring ~57 ms, run 026). Any other memexport VS is tried as the 64-byte and then the
+    // 128-byte copy; it takes the direct path once kMemexportProbeDraws draws in a row wrote what the interpreter
+    // writes (the interpreter runs after the direct copy during the probe, so its bytes are what stays).
+    MemexportProbe* probe = nullptr;
+    if (direct_active && !copy) {
+      probe = &memexport_probes_.try_emplace(hash).first->second;
+      copy = probe->kind;
+      if (probe->passes >= kMemexportProbeDraws) {
+        probe = nullptr;
+      }
+    }
     const auto start = std::chrono::steady_clock::now();
-    if (!copy || verify) {
+    if (!copy || verify || probe) {
       if (!interpreter_mw2mp_) {
         registers_interpreter_mw2mp_ = std::make_unique<g::RegisterFile>();
         interpreter_mw2mp_ = std::make_unique<g::ShaderInterpreter>(*registers_interpreter_mw2mp_, *memory_);
@@ -2825,8 +2838,17 @@ class NativeRenderSystem final : public rex::system::IGraphicsSystem {
         CopyMemexportMw2mp(copy == 2, index, sink);
       }
       ++memexport_direct_;
-      if (verify) {
-        VerifyMemexportMw2mp(sink, interpret);
+      if (verify || probe) {
+        const bool same = VerifyMemexportMw2mp(sink, interpret);
+        if (probe && same && ++probe->passes == kMemexportProbeDraws) {
+          REXLOG_INFO("[native] memexport VS {:016X}: direct {}-byte copy, equal to the interpreter in {} draws", hash,
+                      copy == 2 ? 128 : 64, kMemexportProbeDraws);
+        } else if (probe && !same) {
+          REXLOG_INFO("[native] memexport VS {:016X}: not the {}-byte copy{}", hash, copy == 2 ? 128 : 64,
+                      copy == 2 ? ", stays on the interpreter" : ", trying the 128-byte one");
+          probe->kind = copy == 1 ? 2 : 0;
+          probe->passes = 0;
+        }
       }
     }
     ++memexport_done_;
@@ -2860,6 +2882,12 @@ class NativeRenderSystem final : public rex::system::IGraphicsSystem {
   std::unique_ptr<rex::graphics::ShaderInterpreter> interpreter_mw2mp_;
   uint64_t memexport_done_ = 0;
   uint64_t memexport_direct_ = 0;
+  struct MemexportProbe {
+    uint32_t kind = 1;    // candidate: 1 = 64-byte copy, 2 = 128-byte copy, 0 = interpreter only
+    uint32_t passes = 0;  // draws in a row equal to the interpreter
+  };
+  static constexpr uint32_t kMemexportProbeDraws = 16;
+  std::unordered_map<uint64_t, MemexportProbe> memexport_probes_;
   uint64_t memexport_verified_ = 0;
   uint64_t memexport_different_ = 0;
 
@@ -2945,7 +2973,7 @@ class NativeRenderSystem final : public rex::system::IGraphicsSystem {
 
   // mw2mp_native_memexport_verify: runs the interpreter over the same draw and compares what both wrote.
   template <typename Interpret>
-  void VerifyMemexportMw2mp(const mw2mp::memexport::Sink& direct, Interpret&& interpret) {
+  bool VerifyMemexportMw2mp(const mw2mp::memexport::Sink& direct, Interpret&& interpret) {
     const uint8_t* physical = memory_->TranslatePhysical(0);
     std::vector<uint8_t> copy;
     if (direct.dir_min < direct.dir_max) {
@@ -2968,6 +2996,7 @@ class NativeRenderSystem final : public rex::system::IGraphicsSystem {
       REXLOG_INFO("[native] BO2 direct memexport: {} draws compared with the interpreter, {} with differences",
                   memexport_verified_, memexport_different_);
     }
+    return same_range && same_bytes;
   }
   uint64_t memexport_elements_ = 0;
   uint64_t memexport_ns_ = 0;
@@ -3133,7 +3162,7 @@ class NativeRenderSystem final : public rex::system::IGraphicsSystem {
         p.depth = p.stencil = false;
         if (!p.color) continue;
       }
-      const uint32_t key = part == 0 ? (info_z & 0xFFF) : (0x1000 | (info_color & 0xFFF));
+      const uint32_t key = SurfaceKeyMw2mp(part == 0 ? (info_z & 0xFFF) : (0x1000 | (info_color & 0xFFF)), surface);
       p.rb_surface_info = surface;
       const auto it = surfaces_mw2mp_.find(key);
       if (it != surfaces_mw2mp_.end() && (it->second & 0x33FFF) != (surface & 0x33FFF)) {
@@ -3187,6 +3216,16 @@ class NativeRenderSystem final : public rex::system::IGraphicsSystem {
     b.rb_surface_info = real;
   }
 
+  // mw2nx: surfaces_mw2mp_ is keyed by base and samples per row. MW2 draws two depth surfaces at base 0 (the 1040-wide
+  // sun shadow map and the 560-wide spot atlas), so "last drawn at this base" was the other one when each clear came
+  // through its 4X alias: no match, the clear went to an image nobody draws, and both shadow maps kept every earlier
+  // frame's casters at their texels (the whole shadow moving with the player, run 027). A real surface and its alias
+  // share samples per row, so this key finds the right one whatever else shares the base.
+  static uint32_t SurfaceKeyMw2mp(uint32_t kind_base, uint32_t sup) {
+    const uint32_t in_x = ((sup >> 16) & 0x3) >= 2 ? 2u : 1u;
+    return (((sup & 0x3FFF) * in_x) << 13) | kind_base;
+  }
+
   // The surface (RB_SURFACE_INFO) each EDRAM base was last drawn with, for ClearD3D. Depth when
   // the draw tests or writes depth or stencil; color for RT0 when it writes color.
   void AnnotateSurfaceMw2mp() {
@@ -3207,10 +3246,10 @@ class NativeRenderSystem final : public rex::system::IGraphicsSystem {
     annotated_control_z_ = control_z;
     annotated_writes_color_ = color;
     if (control_z) {
-      surfaces_mw2mp_[info_z & 0xFFF] = surface;
+      surfaces_mw2mp_[SurfaceKeyMw2mp(info_z & 0xFFF, surface)] = surface;
     }
     if (color) {
-      surfaces_mw2mp_[0x1000 | (info_color & 0xFFF)] = surface;
+      surfaces_mw2mp_[SurfaceKeyMw2mp(0x1000 | (info_color & 0xFFF), surface)] = surface;
     }
   }
   std::unordered_map<uint32_t, uint32_t> surfaces_mw2mp_;
@@ -3268,7 +3307,8 @@ class NativeRenderSystem final : public rex::system::IGraphicsSystem {
     // are (SQ_VS_CONST / SQ_PS_CONST: base and size).
     values += fmt::format(" SQ_VS_CONST={:08X} SQ_PS_CONST={:08X}", DvarRecord(rex::graphics::XE_GPU_REG_SQ_VS_CONST),
                            DvarRecord(rex::graphics::XE_GPU_REG_SQ_PS_CONST));
-    for (uint32_t k : {0u, 1u, 2u, 3u, 4u, 5u, 6u, 7u, 8u, 9u, 10u, 11u, 56u, 57u, 58u, 59u}) {
+    // mw2nx: MW2's post shaders reach c35 (n1128 colorTintBase), so c0-c39 in full.
+    for (uint32_t k = 0; k < 60; k = k == 39 ? 56 : k + 1) {
       values += fmt::format(" c{}=(", k);
       for (uint32_t c = 0; c < 4; ++c) {
         float f;
@@ -3281,7 +3321,7 @@ class NativeRenderSystem final : public rex::system::IGraphicsSystem {
     REXLOG_INFO("[native] PS n{} constants (Swap {}):{}", ps_draw_->number, swaps_.load(), values);
     // And the vertex shader's (in BO2: view-projection c0-c3, world c4-c7, fog c64-c68).
     std::string vs_values;
-    for (uint32_t k : {0u, 1u, 2u, 3u, 4u, 5u, 6u, 7u, 64u, 65u, 66u, 67u, 68u}) {
+    for (uint32_t k : {0u, 1u, 2u, 3u, 4u, 5u, 6u, 7u, 21u, 64u, 65u, 66u, 67u, 68u}) {
       vs_values += fmt::format(" c{}=(", k);
       for (uint32_t c = 0; c < 4; ++c) {
         float f;
@@ -3459,7 +3499,7 @@ class NativeRenderSystem final : public rex::system::IGraphicsSystem {
     // 440-wide image, and the blur covered the frame with black (a RenderDoc capture showed the copy reading an image
     // that was never drawn into the 448x360 texture the blur samples).
     if (const uint32_t source = r.rb_copy_control & 0x7; source < 4) {
-      const auto it = surfaces_mw2mp_.find(0x1000 | (r.rb_color_info[source] & 0xFFF));
+      const auto it = surfaces_mw2mp_.find(SurfaceKeyMw2mp(0x1000 | (r.rb_color_info[source] & 0xFFF), r.rb_surface_info));
       if (it != surfaces_mw2mp_.end() && (it->second & 0x33FFF) != (r.rb_surface_info & 0x33FFF) &&
           SameSamplesPerRow(r.rb_surface_info, it->second)) {
         r.surface_real = it->second;
@@ -3922,6 +3962,8 @@ class NativeRenderSystem final : public rex::system::IGraphicsSystem {
   void TraceSwap() {
     MenuBlurSwap();
     SceneReuseSwap();
+    // mw2nx: front end only (FrontEnd() is false in MW2MP). Skipped in matches (run 026), surfaces lost their
+    // textures: not every MW2 color pass writes its own depth.
     prepass_skip_frame_ = REXCVAR_GET(mw2mp_native_front_end_no_prepass) && mw2mp::preset::FrontEnd();
     if (Clock::now() - prepass_report_ >= std::chrono::seconds(10)) {
       prepass_report_ = Clock::now();

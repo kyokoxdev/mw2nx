@@ -100,7 +100,11 @@ void NoteFrame() {}
 
 namespace mw2mp::preset {
 bool ClientInGame() { return false; }
-bool FrontEnd() { return true; }
+// mw2nx: false. FrontEnd() arms BO2's campaign front-end shortcuts (mw2mp_native_front_end_no_prepass and _reuse);
+// answered true, they ran in matches: the prepass skip dropped every colour-masked depth-writing draw, MW2's sun
+// shadow maps included (no shadows, surfaces lit flat; ~8,000 draws per 10 s, run 024), and the reuse compared scene
+// constants on every draw. MW2MP's menus have no 3D scene to save.
+bool FrontEnd() { return false; }
 uint32_t MipsMinus() { return 0; }
 void NoteFirstVisitCompile() {}
 bool OnScreenNote(uint32_t (&)[4]) { return false; }

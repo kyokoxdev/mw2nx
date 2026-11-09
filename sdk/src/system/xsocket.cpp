@@ -46,7 +46,10 @@
 #include <unistd.h>
 #endif
 #if REX_PLATFORM_SWITCH
+#include <poll.h>
 #include <switch.h>
+#include <condition_variable>
+#include <thread>
 #endif
 
 REXCVAR_DEFINE_INT32(net_system_port_offset, 30000, "Kernel",
@@ -63,6 +66,13 @@ REXCVAR_DEFINE_INT32(switch_net_idle_poll_us, 1000, "Kernel",
                      "socket within this many microseconds answers EWOULDBLOCK again without asking the socket "
                      "service. 0 = always asks")
     .range(0, 100000);
+REXCVAR_DEFINE_INT32(switch_net_watch_ms, 5, "Kernel",
+                     "Switch: a socket whose recv/recvfrom found nothing answers EWOULDBLOCK without asking the socket "
+                     "service until a watcher thread, waiting in poll() on such sockets, sees data arrive; this is "
+                     "poll()'s timeout (a socket that just went idle joins the watch within it). 0 = off: the idle "
+                     "window (switch_net_idle_poll_us) alone")
+    .range(0, 100)
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 #endif
 
 namespace rex::system {
@@ -107,6 +117,86 @@ std::atomic<uint64_t> g_ns_asking{0};    // time inside the service's calls
 std::atomic<uint32_t> g_len_max{0};      // the largest buffer length asked for
 std::atomic<int64_t> g_report_ns{0};
 
+/*
+ * The watch (switch_net_watch_ms). MW2's server thread polls its socket ~100 times a second, more than 1 ms apart, so
+ * the idle window answered ~4 % of the calls; the rest found nothing in 2-5 ms each inside the socket service (console
+ * run 030: 3-4 s of every 10 s of that thread, which then ran its frames late: the match felt like 300 ms of ping).
+ * A call that finds nothing now sets the socket's idle_until to kWatched, which InIdleWindow answers as idle with no
+ * service call, and puts the socket in the watch: one thread waits in poll() on every watched socket and sets
+ * idle_until back to 0 (ask the service) when data arrives or poll reports an error. A socket that goes idle while
+ * poll() is waiting joins at its next round, so a datagram is read at most switch_net_watch_ms late.
+ */
+constexpr int64_t kWatched = INT64_MAX;
+struct Watched {
+  int fd;
+  std::atomic<int64_t>* idle_until;
+};
+std::mutex g_watch_mutex;
+std::condition_variable g_watch_cv;
+std::vector<Watched> g_watched;   // under g_watch_mutex
+std::vector<int> g_polling;       // the fds of the poll() under way, under g_watch_mutex
+uint64_t g_watch_rounds = 0;      // poll() rounds finished, under g_watch_mutex
+bool g_watch_thread = false;      // started, under g_watch_mutex
+
+void WatchLoop(int timeout_ms) {
+  svcSetThreadPriority(CUR_THREAD_HANDLE, 0x2C);  // above the guest: a datagram does not wait for a core
+  std::vector<pollfd> fds;
+  std::vector<std::atomic<int64_t>*> flags;
+  std::unique_lock<std::mutex> lock(g_watch_mutex);
+  for (;;) {
+    fds.clear();
+    flags.clear();
+    g_polling.clear();
+    for (const Watched& w : g_watched) {
+      if (w.idle_until->load(std::memory_order_relaxed) == kWatched) {
+        fds.push_back(pollfd{w.fd, POLLIN, 0});
+        flags.push_back(w.idle_until);
+        g_polling.push_back(w.fd);
+      }
+    }
+    if (fds.empty()) {
+      g_watch_cv.wait_for(lock, std::chrono::milliseconds(timeout_ms));
+      continue;
+    }
+    lock.unlock();
+    const int n = poll(fds.data(), nfds_t(fds.size()), timeout_ms);
+    lock.lock();
+    for (size_t i = 0; i < fds.size(); ++i) {
+      if (n < 0 || fds[i].revents) {
+        int64_t expected = kWatched;  // a FIONBIO since may already have set it to 0
+        flags[i]->compare_exchange_strong(expected, 0, std::memory_order_relaxed);
+      }
+    }
+    g_polling.clear();
+    ++g_watch_rounds;
+    g_watch_cv.notify_all();
+  }
+}
+
+// A socket whose call found nothing: watched from now on (once per socket).
+void Watch(int fd, std::atomic<int64_t>& idle_until, int timeout_ms) {
+  std::lock_guard<std::mutex> lock(g_watch_mutex);
+  if (std::none_of(g_watched.begin(), g_watched.end(), [fd](const Watched& w) { return w.fd == fd; })) {
+    g_watched.push_back(Watched{fd, &idle_until});
+  }
+  if (!g_watch_thread) {
+    g_watch_thread = true;
+    std::thread([timeout_ms] { WatchLoop(timeout_ms); }).detach();
+  }
+  g_watch_cv.notify_all();
+}
+
+// Before the socket is closed: out of the watch, and not in a poll() still under way.
+void Unwatch(int fd) {
+  std::unique_lock<std::mutex> lock(g_watch_mutex);
+  g_watched.erase(std::remove_if(g_watched.begin(), g_watched.end(), [fd](const Watched& w) { return w.fd == fd; }),
+                  g_watched.end());
+  const uint64_t round = g_watch_rounds;
+  g_watch_cv.wait(lock, [fd, round] {
+    return g_watch_rounds != round || std::find(g_polling.begin(), g_polling.end(), fd) == g_polling.end();
+  });
+}
+
 bool InIdleWindow(const std::atomic<int64_t>& idle_until) {
   g_receives.fetch_add(1, std::memory_order_relaxed);
   const int64_t until = idle_until.load(std::memory_order_relaxed);
@@ -114,7 +204,7 @@ bool InIdleWindow(const std::atomic<int64_t>& idle_until) {
 }
 
 // After a call to the service: the counters, and the window if it found nothing.
-void AfterAsking(std::atomic<int64_t>& idle_until, int ret, int error, int64_t since, uint32_t len) {
+void AfterAsking(std::atomic<int64_t>& idle_until, int fd, int ret, int error, int64_t since, uint32_t len) {
   const int64_t now = NowNs();
   uint32_t len_max = g_len_max.load(std::memory_order_relaxed);
   while (len > len_max && !g_len_max.compare_exchange_weak(len_max, len, std::memory_order_relaxed)) {
@@ -125,8 +215,14 @@ void AfterAsking(std::atomic<int64_t>& idle_until, int ret, int error, int64_t s
   if (none) {
     g_found_none.fetch_add(1, std::memory_order_relaxed);
   }
+  static const int watch_ms = REXCVAR_GET(switch_net_watch_ms);
   const int64_t window = int64_t(REXCVAR_GET(switch_net_idle_poll_us)) * 1000;
-  idle_until.store(none && window > 0 ? now + window : 0, std::memory_order_relaxed);
+  if (none && watch_ms > 0) {
+    idle_until.store(kWatched, std::memory_order_relaxed);
+    Watch(fd, idle_until, watch_ms);
+  } else {
+    idle_until.store(none && window > 0 ? now + window : 0, std::memory_order_relaxed);
+  }
   int64_t last = g_report_ns.load(std::memory_order_relaxed);
   if (last == 0) {
     g_report_ns.compare_exchange_strong(last, now, std::memory_order_relaxed);
@@ -1015,6 +1111,10 @@ X_STATUS XSocket::Close() {
     system_link::UnregisterPortSocket(native_handle_);
     port_registered_ = false;
   }
+#if REX_PLATFORM_SWITCH
+  Unwatch(int(native_handle_));  // the watcher's poll() must not see the number after it is closed (and reused)
+  idle_until_ns_.store(0, std::memory_order_relaxed);
+#endif
   int ret = rex::net::socket_close(native_handle_);
   native_handle_ = uint64_t(-1);
   if (ret != 0) {
@@ -1187,7 +1287,7 @@ int XSocket::Recv(uint8_t* buf, uint32_t buf_len, uint32_t flags) {
   const int64_t since = NowNs();
   int ret = recv(native_handle_, reinterpret_cast<char*>(host), buf_len, flags);
   const int error = errno;
-  AfterAsking(idle_until_ns_, ret, error, since, buf_len);
+  AfterAsking(idle_until_ns_, int(native_handle_), ret, error, since, buf_len);
   if (ret > 0) {
     std::memcpy(buf, host, ret);
   }
@@ -1247,7 +1347,7 @@ int XSocket::RecvFrom(uint8_t* buf, uint32_t buf_len, uint32_t flags, N_XSOCKADD
       const int64_t since = NowNs();
       ret = recvfrom(native_handle_, reinterpret_cast<char*>(host), buf_len, flags, (sockaddr*)&nfrom, &nfromlen);
       error = errno;
-      AfterAsking(idle_until_ns_, ret, error, since, buf_len);
+      AfterAsking(idle_until_ns_, int(native_handle_), ret, error, since, buf_len);
     }
     const uint8_t* received = host;
 #else

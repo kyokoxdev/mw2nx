@@ -88,4 +88,44 @@ MW2 lives in `mw2mp/` (multiplayer, `default_mp.xex`) and later `mw2sp/`.
   - `[rexcrt]`: MW2MP's CRT memcpy `0x8241A9F0` and memset `0x8241A890` run as native code (`mw2mp/src/mw2mp_crt.cpp`,
     1,050 call sites); they stamp pages, but the write-stamp shortcuts stay off until MW2's other vertex/texture
     writers are known.
-  - Open: not run on a console; the 50 s freeze (Xenos run) needs stack samples; D3D-level hooks (perf).
+  - On hardware (runs 023-026, `mw2mp_renderer = native`): menu and matches draw. Fixes from those runs:
+    - `k_8_8_8_8_GAMMA` targets: the pixel shader encodes Xenos's piecewise gamma (`SPEC_CONSTANT_GAMMA_OUTPUT`,
+      `xenosLinearToGamma` in the translator) and the target shares plain 8_8_8_8 storage, so effects drawn over the
+      scene at the same EDRAM base see it (black scene / silhouettes, run 023). Color resolves are created
+      `MUTABLE_FORMAT` so they can be sampled through their sRGB twin.
+    - `FrontEnd()` answers false: BO2's campaign front-end shortcuts dropped MW2's sun shadow maps in matches (run 024).
+    - `RequestBootClocks()` on `OnPostInitLogging`: GPU 460 MHz handheld (`mw2mp_switch_gpu_mhz`), was 307.2.
+    - Build: plain guest loads/stores by default (`MW2_GUEST_MEMORY_PLAIN=0` for volatile); `MW2_LTO=1` opt-in (link
+      needs more RAM than a 9 GB WSL).
+  - Run 026 perf (menu, ~140 draws): GPU ~7 ms a frame, but frames of 60-180 ms; the ring thread is the cost. BO2's
+    CPU memexport path ran 112 M elements in 35.5 s since boot; two 1280x720 resolves a frame nobody reads.
+    Matches ran 22-42 fps (swaps per 20 s), lowest during texture streaming.
+    - Memexport: MW2's streaming copy shaders hash differently from BO2's, so all ran on the interpreter (0.32 us per
+      element). Unknown memexport VS are now tried as BO2's direct 64-/128-byte copy and adopted after 16 draws equal
+      to the interpreter (log: `memexport VS ...: direct N-byte copy`). Not yet run.
+  - Run 027: shadows slid with the player. D3D clears the 1024x2048 sun map as `[960,1024)` on the 1040-wide 1X
+    surface plus `[0,480)` on a 520-wide 4X alias (spot atlas: 560 1X + 280 4X), all at depth base 0. `ClearD3D`'s
+    alias lookup kept one surface per base, so each map's alias met the other map's surface, failed the samples-per-row
+    test and cleared nothing: old casters stayed at their shadow texels. Now keyed by base and samples per row.
+    Open: hitches when turning and the movement desync/replay (listen server starved?) need a `rex_profile.log` with
+    stacks from the current build (the one in `debug/rex/` is older).
+  - Run 028 (mp_rust ~30 fps, mp_terminal 18-26 fps): with stacks, the game threads (Main, Worker0-2, Backend,
+    Server) sat 60-84% of their samples in `mutexLock` on the codegen's global lock: `mfmsr`/`mtmsrd r13` around
+    every lwarx/stwcx. atomic (330 sites, all pure CAS loops) became `REX_ENTER/LEAVE/CHECK_GLOBAL_LOCK`, one
+    recursive mutex. bo2 hit the same and set `skip_msr = true`; now in `mw2mp/overrides.toml`. Not yet run.
+    mp_terminal's first visit also compiled ~386 new pipelines over ~85 s (compile thread 40-64% CPU on 3 saturated
+    cores); they are saved (prewarm list 511 -> 897), so later visits start warm.
+  - Run 029 (`skip_msr`): ~50 fps (was ~30); the ring is now the busiest thread (75-100 %). The remaining hitches
+    (~250 ms frames, felt as 300+ ms ping) had the ring in `ShaderLibrary::ReadAt` -> `fsdev_read`: each shader met for
+    the first time in a session had its SPIR-V read from the SD card on the ring, queued behind the game's 256 KB
+    image reads (~10 ms each). Now read on a "BO2 SPIR-V reads" thread (`SpirvOf`/`SpirvLoop` in
+    `mw2mp_native_draws.cpp`) and the draw is skipped until it arrives, as for a compiling pipeline (log:
+    `C6 SPIR-V read off the ring`). Run 030: 2-5 ms per read, no ring stalls; hitches down to ~80-100 ms.
+  - Run 030, desync still felt: the Server thread spent 3-4 s of every 10 s inside `recvfrom` on its idle socket
+    (`[net]`: ~100 calls/s, all empty, 2-5 ms each in the socket service; 0.5 ms at boot). BO2's 1 ms idle window
+    answered ~4 % (MW2 polls >1 ms apart). New watch in `sdk/src/system/xsocket.cpp` (`switch_net_watch_ms`, 5): an
+    empty socket answers EWOULDBLOCK locally until a watcher thread blocked in `poll()` sees data. The `[net]` line's
+    "answered from the idle window" should now be nearly every call. Not yet run. If the desync stays, BO2's other
+    finding applies: its Server thread needed ~46 % of a core and fell behind on three busy cores (core 3 forwarder,
+    `bo2zm_core3_threads`).
+  - Open: the 50 s freeze (Xenos run) needs stack samples; D3D-level hooks (perf).

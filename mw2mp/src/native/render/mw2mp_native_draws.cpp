@@ -1603,6 +1603,10 @@ constexpr uint32_t kSpecZEarly = uint32_t(1) << 20;
 // mw2mp_native_shadow_min. SPEC_CONSTANT_SHADOW_MIN from shader_common.h: tfetch2DShadowMin takes the
 // minimum of the shadow map and its pair, which goes in the 3D index word of that register.
 constexpr uint32_t kSpecShadowMin = uint32_t(1) << 23;
+// mw2nx: SPEC_CONSTANT_GAMMA_OUTPUT. Color target 0 is k_8_8_8_8_GAMMA (MW2's scene): the pixel shader stores the
+// color through Xenos's piecewise gamma, as the EDRAM would; without it the scene is linear and the final composite's
+// contrast curve (x1.8 - 0.35) crushes everything but the sky to black.
+constexpr uint32_t kSpecGammaOutput = uint32_t(1) << 21;
 constexpr uint64_t kHashComposite = 0x19C0C358044A29BFull;  // a final composite; no BO2 shader has this hash
 // mw2mp_visual_treatment. The final composite (kHashComposite) tints each channel with a polynomial
 // curve (Coeffs0..3 = c6..c9, evaluated at MISCMAP1.w), mixes in a desaturated part with its x component and adds a
@@ -2335,6 +2339,33 @@ constexpr uint16_t kSwizzleRRRR = 0;
 constexpr uint16_t kSwizzleRGGG = (1 << 3) | (1 << 6) | (1 << 9);
 constexpr uint16_t kSwizzleRGBA = (1 << 3) | (2 << 6) | (3 << 9);
 constexpr uint16_t kSwizzleBGRA = 2 | (1 << 3) | (0 << 6) | (3 << 9);
+// mw2nx: on top of a host swizzle (bit 15, which MappingComponents never reads, and part of the view key): the fetch
+// constant asks for gamma on X, Y and Z (TextureSign kGamma). The view is the format's sRGB twin, so the sampler
+// linearizes, as Xenos does. MW2's blur reads its 256x150 chain this way and writes an 8_8_8_8_GAMMA target, which
+// the pixel shader encodes (SPEC_CONSTANT_GAMMA_OUTPUT): without the decode each pass brightened the glow (run 025).
+// ponytail: sRGB's curve for Xenos's piecewise-linear gamma (within ~0.02); a shader-side PWL decode would need the
+// signs per fetch in the shader.
+constexpr uint16_t kSwizzleGamma = 0x8000;
+
+VkFormat FormatSrgb(VkFormat format) {
+  switch (format) {
+    case VK_FORMAT_R8G8B8A8_UNORM:
+      return VK_FORMAT_R8G8B8A8_SRGB;
+    case VK_FORMAT_B8G8R8A8_UNORM:
+      return VK_FORMAT_B8G8R8A8_SRGB;
+    case VK_FORMAT_BC1_RGBA_UNORM_BLOCK:
+      return VK_FORMAT_BC1_RGBA_SRGB_BLOCK;
+    case VK_FORMAT_BC2_UNORM_BLOCK:
+      return VK_FORMAT_BC2_SRGB_BLOCK;
+    case VK_FORMAT_BC3_UNORM_BLOCK:
+      return VK_FORMAT_BC3_SRGB_BLOCK;
+    default:
+      return format;
+  }
+}
+
+// The fetch constant's X, Y and Z signs are all kGamma (3).
+bool FetchGamma(const uint32_t* f) { return ((f[0] >> 2) & 0x3F) == 0x3F; }
 
 struct HostTextureFormat {
   VkFormat format = VK_FORMAT_UNDEFINED;
@@ -4097,6 +4128,10 @@ class VulkanDrawsImpl final : public VulkanDraws {
     uint32_t specialization = input->specialization;
     if (composite_no_blur) {  // the same value that decided the textures
       specialization |= kSpecNoBlur;
+    }
+    if (ps && ((r[gr::XE_GPU_REG_RB_COLOR_INFO] >> 16) & 0xF) ==
+                  uint32_t(xenos::ColorRenderTargetFormat::k_8_8_8_8_GAMMA)) {
+      specialization |= kSpecGammaOutput;
     }
 #ifndef MW2MP_NO_VARIANTS_GLOW
     if (ps && ps->shader && ps->shader->hash == kHashBrightPass) {
@@ -11380,7 +11415,8 @@ class VulkanDrawsImpl final : public VulkanDraws {
     }
     heap = cube ? 2 : volume ? 1 : 0;
     const uint32_t layers = cube ? 6 : 1;
-    if ((f[0] >> 2) & 0xFF) {
+    const uint16_t gamma_host = FetchGamma(f) ? kSwizzleGamma : 0;  // mw2nx: sRGB view (kSwizzleGamma)
+    if (((f[0] >> 2) & 0xFF) && !gamma_host) {
       Warn(31, "signed or gamma textures: read as unsigned");
     }
     const uint32_t swizzle = (f[3] >> 1) & 0xFFF;
@@ -11419,7 +11455,7 @@ class VulkanDrawsImpl final : public VulkanDraws {
         // constant's swizzle (ZYXW for 8888) undoes that swap. Here the copy is image to image and does not
         // swap channels, so the swap goes into the host channels (without this, Mia came out blue).
         slot = SlotView(resolved->image, resolved->format, swizzle,
-                             resolved->swap_rb ? kSwizzleBGRA : kSwizzleRGBA);
+                             uint16_t((resolved->swap_rb ? kSwizzleBGRA : kSwizzleRGBA) | gamma_host));
         valid_until = frame_;  // see the long comment on the depth copy
         return;
       }
@@ -11444,6 +11480,9 @@ class VulkanDrawsImpl final : public VulkanDraws {
     if (!FormatTextureOf(format, tf)) {
       Warn(400 + format, "texture format not supported yet: an empty one is used");
       return;
+    }
+    if (gamma_host) {
+      tf.format = FormatSrgb(tf.format);  // mw2nx: its own cache entry (the key holds the signs), created as sRGB
     }
     // size_2d: 13 + 13 bits; size_3d: 11 + 11 + 10 bits (xenos.h:1222-1233).
     const uint32_t width = volume ? (f[2] & 0x7FF) + 1 : line ? (f[2] & 0xFFFFFF) + 1 : (f[2] & 0x1FFF) + 1;
@@ -13221,7 +13260,7 @@ class VulkanDrawsImpl final : public VulkanDraws {
     info.viewType = heap == 2   ? VK_IMAGE_VIEW_TYPE_CUBE
                     : heap == 1 ? VK_IMAGE_VIEW_TYPE_3D
                                   : VK_IMAGE_VIEW_TYPE_2D;
-    info.format = format;
+    info.format = (swizzle_host & kSwizzleGamma) ? FormatSrgb(format) : format;
     info.components = MappingComponents(swizzle, swizzle_host);
     info.subresourceRange = {IsDepth(format)
                                  ? VkImageAspectFlags(VK_IMAGE_ASPECT_DEPTH_BIT)
@@ -14119,15 +14158,103 @@ class VulkanDrawsImpl final : public VulkanDraws {
     }
   }
 
+  /*
+   * A library shader's SPIR-V for the module functions, read from the pack on the SPIR-V thread (SpirvLoop) and
+   * not on the ring. Run 029: the ring read each shader it met for the first time in the session from the SD card
+   * (Spirv -> ReadAt -> fsdev_read) while the game streamed images in 256 KB reads of ~10 ms; a burst of new effects
+   * stopped it for ~250 ms, and every game thread with it. nullptr while it is being read: module_pending_ is set
+   * and PipelineOf skips the draw, as it does for a pipeline compiling. The words stay in spirv_cache_ until the
+   * PipelineOf that asked for them ends (DropSpirv).
+   */
+  const std::vector<uint32_t>* SpirvOf(const ShaderInput& input) {
+    const mw2mp::shaderlib::Shader* s = input.shader;
+    if (!s->library || !s->spirv_offset || !s->spirv.empty()) {
+      return &s->spirv;  // in memory: nothing to read (as Spirv)
+    }
+    if (const auto it = spirv_cache_.find(s); it != spirv_cache_.end()) {
+      return &it->second;
+    }
+    {
+      std::lock_guard<std::mutex> lock(spirv_mutex_);
+      for (auto& [shader, words] : spirv_read_) {
+        spirv_queued_.erase(shader);
+        spirv_cache_[shader] = std::move(words);
+      }
+      spirv_read_.clear();
+      if (!spirv_cache_.count(s) && spirv_queued_.insert(s).second) {
+        spirv_queue_.push_back(s);
+        if (!spirv_thread_.joinable()) {
+          spirv_thread_ = std::thread([this] { SpirvLoop(); });
+        }
+        spirv_cv_.notify_one();
+      }
+    }
+    if (const auto it = spirv_cache_.find(s); it != spirv_cache_.end()) {
+      return &it->second;
+    }
+    module_pending_ = true;
+    return nullptr;
+  }
+
+  // The words PipelineOf asked for, once its modules exist (a variant asked for later reads them again).
+  void DropSpirv(const DrawRequest& p) {
+    if (spirv_cache_.empty()) {
+      return;
+    }
+    spirv_cache_.erase(p.vs->shader);
+    if (p.ps) {
+      spirv_cache_.erase(p.ps->shader);
+    }
+  }
+
+  void SpirvLoop() {
+    rex::thread::set_current_thread_name("BO2 SPIR-V reads");
+#if REX_PLATFORM_SWITCH
+    RexSwitchSetCurrentThreadPriorityOk(0x2E);  // as the copy thread: above the guest, below the ring
+#endif
+    std::unique_lock<std::mutex> lock(spirv_mutex_);
+    for (;;) {
+      spirv_cv_.wait(lock, [this] { return spirv_stop_ || !spirv_queue_.empty(); });
+      if (spirv_stop_) {
+        return;
+      }
+      const mw2mp::shaderlib::Shader* s = spirv_queue_.front();
+      spirv_queue_.pop_front();
+      lock.unlock();
+      const auto start = std::chrono::steady_clock::now();
+      std::vector<uint32_t> words = mw2mp::shaderlib::Spirv(*s);  // empty if unreadable: the module fails, as before
+      const uint64_t ns = uint64_t(
+          std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count());
+      lock.lock();
+      spirv_read_.emplace_back(s, std::move(words));
+      ++spirv_reads_;
+      ns_spirv_reads_ += ns;
+    }
+  }
+
+  void StopSpirvReads() {
+    {
+      std::lock_guard<std::mutex> lock(spirv_mutex_);
+      spirv_stop_ = true;
+    }
+    spirv_cv_.notify_all();
+    if (spirv_thread_.joinable()) {
+      spirv_thread_.join();  // at most one shader's read
+    }
+  }
+
   VkShaderModule ModuleOf(const ShaderInput& input) {
     if (const auto it = modules_.find(&input); it != modules_.end()) {
       return it->second;
     }
-    const auto& spirv = mw2mp::shaderlib::Spirv(*input.shader);
+    const std::vector<uint32_t>* spirv = SpirvOf(input);
+    if (!spirv) {
+      return VK_NULL_HANDLE;  // being read (module_pending_)
+    }
     VkShaderModuleCreateInfo info{};
     info.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
-    info.codeSize = spirv.size() * sizeof(uint32_t);
-    info.pCode = spirv.data();
+    info.codeSize = spirv->size() * sizeof(uint32_t);
+    info.pCode = spirv->data();
     VkShaderModule shader_module = VK_NULL_HANDLE;
     if (dfn_.vkCreateShaderModule(device_, &info, nullptr, &shader_module) != VK_SUCCESS) {
       shader_module = VK_NULL_HANDLE;
@@ -14142,8 +14269,12 @@ class VulkanDrawsImpl final : public VulkanDraws {
     if (const auto it = modules_only_alpha_.find(&input); it != modules_only_alpha_.end()) {
       return it->second != VK_NULL_HANDLE ? it->second : ModuleOf(input);
     }
+    const std::vector<uint32_t>* spirv = SpirvOf(input);
+    if (!spirv) {
+      return VK_NULL_HANDLE;  // being read (module_pending_)
+    }
     uint32_t removed = 0;
-    const std::vector<uint32_t> pruned = PruneColorWrites(mw2mp::shaderlib::Spirv(*input.shader), removed);
+    const std::vector<uint32_t> pruned = PruneColorWrites(*spirv, removed);
     VkShaderModule shader_module = VK_NULL_HANDLE;
     if (!pruned.empty()) {
       VkShaderModuleCreateInfo info{};
@@ -14170,8 +14301,12 @@ class VulkanDrawsImpl final : public VulkanDraws {
     if (const auto it = modules_z_early_.find(&input); it != modules_z_early_.end()) {
       return it->second != VK_NULL_HANDLE ? it->second : ModuleOf(input);
     }
+    const std::vector<uint32_t>* spirv = SpirvOf(input);
+    if (!spirv) {
+      return VK_NULL_HANDLE;  // being read (module_pending_)
+    }
     const char* reason = "";
-    const std::vector<uint32_t> patched = WithTestsEarly(mw2mp::shaderlib::Spirv(*input.shader), reason);
+    const std::vector<uint32_t> patched = WithTestsEarly(*spirv, reason);
     VkShaderModule shader_module = VK_NULL_HANDLE;
     if (!patched.empty()) {
       VkShaderModuleCreateInfo info{};
@@ -15109,6 +15244,12 @@ class VulkanDrawsImpl final : public VulkanDraws {
     } else if (key.ps) {
       ps = ModuleOf(*p.ps);
     }
+    DropSpirv(p);
+    if (module_pending_) {  // a shader's SPIR-V is being read (SpirvOf): this draw is skipped
+      module_pending_ = false;
+      ++draws_waiting_spirv_;
+      return VK_NULL_HANDLE;
+    }
     if (vs == VK_NULL_HANDLE || (key.ps && ps == VK_NULL_HANDLE)) {
       Reject(51, "could not create a shader module");
       return VK_NULL_HANDLE;
@@ -15905,6 +16046,7 @@ class VulkanDrawsImpl final : public VulkanDraws {
       prewarm_helper_.join();
     }
     StopCompiles();
+    StopSpirvReads();
   }
 
   // --- Pipelines compiled on a thread (mw2mp_native_async_pipelines) ----------------------------------------
@@ -16191,6 +16333,20 @@ class VulkanDrawsImpl final : public VulkanDraws {
       return;
     }
     compile_report_ = now;
+    {
+      std::lock_guard<std::mutex> lock(spirv_mutex_);
+      const uint64_t reads = spirv_reads_ - spirv_reads_reported_;
+      const uint64_t skipped = draws_waiting_spirv_ - draws_waiting_spirv_reported_;
+      if (reads || skipped) {
+        MW2MP_REPORT_RING("[native] C6 SPIR-V read off the ring, last 10 s: {} shaders ({:.1f} ms on average), {} "
+                          "draws skipped while they were read",
+                          reads, reads ? double(ns_spirv_reads_ - ns_spirv_reads_reported_) / 1e6 / double(reads) : 0.0,
+                          skipped);
+      }
+      spirv_reads_reported_ = spirv_reads_;
+      ns_spirv_reads_reported_ = ns_spirv_reads_;
+      draws_waiting_spirv_reported_ = draws_waiting_spirv_;
+    }
     const uint64_t compiled = compiles_async_ - compiles_reported_;
     const uint64_t waited = draws_waiting_pipeline_ - draws_waiting_reported_;
     if (!compiled && !waited) {
@@ -17588,6 +17744,19 @@ class VulkanDrawsImpl final : public VulkanDraws {
   uint64_t compiles_async_ = 0, ns_compiles_async_ = 0, compile_ns_worst_ = 0, draws_waiting_pipeline_ = 0;
   uint64_t compiles_reported_ = 0, ns_compiles_reported_ = 0, draws_waiting_reported_ = 0;
   std::chrono::steady_clock::time_point compile_report_{};
+  // SPIR-V read off the ring (SpirvOf, SpirvLoop). spirv_cache_ and module_pending_ are the ring's; the rest is
+  // under spirv_mutex_.
+  std::unordered_map<const mw2mp::shaderlib::Shader*, std::vector<uint32_t>> spirv_cache_;
+  bool module_pending_ = false;
+  uint64_t draws_waiting_spirv_ = 0, draws_waiting_spirv_reported_ = 0;
+  std::mutex spirv_mutex_;
+  std::condition_variable spirv_cv_;
+  std::deque<const mw2mp::shaderlib::Shader*> spirv_queue_;
+  std::unordered_set<const mw2mp::shaderlib::Shader*> spirv_queued_;  // queued or being read
+  std::vector<std::pair<const mw2mp::shaderlib::Shader*, std::vector<uint32_t>>> spirv_read_;
+  bool spirv_stop_ = false;
+  std::thread spirv_thread_;
+  uint64_t spirv_reads_ = 0, ns_spirv_reads_ = 0, spirv_reads_reported_ = 0, ns_spirv_reads_reported_ = 0;
 };
 
 }  // namespace

@@ -78,8 +78,17 @@ void AnalyzeConstants(mw2mp::native::ShaderInput& e) {
     rex::string::StringBuffer disassembly;
     analysis.AnalyzeUcode(disassembly);
     const auto& map = analysis.constant_register_map();
+    // mw2nx: MW2 reads engine constants its CTAB never declares (the translator's g_VsC/g_PsC), so the copy
+    // must reach the highest register the microcode reads, not the table's highest.
     if (map.float_dynamic_addressing) {
+      e.constants_bytes = 256 * 16;
       return;
+    }
+    for (uint32_t reg = 256; reg-- > 0;) {
+      if ((map.float_bitmap[reg / 64] >> (reg % 64)) & 1) {
+        e.constants_bytes = std::max<uint32_t>(e.constants_bytes, (reg + 1) * 16);
+        break;
+      }
     }
     for (uint32_t reg = 0; reg < 256;) {
       if (!((map.float_bitmap[reg / 64] >> (reg % 64)) & 1)) {

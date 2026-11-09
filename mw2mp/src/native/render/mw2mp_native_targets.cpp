@@ -693,6 +693,8 @@ struct Resolved {
   // map because TextureResolved is on the hot path (one call per texture and draw, thousands per frame) and the
   // lookup of the resolved texture is done anyway.
   uint64_t reads = 0;
+  // mw2nx: frame (presented_) of the last copy into it; a read long after it is a stale image (the ghosts).
+  uint64_t written_frame = 0;
 };
 
 // C2 report of readbacks per render target (base and size) and cadence of mw2mp_native_reads_every.
@@ -2124,18 +2126,32 @@ class VulkanTargets final : public NativeTargets, public TargetContext {
     const uint32_t height_target = (reg.rb_copy_dest_pitch >> 16) & 0x3FFF;
     const uint32_t base_x = uint32_t(x0) & ~uint32_t(31);
     const uint32_t base_y = uint32_t(y0) & ~uint32_t(31);
-    const uint32_t base =
+    uint32_t base =
         reg.rb_copy_dest_base +
         uint32_t(OffsetTiled2D(int32_t(base_x), int32_t(base_y), pitch_target, 2));
-    const uint32_t dx = uint32_t(x0) - base_x;
-    const uint32_t dy = uint32_t(y0) - base_y;
+    uint32_t dx = uint32_t(x0) - base_x;
+    uint32_t dy = uint32_t(y0) - base_y;
+    // mw2nx: a slice of a shadow atlas already resolved (ContainingResolved) is written into the atlas's image.
+    uint32_t atlas_width = 0, atlas_height = 0;
+    if (!depth->width_guest || depth->width_guest == depth->width) {  // not the scaled shadow map
+      uint32_t ax = 0, ay = 0, atlas_base = 0;
+      if (const Resolved* atlas =
+              ContainingResolved(base & 0x1FFFFFFF, pitch_target, format_depth_, atlas_base, ax, ay)) {
+        base = atlas_base;
+        dx += ax;
+        dy += ay;
+        atlas_width = atlas->image.width;
+        atlas_height = atlas->image.height;
+      }
+    }
     const uint32_t format_texture = ((info >> 16) & 0x1) ? 23 : 22;  // k_24_8_FLOAT : k_24_8
     // With the scaled shadow map, the resolved texture stays at that same size.
     // The scene picks it by address, without looking at the size, and samples it with normalized coordinates
     // and point sampling, so the smaller map read with the UVs of the full one gives the same texel as the
     // smaller map upscaled with NEAREST: the image does not change. What is saved is the upscaling blit and
     // most of the copy.
-    uint32_t width_resolved = pitch_target, height_resolved = height_target;
+    uint32_t width_resolved = atlas_width ? atlas_width : pitch_target;
+    uint32_t height_resolved = atlas_height ? atlas_height : height_target;
     if (depth->width_guest && depth->width_guest != depth->width) {
       width_resolved = uint32_t(uint64_t(pitch_target) * depth->width / depth->width_guest);
       height_resolved = uint32_t(uint64_t(height_target) * depth->height / depth->height_guest);
@@ -3669,6 +3685,13 @@ class VulkanTargets final : public NativeTargets, public TargetContext {
     // entry that has already been looked up: it costs nothing even though this is called thousands of times
     // per frame.
     ++it->second.reads;
+    // mw2nx diagnostic: a draw samples a resolve not rewritten for a while (once per address, 32 at most).
+    if (presented_ - it->second.written_frame > 4 && stale_logged_.size() < 32 &&
+        stale_logged_.insert(address).second) {
+      REXLOG_INFO("[native] C2 stale read: {:08X} {}x{} last copied {} frames ago (frame {})", address,
+                  it->second.image.width, it->second.image.height, presented_ - it->second.written_frame,
+                  presented_);
+    }
     if (address == mw2mp::reflection_demand::kAddress) {
       mw2mp::reflection_demand::AnnotateRead();  // reflection on demand
     }
@@ -5148,6 +5171,38 @@ class VulkanTargets final : public NativeTargets, public TargetContext {
     return &depths_.emplace(key, image).first->second;
   }
 
+  // mw2nx: MW2 resolves its shadow atlases (sun 1024x2048, spot 512x2048) a slice at a time. Each copy names the
+  // slice's own address (the atlas base plus the tiled offset of the slice: a shifted RB_COPY_DEST_BASE with a shorter
+  // height, or the rect's origin), and the scene samples the whole atlas at its base. Each slice got an image of its
+  // own nothing sampled: half the sun atlas stale (a circle of wrong shadow around the player, run 025). An address
+  // inside an atlas already resolved with the same pitch and format is that atlas at a 32-aligned texel (x, y); the
+  // lowest such base wins, so a stray slice image from before the atlas existed is never taken as one.
+  // ponytail: linear scan of resolved_ and of the atlas's tiles per depth copy (a few per frame); cache by address if
+  // it ever shows in the copy stage.
+  const Resolved* ContainingResolved(uint32_t address, uint32_t pitch, VkFormat format, uint32_t& atlas_base,
+                                     uint32_t& x, uint32_t& y) const {
+    const Resolved* found = nullptr;
+    for (const auto& [base, r] : resolved_) {
+      if (base >= address || r.image.width != pitch || r.image.format != format ||
+          uint64_t(address - base) >= uint64_t(r.image.width) * r.image.height * 4 || (found && base > atlas_base)) {
+        continue;
+      }
+      for (uint32_t ty = 0; ty < r.image.height; ty += 32) {
+        for (uint32_t tx = 0; tx < pitch; tx += 32) {
+          if (base + uint32_t(OffsetTiled2D(int32_t(tx), int32_t(ty), pitch, 2)) == address) {
+            found = &r;
+            atlas_base = base;
+            x = tx;
+            y = ty;
+            ty = r.image.height;  // done with this atlas
+            break;
+          }
+        }
+      }
+    }
+    return found;
+  }
+
   Resolved* GetResolved(uint32_t base, uint32_t width, uint32_t height, uint32_t format,
                             bool swap_rb, VkFormat format_host = kFormatColor) {
     if (!width || !height) {
@@ -5225,7 +5280,9 @@ class VulkanTargets final : public NativeTargets, public TargetContext {
     if (!Create(resolved.image, width, height,
                VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
                    VK_IMAGE_USAGE_TRANSFER_DST_BIT | use_target,
-               format_host)) {
+               format_host,
+               // mw2nx: a color resolve may be sampled through its sRGB twin (kSwizzleGamma, mw2mp_native_draws.cpp)
+               IsDepthFormat(format_host) ? 0 : VkImageCreateFlags(VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT))) {
       Reject(10, "could not create a resolved texture");
       return nullptr;
     }
@@ -5733,6 +5790,9 @@ class VulkanTargets final : public NativeTargets, public TargetContext {
   // (the normal case) touches nothing. `pixels` = the pixels actually copied (0 if the resolve swapped
   // images), so that the per-target inventory shows where the traffic goes.
   void ResolvedWritten(uint32_t base, uint64_t pixels = 0) {
+    if (const auto w = resolved_.find(base); w != resolved_.end()) {
+      w->second.written_frame = presented_;
+    }
     // Whatever samples this address next goes back through TextureResolved (which counts the reads,
     // records deferred copies and rebuilds the 3D table built from it), as with a cache invalidation on every
     // copy, but the rest of the sampler cache stays valid (VulkanDraws::InvalidateTexturesIn).
@@ -5801,9 +5861,10 @@ class VulkanTargets final : public NativeTargets, public TargetContext {
   }
 
   bool Create(OwnedImage& image, uint32_t width, uint32_t height, VkImageUsageFlags use,
-             VkFormat format = kFormatColor) {
+             VkFormat format = kFormatColor, VkImageCreateFlags flags = 0) {
     VkImageCreateInfo info{};
     info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    info.flags = flags;
     info.imageType = VK_IMAGE_TYPE_2D;
     info.format = format;
     info.extent = {width, height, 1};
@@ -7475,6 +7536,7 @@ class VulkanTargets final : public NativeTargets, public TargetContext {
   std::unordered_map<uint32_t, uint64_t> last_read_live_;    // per address, in presented_
   std::unordered_map<uint32_t, uint64_t> last_read_dead_;
   std::unordered_set<uint32_t> expired_;     // dropped copies: their texture lacks the last resolve
+  std::unordered_set<uint32_t> stale_logged_;  // mw2nx: C2 stale read, addresses already logged
   bool reads_depth_dead_ = false;  // set by VulkanDraws (DeadDepthReads)
   bool lazy_off_ = false;              // the guard saw a late read
   uint64_t lazy_postponed_ = 0;

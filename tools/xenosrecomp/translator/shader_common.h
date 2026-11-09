@@ -56,6 +56,11 @@
  * value (bits 24-30).
  */
 #define BO2ZM_SHADOW_MIN_MARKER       0x5E3B1A84u
+/*
+ * mw2nx: the bound color target is k_8_8_8_8_GAMMA. Xenos stores such a target's color through its piecewise-linear
+ * gamma (10-bit segments: x4, x2 + 128, + 256, x0.5 + 512); readers (resolves, the final composite) get those bytes.
+ */
+#define SPEC_CONSTANT_GAMMA_OUTPUT   (1 << 21)
 #define SPEC_CONSTANT_ALPHA_FUNC_SHIFT  16
 #define SPEC_CONSTANT_ALPHA_FUNC_MASK   (7 << 16)
 
@@ -301,6 +306,15 @@ float4 tfetch2DBicubic(uint resourceDescriptorIndex, uint samplerDescriptorIndex
 }
 
 // mw2nx: 1D textures (MW2's light attenuation) as a 2D texture's single row.
+float3 xenosLinearToGamma(float3 color)
+{
+    float3 x = saturate(color) * 1023.0;
+    float3 g = select(x < 64.0, x * 4.0,
+               select(x < 128.0, x * 2.0 + 128.0,
+               select(x < 512.0, x + 256.0, x * 0.5 + 512.0)));
+    return min(g, 1023.0) / 1023.0;
+}
+
 float4 tfetch1D(uint resourceDescriptorIndex, uint samplerDescriptorIndex, float texCoord)
 {
     return g_Texture2DDescriptorHeap[resourceDescriptorIndex].Sample(g_SamplerDescriptorHeap[samplerDescriptorIndex], float2(texCoord, 0.5));

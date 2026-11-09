@@ -2052,6 +2052,16 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
                     indent();
                     out += "}";
 
+                #ifdef BO2ZM_RECOMP
+                    // mw2nx: a k_8_8_8_8_GAMMA render target stores Xenos's piecewise gamma of the color; the host
+                    // image is plain RGBA8, so the shader encodes it (SPEC_CONSTANT_GAMMA_OUTPUT, set per draw).
+                    if (reinterpret_cast<const PixelShader*>(shader)->outputs & PIXEL_SHADER_OUTPUT_COLOR0)
+                    {
+                        indent();
+                        out += "[branch] if (g_SpecConstants() & SPEC_CONSTANT_GAMMA_OUTPUT) oC0.xyz = xenosLinearToGamma(oC0.xyz);";
+                    }
+                #endif
+
                 #ifdef UNLEASHED_RECOMP
                     specConstantsMask |= SPEC_CONSTANT_ALPHA_TO_COVERAGE;
 

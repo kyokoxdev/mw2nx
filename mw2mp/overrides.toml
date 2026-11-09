@@ -19,6 +19,16 @@ xer_as_local = true
 ctr_as_local = true
 non_volatile_as_local = true
 
+# --- mfmsr / mtmsrd: no global lock (root key), as bo2's app/overrides.toml ---
+# 330 sites wrap lwarx/stwcx. atomics in "mfmsr rX; mtmsrd r13,1 ... mtmsrd rX,1".
+# The codegen's default turns them into REX_ENTER/LEAVE/CHECK_GLOBAL_LOCK, one
+# recursive mutex for every thread: run 028 (mp_rust, mp_terminal) had the game
+# threads (Main, Worker0-2, Backend, Server) 60-84% of their samples blocked in
+# mutexLock on it. Every region is a pure CAS loop (no other stores or calls
+# inside, checked over generated/), and on the 360 interrupts off never excluded
+# the other cores, so mfmsr/mtmsrd become no-ops.
+skip_msr = true
+
 [functions]
 
 # --- Compact branch ladders the analyzer splits (mw2-recompiled) -------------
