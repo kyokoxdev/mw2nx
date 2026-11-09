@@ -2582,6 +2582,11 @@ class VulkanTargets final : public NativeTargets, public TargetContext {
     if (!ui_presenter || !SubmitJob(false)) {
       return false;
     }
+    // mw2mp_native_load_hold_s: a match just started and this frame has surfaces missing; the work is submitted and
+    // the screen keeps the last image shown (the loading screen).
+    if (draws_ && draws_->HoldOutput()) {
+      return true;
+    }
     if (tiled) {
       bool painted_tiled = false;
       ui_presenter->RefreshGuestOutput(

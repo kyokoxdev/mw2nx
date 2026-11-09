@@ -63,7 +63,7 @@ MW2 lives in `mw2mp/` (multiplayer, `default_mp.xex`) and later `mw2sp/`.
     screen 5-10 fps, GPU 99.7 %); the Xenos emulation is the reference, not the Switch path. Fix = milestone 4.
   - Open: after ~50 s the game stops presenting (0 fps), `Main XThread` alone spins at 100 %, everything else idle.
     Next run with `logs/rex/profile_stacks.flag` on the SD (stack samples in `rex_profile.log`) to find the loop.
-- [ ] 4 Native renderer. Port order:
+- [x] 4 Native renderer (`mw2mp_renderer = native`; one open bug, black textures on the first map load). Port order:
   1. Copy `app/src/native/render` + `bo2zm_native_system`, `bo2zm_page_writes`, `bo2zm_memcpy_callers`,
      `bo2zm_gpu_skin`, `bo2zm_d3d_native` into `mw2mp/src/native` (rename `bo2zm_` -> `mw2mp_`), build-time shader
      pack from MW2's fastfiles (XenosRecomp, `dxc`).
@@ -130,4 +130,17 @@ MW2 lives in `mw2mp/` (multiplayer, `default_mp.xex`) and later `mw2sp/`.
     instead, and a failed thread falls back to the idle window. If the desync stays, BO2's other
     finding applies: its Server thread needed ~46 % of a core and fell behind on three busy cores (core 3 forwarder,
     `bo2zm_core3_threads`).
-  - Open: the 50 s freeze (Xenos run) needs stack samples; D3D-level hooks (perf).
+  - Runs 033-035: plays well (matches smooth, desync no longer felt). Changes:
+    - `ClientInGame()` reads MW2's own `cl_ingame` dvar (dvar_t* at `0x825A590C`, value byte at +12), no hook.
+    - Vertex/index caches and the constants shortcut on (`CachesOff`/`ConstantsShortcutOff` false); texture
+      write-stamp shortcuts stay off until MW2's VMX copies and plain-store writers stamp pages. Page stamps moved to
+      `mw2mp/src/mw2mp_page_writes.cpp` (bo2's, renamed).
+    - First map load came out black: draws skipped while their shader's SPIR-V was read (run 033: 200 shaders, 1,175
+      draws) or their pipeline compiled (run 035: ~100-160 pipelines at 300-470 ms, 12,000-39,000 draws skipped per
+      10 s). `mw2mp_native_load_wait_s` (5): outside a match and for 5 s after `cl_ingame`, the ring reads missing
+      SPIR-V at once. `mw2mp_native_load_hold_s` (60): after `cl_ingame`, frames with skipped draws are submitted but
+      not shown (`HoldOutput`), so the loading image stays up until the first complete frame. Prewarm hands its
+      shader modules to the ring (`HandModule`) instead of the ring re-reading them.
+  - Open: black textures still show on the first map load of a session. Load hold isn't enough on its own, possibly
+    textures rather than shaders/pipelines (texture shortcuts off, so not a stale stamp). The 50 s freeze (Xenos run)
+    needs stack samples. D3D-level hooks (perf).

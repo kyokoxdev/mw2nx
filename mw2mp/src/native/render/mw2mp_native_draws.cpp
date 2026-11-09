@@ -634,6 +634,26 @@ REXCVAR_DEFINE_BOOL(mw2mp_native_async_pipelines, true, "BO2",
                     "stopping for it: switching to HIGH for the first time froze the game for 7.5 s, dozens of "
                     "compiles in a row. One in the driver's cache is created at once, as before. false = every "
                     "pipeline compiled on the ring");
+// The 360 never drew a map without its shaders: they were GPU code loaded with the map. Here a shader's SPIR-V comes
+// from the pack on the SD card, and a draw whose shader is still being read is skipped (SpirvOf), so a map's first
+// frames came out black (run 033: 200 shaders, 1,175 draws skipped). Outside a match and for this many seconds after
+// cl_ingame turns on, the ring reads a missing shader at once and draws it, as a slightly longer load; after that it
+// reads them on the SPIR-V thread, so a burst mid-match cannot stop the game (~250 ms, run 029).
+REXCVAR_DEFINE_INT32(mw2mp_native_load_wait_s, 5, "BO2",
+                     "Native renderer: outside a match and for this many seconds after entering one, a shader that "
+                     "is not in memory yet is read at once and drawn, instead of its draws being skipped (black) "
+                     "until the SPIR-V thread has it. 0 = always skipped while read, as before")
+    .range(0, 60);
+// The same for pipelines, which the load window cannot read at once: a map's first visit on a build compiles its
+// ~100-160 new pipelines at 300-470 ms each, and their draws were skipped for over a minute (run 035: 12,000-39,000
+// draws per 10 s), leaving black surfaces. Freezing the ring until they compile would stop the game too (online, a
+// drop). Instead, once cl_ingame turns on, a frame with skipped draws is submitted but not shown, so the screen keeps
+// the loading image while the game runs, until the first complete frame or this many seconds.
+REXCVAR_DEFINE_INT32(mw2mp_native_load_hold_s, 60, "BO2",
+                     "Native renderer: after a match starts, frames with draws skipped (pipelines compiling, shaders "
+                     "being read) are not shown, so the loading image stays until the first complete frame or this "
+                     "many seconds. 0 = shown with the missing surfaces black, as before")
+    .range(0, 300);
 // A first visit to a map compiles its ~230 pipelines on one thread at 155-192 ms each (~40 s with
 // objects missing). In a match a second thread compiles no more (368 pipelines in the first minute against 365 with
 // one, each taking twice as long: newlib's heap lock sets the pace there), while in the menus, where the cores are
@@ -2853,6 +2873,9 @@ class VulkanDrawsImpl final : public VulkanDraws {
       if (shader_module != VK_NULL_HANDLE) {
         dfn_.vkDestroyShaderModule(device_, shader_module, nullptr);
       }
+    }
+    for (auto& [key, shader_module] : handed_modules_) {  // handed by the prewarm and never asked for
+      dfn_.vkDestroyShaderModule(device_, shader_module, nullptr);
     }
     for (auto& [key, view] : views_) {
       dfn_.vkDestroyImageView(device_, view.view, nullptr);
@@ -6429,6 +6452,49 @@ class VulkanDrawsImpl final : public VulkanDraws {
     // Switch, exiting does not always reach the destructor. In a match, as
     // mw2mp_native_pipelines_save_in_match says.
     SaveCacheWhenDue();
+    UpdateLoadWindow();
+  }
+
+  // mw2mp_native_load_hold_s. Each call covers the draws since the previous one (one frame).
+  bool HoldOutput() override {
+    static const int32_t hold_s = REXCVAR_GET(mw2mp_native_load_hold_s);
+    const uint64_t skipped = draws_waiting_pipeline_ + draws_waiting_spirv_;
+    const bool incomplete = skipped != skipped_at_output_;
+    skipped_at_output_ = skipped;
+    if (!hold_open_ || hold_s <= 0) {
+      return false;
+    }
+    const auto held_for = std::chrono::steady_clock::now() - in_match_since_;
+    if (incomplete && held_for < std::chrono::seconds(hold_s)) {
+      ++held_frames_;
+      return true;
+    }
+    hold_open_ = false;
+    REXLOG_INFO("[native] load hold: {} frames kept off screen over {:.1f} s after the match started, ended by {}",
+                held_frames_, std::chrono::duration<double>(held_for).count(),
+                incomplete ? "the time limit (draws still skipped)" : "the first complete frame");
+    return false;
+  }
+
+  // End of a frame, ring thread: whether SpirvOf reads a missing shader at once (mw2mp_native_load_wait_s).
+  void UpdateLoadWindow() {
+    static const int32_t wait_s = REXCVAR_GET(mw2mp_native_load_wait_s);
+    const bool in_match = mw2mp::cheats::InMatch();
+    const auto now = std::chrono::steady_clock::now();
+    if (in_match && !in_match_previous_) {
+      in_match_since_ = now;
+      hold_open_ = true;  // HoldOutput
+      held_frames_ = 0;
+    }
+    if (!in_match) {
+      hold_open_ = false;
+    }
+    if (in_match != in_match_previous_) {
+      REXLOG_INFO("[native] cl_ingame {}: shaders not in memory are {} for the next {} s", in_match ? "on" : "off",
+                  wait_s > 0 ? "read at once" : "skipped while read", in_match ? wait_s : 0);
+    }
+    in_match_previous_ = in_match;
+    load_window_ = wait_s > 0 && (!in_match || now - in_match_since_ < std::chrono::seconds(wait_s));
   }
 
   // End of a frame, ring thread.
@@ -14174,6 +14240,14 @@ class VulkanDrawsImpl final : public VulkanDraws {
     if (const auto it = spirv_cache_.find(s); it != spirv_cache_.end()) {
       return &it->second;
     }
+    if (load_window_) {  // loading or just in: read now and draw (mw2mp_native_load_wait_s)
+      const auto start = std::chrono::steady_clock::now();
+      std::vector<uint32_t> words = mw2mp::shaderlib::Spirv(*s);  // empty if unreadable: the module fails
+      ++spirv_reads_now_;
+      ns_spirv_reads_now_ += uint64_t(
+          std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count());
+      return &(spirv_cache_[s] = std::move(words));
+    }
     {
       std::lock_guard<std::mutex> lock(spirv_mutex_);
       for (auto& [shader, words] : spirv_read_) {
@@ -14243,9 +14317,38 @@ class VulkanDrawsImpl final : public VulkanDraws {
     }
   }
 
+  /*
+   * Modules the prewarm and precompile threads built (Warmer), keyed as there: number for the normal module,
+   * (3 << 32) | number without color writes, (4 << 32) | number with early tests. Run 033: the prewarm built all 954
+   * listed pipelines before the map, then destroyed its modules, and the ring read the same shaders from the SD card
+   * again on the map's first frames (200 shaders, 1,175 draws skipped: a black map until they arrived). The ring
+   * takes them on first use; what it never asks for is destroyed with it.
+   */
+  void HandModule(uint64_t key, VkShaderModule shader_module) {
+    std::lock_guard<std::mutex> lock(handed_mutex_);
+    if (!handed_modules_.emplace(key, shader_module).second) {
+      dfn_.vkDestroyShaderModule(device_, shader_module, nullptr);  // another Warmer handed it first
+    }
+  }
+  VkShaderModule TakeHandedModule(uint64_t key) {
+    std::lock_guard<std::mutex> lock(handed_mutex_);
+    const auto it = handed_modules_.find(key);
+    if (it == handed_modules_.end()) {
+      return VK_NULL_HANDLE;
+    }
+    const VkShaderModule shader_module = it->second;
+    handed_modules_.erase(it);
+    ++modules_handed_used_;
+    return shader_module;
+  }
+
   VkShaderModule ModuleOf(const ShaderInput& input) {
     if (const auto it = modules_.find(&input); it != modules_.end()) {
       return it->second;
+    }
+    if (const VkShaderModule handed = TakeHandedModule(input.number); handed != VK_NULL_HANDLE) {
+      modules_.emplace(&input, handed);
+      return handed;
     }
     const std::vector<uint32_t>* spirv = SpirvOf(input);
     if (!spirv) {
@@ -14268,6 +14371,11 @@ class VulkanDrawsImpl final : public VulkanDraws {
   VkShaderModule ModuleOnlyAlpha(const ShaderInput& input) {
     if (const auto it = modules_only_alpha_.find(&input); it != modules_only_alpha_.end()) {
       return it->second != VK_NULL_HANDLE ? it->second : ModuleOf(input);
+    }
+    if (const VkShaderModule handed = TakeHandedModule((uint64_t(3) << 32) | input.number);
+        handed != VK_NULL_HANDLE) {
+      modules_only_alpha_.emplace(&input, handed);
+      return handed;
     }
     const std::vector<uint32_t>* spirv = SpirvOf(input);
     if (!spirv) {
@@ -14300,6 +14408,11 @@ class VulkanDrawsImpl final : public VulkanDraws {
   VkShaderModule ModuleZEarly(const ShaderInput& input) {
     if (const auto it = modules_z_early_.find(&input); it != modules_z_early_.end()) {
       return it->second != VK_NULL_HANDLE ? it->second : ModuleOf(input);
+    }
+    if (const VkShaderModule handed = TakeHandedModule((uint64_t(4) << 32) | input.number);
+        handed != VK_NULL_HANDLE) {
+      modules_z_early_.emplace(&input, handed);
+      return handed;
     }
     const std::vector<uint32_t>* spirv = SpirvOf(input);
     if (!spirv) {
@@ -15629,14 +15742,18 @@ class VulkanDrawsImpl final : public VulkanDraws {
   }
 
   // What one prewarm or precompile thread needs to recreate the list's pipelines as the ring would ask for
-  // them (LoopPrewarm, Precompile): its own shader modules and render passes, destroyed with it. It only reads the
-  // library, the layout and the cache.
+  // them (LoopPrewarm, Precompile): its own shader modules and render passes. The modules built from the library's
+  // SPIR-V go to the ring when it ends (HandModule), so the ring does not read them from the SD card again; the
+  // rest is destroyed with it. It only reads the library, the layout and the cache.
   class Warmer {
    public:
     Warmer(VulkanDrawsImpl& draws, const NativeShaders& library) : d_(draws), library_(library) {}
     ~Warmer() {
       for (const auto& [key, shader_module] : modules_) {
-        if (shader_module != VK_NULL_HANDLE) {
+        const uint64_t variant = key >> 32;  // 0 normal, 3 without color writes, 4 early tests (as Pixel)
+        if (shader_module != VK_NULL_HANDLE && (variant == 0 || variant == 3 || variant == 4)) {
+          d_.HandModule(key, shader_module);
+        } else if (shader_module != VK_NULL_HANDLE) {
           d_.dfn_.vkDestroyShaderModule(d_.device_, shader_module, nullptr);
         }
       }
@@ -16337,12 +16454,20 @@ class VulkanDrawsImpl final : public VulkanDraws {
       std::lock_guard<std::mutex> lock(spirv_mutex_);
       const uint64_t reads = spirv_reads_ - spirv_reads_reported_;
       const uint64_t skipped = draws_waiting_spirv_ - draws_waiting_spirv_reported_;
-      if (reads || skipped) {
+      const uint64_t handed = modules_handed_used_ - modules_handed_used_reported_;
+      const uint64_t now_reads = spirv_reads_now_ - spirv_reads_now_reported_;
+      if (reads || skipped || handed || now_reads) {
         MW2MP_REPORT_RING("[native] C6 SPIR-V read off the ring, last 10 s: {} shaders ({:.1f} ms on average), {} "
-                          "draws skipped while they were read",
+                          "draws skipped while they were read; {} modules taken from the prewarm instead; {} read at "
+                          "once in the load window ({:.1f} ms in all, {})",
                           reads, reads ? double(ns_spirv_reads_ - ns_spirv_reads_reported_) / 1e6 / double(reads) : 0.0,
-                          skipped);
+                          skipped, handed, now_reads,
+                          double(ns_spirv_reads_now_ - ns_spirv_reads_now_reported_) / 1e6,
+                          mw2mp::cheats::InMatch() ? "in a match" : "outside a match");
       }
+      modules_handed_used_reported_ = modules_handed_used_;
+      spirv_reads_now_reported_ = spirv_reads_now_;
+      ns_spirv_reads_now_reported_ = ns_spirv_reads_now_;
       spirv_reads_reported_ = spirv_reads_;
       ns_spirv_reads_reported_ = ns_spirv_reads_;
       draws_waiting_spirv_reported_ = draws_waiting_spirv_;
@@ -17757,6 +17882,17 @@ class VulkanDrawsImpl final : public VulkanDraws {
   bool spirv_stop_ = false;
   std::thread spirv_thread_;
   uint64_t spirv_reads_ = 0, ns_spirv_reads_ = 0, spirv_reads_reported_ = 0, ns_spirv_reads_reported_ = 0;
+  // Modules handed by the prewarm (HandModule, TakeHandedModule); the counter is the ring's.
+  std::mutex handed_mutex_;
+  std::unordered_map<uint64_t, VkShaderModule> handed_modules_;
+  uint64_t modules_handed_used_ = 0, modules_handed_used_reported_ = 0;
+  // The load window (UpdateLoadWindow) and the shaders SpirvOf read at once in it; all the ring's.
+  bool load_window_ = true, in_match_previous_ = false;
+  bool hold_open_ = false;  // HoldOutput
+  uint64_t skipped_at_output_ = 0, held_frames_ = 0;
+  std::chrono::steady_clock::time_point in_match_since_{};
+  uint64_t spirv_reads_now_ = 0, ns_spirv_reads_now_ = 0, spirv_reads_now_reported_ = 0,
+           ns_spirv_reads_now_reported_ = 0;
 };
 
 }  // namespace

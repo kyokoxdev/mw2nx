@@ -7,6 +7,9 @@
 #include <cstdint>
 #include <vector>
 
+#include <rex/memory/utils.h>
+#include <rex/system/kernel_state.h>
+
 #include "mw2mp_benchmark.h"
 #include "mw2mp_cheats.h"
 #include "mw2mp_credits.h"
@@ -14,7 +17,6 @@
 #include "mw2mp_debug_watch.h"
 #include "mw2mp_gpu_skin.h"
 #include "mw2mp_memcpy_callers.h"
-#include "mw2mp_page_writes.h"
 #include "mw2mp_pc_profiler.h"
 #include "mw2mp_preset.h"
 #include "mw2mp_switch.h"
@@ -35,7 +37,7 @@ int AbArmCached() { return -1; }
 
 namespace mw2mp::cheats {
 int GetCrosshairOverlays(CrosshairOverlay*, int) { return 0; }
-bool InMatch() { return false; }
+bool InMatch() { return mw2mp::preset::ClientInGame(); }
 }  // namespace mw2mp::cheats
 
 namespace mw2mp::credits {
@@ -43,13 +45,15 @@ const Picture* Images() { return nullptr; }
 bool Place(uint32_t, uint32_t, Placement&) { return false; }
 }  // namespace mw2mp::credits
 
-// ponytail: every write-stamp shortcut off (textures, constants, vertex/index caches): BO2 stamps pages from its copy
-// routines' hooks and MW2 has none yet, so a cached copy could go stale. Correct but slower; hook MW2's memcpy/memset
-// callers and turn them back on.
+// ponytail: texture write-stamp shortcuts off. Only memcpy/memset stamp pages (mw2mp_crt.cpp); MW2's VMX copies and
+// plain-store writers do not, so a skipped texture recheck could go stale. Hook the remaining writers, then turn it
+// on. The vertex and index caches are on: their guard checksums the first hits of every copy and marks ranges changed
+// without a stamp as always written. The constants shortcut (only the constants a shader reads, from its microcode
+// analysis) does not use stamps at all and is on.
 namespace mw2mp::debug {
 bool TextureShortcutsOff() { return true; }
-bool ConstantsShortcutOff() { return true; }
-bool CachesOff() { return true; }
+bool ConstantsShortcutOff() { return false; }
+bool CachesOff() { return false; }
 void WatchPhysicalPages(const std::vector<uint32_t>&, Watch, const std::vector<uint64_t>*) {}
 bool WatchVertices() { return false; }
 }  // namespace mw2mp::debug
@@ -81,25 +85,23 @@ void AnnotateCheckMarker(bool, uint32_t, uint32_t, uint32_t, uint32_t) {}
 void WarnProgressRing() {}  // wakes BO2's Backend ring-drain wait; MW2 has no such hook
 }  // namespace mw2mp::native
 
-// The stamps themselves (bo2-360-nx's bo2zm_page_writes.cpp), never enabled: see mw2mp::debug above.
-namespace mw2mp::page_writes {
-std::atomic<bool> g_enabled{false};
-std::atomic<uint32_t> g_epoch{1};
-std::atomic<uint32_t> g_stamps[1u << 17] = {};
-std::atomic<uint32_t> g_regions[1u << 13] = {};
-std::atomic<bool> g_use_regions{true};
-void MarkPhysical(uint32_t, uint32_t) {}
-void MarkVolatile(uint32_t, uint32_t) {}
-void NextEpoch() { g_epoch.fetch_add(1, std::memory_order_relaxed); }
-void Enable(bool) {}  // stays off until MW2's writers mark pages
-}  // namespace mw2mp::page_writes
 
 namespace mw2mp::pc_profiler {
 void NoteFrame() {}
 }  // namespace mw2mp::pc_profiler
 
 namespace mw2mp::preset {
-bool ClientInGame() { return false; }
+// cl_ingame, read from the game's own dvar (no hook). TU6: Dvar_RegisterBool is sub_8230EE00 (r3 name, r4 default,
+// r5 flags, r6 description); sub_82187A98 registers "cl_ingame" (0x8201A0BC) and stores the dvar_t* at 0x825A590C.
+// The current value is the byte at +12: the game itself sets cl_ingame to 1 when the connection state is 9 (active)
+// and the byte reads 0, and back to 0 otherwise (lwz r3,22796(r11); lbz r10,12(r3) near 0x82185120). false until the
+// dvar is registered.
+bool ClientInGame() {
+  constexpr uint32_t kClInGameDvar = 0x825A590Cu;
+  uint8_t* const base = rex::system::kernel_memory()->virtual_membase();
+  const uint32_t dvar = rex::memory::load_and_swap<uint32_t>(base + kClInGameDvar);
+  return dvar && base[dvar + 12] != 0;
+}
 // mw2nx: false. FrontEnd() arms BO2's campaign front-end shortcuts (mw2mp_native_front_end_no_prepass and _reuse);
 // answered true, they ran in matches: the prepass skip dropped every colour-masked depth-writing draw, MW2's sun
 // shadow maps included (no shadows, surfaces lit flat; ~8,000 draws per 10 s, run 024), and the reuse compared scene

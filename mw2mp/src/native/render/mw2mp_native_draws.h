@@ -357,6 +357,9 @@ class VulkanDraws {
   virtual DrawStats Stats() const = 0;
   // Draws recorded since start-up; C2 counts those that fall between two copies.
   virtual uint64_t Drawn() const = 0;
+  // At each Swap, ring thread: true when this frame is not to be shown (its work is still submitted), because a
+  // match just started and some of its draws were skipped (mw2mp_native_load_hold_s).
+  virtual bool HoldOutput() { return false; }
   // Waits for the copy thread to finish the pending vertex copies (mw2mp_native_upload_thread).
   virtual void WaitUploads() = 0;
   // Vertex copies queued and not done yet (only to measure the fences).

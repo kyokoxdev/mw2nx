@@ -19,6 +19,7 @@ set(MW2MP_SOURCES
     src/mw2mp_native_stubs.cpp
     # MW2's CRT memcpy/memset as native code ([rexcrt] in overrides.toml)
     src/mw2mp_crt.cpp
+    src/mw2mp_page_writes.cpp
     src/native/mw2mp_native_system.cpp
     src/native/mw2mp_render_stubs.cpp
     src/native/render/mw2mp_native_render.cpp
