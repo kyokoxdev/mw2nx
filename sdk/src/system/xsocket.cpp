@@ -49,6 +49,7 @@
 #include <poll.h>
 #include <switch.h>
 #include <condition_variable>
+#include <system_error>
 #include <thread>
 #endif
 
@@ -173,17 +174,32 @@ void WatchLoop(int timeout_ms) {
   }
 }
 
-// A socket whose call found nothing: watched from now on (once per socket).
-void Watch(int fd, std::atomic<int64_t>& idle_until, int timeout_ms) {
+// A socket whose call found nothing: watched from now on (once per socket). false = no watcher thread (it
+// could not be created): the caller uses the idle window instead.
+bool g_watch_failed = false;  // under g_watch_mutex
+bool Watch(int fd, std::atomic<int64_t>& idle_until, int timeout_ms) {
   std::lock_guard<std::mutex> lock(g_watch_mutex);
+  if (g_watch_failed) {
+    return false;
+  }
+  if (!g_watch_thread) {
+    // Never joined or destroyed (it runs for the process's life): libnx's pthreads cannot detach, and
+    // std::thread::detach threw std::system_error here, which ended the game at its first empty recvfrom (run 032).
+    try {
+      new std::thread([timeout_ms] { WatchLoop(timeout_ms); });
+      g_watch_thread = true;
+    } catch (const std::system_error& error) {
+      g_watch_failed = true;
+      REXLOG_WARN("[net] socket watch: no thread ({}); the idle window answers alone", error.what());
+      return false;
+    }
+  }
   if (std::none_of(g_watched.begin(), g_watched.end(), [fd](const Watched& w) { return w.fd == fd; })) {
     g_watched.push_back(Watched{fd, &idle_until});
   }
-  if (!g_watch_thread) {
-    g_watch_thread = true;
-    std::thread([timeout_ms] { WatchLoop(timeout_ms); }).detach();
-  }
+  idle_until.store(kWatched, std::memory_order_relaxed);
   g_watch_cv.notify_all();
+  return true;
 }
 
 // Before the socket is closed: out of the watch, and not in a poll() still under way.
@@ -217,10 +233,7 @@ void AfterAsking(std::atomic<int64_t>& idle_until, int fd, int ret, int error, i
   }
   static const int watch_ms = REXCVAR_GET(switch_net_watch_ms);
   const int64_t window = int64_t(REXCVAR_GET(switch_net_idle_poll_us)) * 1000;
-  if (none && watch_ms > 0) {
-    idle_until.store(kWatched, std::memory_order_relaxed);
-    Watch(fd, idle_until, watch_ms);
-  } else {
+  if (!(none && watch_ms > 0 && Watch(fd, idle_until, watch_ms))) {
     idle_until.store(none && window > 0 ? now + window : 0, std::memory_order_relaxed);
   }
   int64_t last = g_report_ns.load(std::memory_order_relaxed);

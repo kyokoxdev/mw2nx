@@ -125,7 +125,9 @@ MW2 lives in `mw2mp/` (multiplayer, `default_mp.xex`) and later `mw2sp/`.
     (`[net]`: ~100 calls/s, all empty, 2-5 ms each in the socket service; 0.5 ms at boot). BO2's 1 ms idle window
     answered ~4 % (MW2 polls >1 ms apart). New watch in `sdk/src/system/xsocket.cpp` (`switch_net_watch_ms`, 5): an
     empty socket answers EWOULDBLOCK locally until a watcher thread blocked in `poll()` sees data. The `[net]` line's
-    "answered from the idle window" should now be nearly every call. Not yet run. If the desync stays, BO2's other
+    "answered from the idle window" should now be nearly every call. Run 032 crashed at start: the watcher thread was
+    `detach()`ed, which throws `std::system_error` on libnx (std::terminate at the first empty recvfrom); now leaked
+    instead, and a failed thread falls back to the idle window. If the desync stays, BO2's other
     finding applies: its Server thread needed ~46 % of a core and fell behind on three busy cores (core 3 forwarder,
     `bo2zm_core3_threads`).
   - Open: the 50 s freeze (Xenos run) needs stack samples; D3D-level hooks (perf).
