@@ -10,6 +10,7 @@
 #include <rex/logging.h>
 #include <rex/rex_app.h>
 
+#include "mw2mp_switch.h"
 #include "native/mw2mp_native_system.h"
 #include "native/render/mw2mp_native_precompile.h"
 #include "native/render/mw2mp_graphics_settings.h"
@@ -50,7 +51,10 @@ class Mw2mpApp : public rex::ReXApp {
 
   // mw2nx: the handheld GPU profile (mw2mp_switch_gpu_mhz) and the overlay FPS block, once the toml is read. Nothing
   // called it: the GPU stayed at homebrew's 307.2 MHz.
-  void OnPostInitLogging() override { mw2mp::settings::RequestBootClocks(); }
+  void OnPostInitLogging() override {
+    mw2mp::settings::RequestBootClocks();
+    mw2mp::ConfigureCores();
+  }
 
   // The native renderer compiles the pipelines earlier runs used before the game starts (mw2mp_native_precompile.h).
   bool OnHoldModuleLaunch(std::function<void()> start) override {

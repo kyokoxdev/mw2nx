@@ -7,7 +7,10 @@
 #include <cstdint>
 #include <vector>
 
+#include <rex/cvar.h>
+#include <rex/logging.h>
 #include <rex/memory/utils.h>
+#include <rex/platform.h>
 #include <rex/system/kernel_state.h>
 
 #include "mw2mp_benchmark.h"
@@ -24,9 +27,45 @@
 #include "native/render/mw2mp_native_hooks.h"
 #include "native/render/mw2mp_native_render.h"
 
+// Core 3 (sdk/src/ui/switch_core3.cpp), as bo2-360-nx's bo2zm_switch.cpp: only acts when started from a forwarder that
+// allows cores 0-3 (sphaira: CPU Cores 4); from hbmenu core 3 is not the process's and nothing moves. BO2 measured
+// +12-16 % with the Server on all four cores and the audio threads alone on core 3. MW2's mixer is "Audio Worker".
+REXCVAR_DEFINE_INT32(mw2mp_cpu_cores, 4, "MW2",
+                     "Switch: 4 = the threads mw2mp_core3_threads names also use the fourth CPU core, which only a "
+                     "forwarder made with four cores allows (sphaira: CPU Cores 4); started any other way it changes "
+                     "nothing. 3 = the three cores every launch has")
+    .range(3, 4)
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_STRING(mw2mp_core3_threads, "Server:0xF:59,Audio Worker:0x8:43,XMA Decoder:0x8:43", "MW2",
+                      "Switch, 4-core forwarder only: threads moved to core 3, as comma-separated \"name prefix[:core "
+                      "mask[:priority]]\" (0x8 = core 3 alone, 0xF = cores 0-3). \"\" = none moved")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+
+#if REX_PLATFORM_SWITCH
+extern "C" void RexSwitchCore3SetLog(void (*log)(const char*));
+extern "C" bool RexSwitchCore3Configure(const char* rules, bool clamp, bool meter, bool active);
+extern "C" bool RexSwitchCore3Active(void);
+extern "C" void RexSwitchCore3SetHogLimit(int percent, int seconds);
+#endif
+
 namespace mw2mp {
 const char* BuildId() { return "dev"; }
-int CoresInUse() { return 3; }
+int CoresInUse() {
+#if REX_PLATFORM_SWITCH
+  return RexSwitchCore3Active() ? 4 : 3;
+#else
+  return 3;
+#endif
+}
+// Before the game's threads start (OnPostInitLogging), so each one a rule names is moved as it names itself. Failsafe
+// as BO2's defaults: back to three cores when our threads hold core 3 over 85 % for 2 s.
+void ConfigureCores() {
+#if REX_PLATFORM_SWITCH
+  RexSwitchCore3SetLog([](const char* text) { REXLOG_INFO("{}", text); });
+  RexSwitchCore3SetHogLimit(85, 2);
+  RexSwitchCore3Configure(REXCVAR_GET(mw2mp_core3_threads).c_str(), true, true, REXCVAR_GET(mw2mp_cpu_cores) == 4);
+#endif
+}
 }  // namespace mw2mp
 
 namespace mw2mp::benchmark {

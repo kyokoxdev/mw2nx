@@ -19,6 +19,8 @@ int CpuCoresSetting();
 void SetCpuCoresSetting(int cores);
 // The cores the game uses right now: 4 only with the setting at 4 and a 4-core launch. 0 off the Switch.
 int CoresInUse();
+// Hands mw2mp_core3_threads to the SDK's core-3 placement. Once, before the game's threads start.
+void ConfigureCores();
 // The failsafe switched the fourth core off (our threads held core 3), until CPU CORES switches it on again.
 bool CoresSwitchedOff();
 

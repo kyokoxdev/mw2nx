@@ -48,7 +48,9 @@ MW2 lives in `mw2mp/` (multiplayer, `default_mp.xex`) and later `mw2sp/`.
    missing, shows a screen listing what to copy where. Players stage from their own disc and TU6 on the PC
    (`tools/install/tu6_setup.py`, `tools/stage_sd_mw2mp.py`) and paste onto the SD card, as the GTA V Switch port
    handles its game files. Open points: title ID, NPDM (`npdmtool`) and NSP build (`hacbrewpack`, which needs the
-   builder's own console keys); a full application gets more memory than an NRO run as an applet.
+   builder's own console keys); a full application gets more memory than an NRO run as an applet. NPDM allows cores
+   0-3 (`highest_cpu_id: 3`, as sphaira's "CPU Cores 4" forwarder), so the fourth core (`mw2mp_cpu_cores`) works
+   from the NSP without a forwarder.
 
 ## Status
 

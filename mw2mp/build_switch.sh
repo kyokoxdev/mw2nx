@@ -17,7 +17,8 @@ python3 -I "$ROOT/tools/guest_barriers.py" --check --gen "$GEN"
 # Plain guest loads and stores in the generated code (MW2MP_GUEST_MEMORY_PLAIN; bo2 measured +5.8 % on the console),
 # safe with guest_barriers.py's barriers, checked above. MW2_GUEST_MEMORY_PLAIN=0 builds the volatile form.
 # MW2_LTO=1: GCC LTO as bo2 (+10 % FPS there); off by default, the link wants far more RAM than a 9 GB WSL has.
-RELEASE="-O2 -DNDEBUG"
+# -O3 as bo2 (its whole build is -O3 with LTO and PGO).
+RELEASE="-O3 -DNDEBUG"
 LTO_LINK=""
 if [ "${MW2_LTO:-0}" = "1" ]; then
   RELEASE="$RELEASE -flto=${JOBS:-2} -ffat-lto-objects"

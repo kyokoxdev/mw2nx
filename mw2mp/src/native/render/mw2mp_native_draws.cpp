@@ -6464,15 +6464,19 @@ class VulkanDrawsImpl final : public VulkanDraws {
     if (!hold_open_ || hold_s <= 0) {
       return false;
     }
+    // One complete frame was not enough (run 036: hold ended at 8.6 s with 7 pipelines still compiling, then ~120
+    // more compiled over 40 s with 2,000-5,000 draws skipped per 10 s): the end needs an empty compile queue and
+    // 30 complete frames in a row (~0.5 s; the camera moves at spawn and meets new pipelines).
+    complete_frames_ = incomplete || !compile_pending_.empty() ? 0 : complete_frames_ + 1;
     const auto held_for = std::chrono::steady_clock::now() - in_match_since_;
-    if (incomplete && held_for < std::chrono::seconds(hold_s)) {
+    if (complete_frames_ < 30 && held_for < std::chrono::seconds(hold_s)) {
       ++held_frames_;
       return true;
     }
     hold_open_ = false;
     REXLOG_INFO("[native] load hold: {} frames kept off screen over {:.1f} s after the match started, ended by {}",
                 held_frames_, std::chrono::duration<double>(held_for).count(),
-                incomplete ? "the time limit (draws still skipped)" : "the first complete frame");
+                complete_frames_ < 30 ? "the time limit (draws still skipped)" : "30 complete frames, queue empty");
     return false;
   }
 
@@ -6485,6 +6489,7 @@ class VulkanDrawsImpl final : public VulkanDraws {
       in_match_since_ = now;
       hold_open_ = true;  // HoldOutput
       held_frames_ = 0;
+      complete_frames_ = 0;
     }
     if (!in_match) {
       hold_open_ = false;
@@ -17889,7 +17894,7 @@ class VulkanDrawsImpl final : public VulkanDraws {
   // The load window (UpdateLoadWindow) and the shaders SpirvOf read at once in it; all the ring's.
   bool load_window_ = true, in_match_previous_ = false;
   bool hold_open_ = false;  // HoldOutput
-  uint64_t skipped_at_output_ = 0, held_frames_ = 0;
+  uint64_t skipped_at_output_ = 0, held_frames_ = 0, complete_frames_ = 0;
   std::chrono::steady_clock::time_point in_match_since_{};
   uint64_t spirv_reads_now_ = 0, ns_spirv_reads_now_ = 0, spirv_reads_now_reported_ = 0,
            ns_spirv_reads_now_reported_ = 0;
