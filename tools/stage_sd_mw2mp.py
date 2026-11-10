@@ -1,6 +1,7 @@
 """Assembles the SD-card folder for mw2mp from your own disc and title update 6:
 
   <out>/switch/mw2mp/mw2mp.nro   (mw2mp/build_switch.sh)
+  <out>/switch/mw2mp/mw2sp.nro   the campaign (mw2sp/build_switch.sh), same folders
   <out>/switch/mw2mp/game/       the disc's files ($SystemUpdate left out) + the update's .xexp
   <out>/switch/mw2mp/update/     the rest of title update 6 (patch_mp.ff, dlc1_ui_mp.ff, dlc2_ui_mp.ff)
 
@@ -21,7 +22,7 @@ import xiso  # noqa: E402
 
 TU6 = os.path.join(ROOT, "work", "load_tu6")
 TU_FILES = ("patch_mp.ff", "dlc1_ui_mp.ff", "dlc2_ui_mp.ff")
-NRO = os.path.join(ROOT, "mw2mp", "out", "switch", "mw2mp.nro")
+NROS = [os.path.join(ROOT, p, "out", "switch", p + ".nro") for p in ("mw2mp", "mw2sp")]
 
 
 def main():
@@ -36,7 +37,7 @@ def main():
 
     if not a.iso or not os.path.isfile(a.iso):
         sys.exit("no disc ISO: put it in iso/ or pass --iso")
-    missing = [f for f in ("default_mp.xexp",) + TU_FILES if not os.path.isfile(os.path.join(TU6, f))]
+    missing = [f for f in ("default_mp.xexp", "default.xexp") + TU_FILES if not os.path.isfile(os.path.join(TU6, f))]
     if missing:
         sys.exit(f"title update 6 is not in {TU6} (no {', '.join(missing)}): run tools/install/tu6_setup.py first")
 
@@ -65,11 +66,12 @@ def main():
         shutil.copy2(os.path.join(TU6, f), update)
     print(f"title update 6 -> {game} (.xexp), {update}")
 
-    if os.path.isfile(NRO):
-        shutil.copy2(NRO, dst)
-        print(f"mw2mp.nro -> {dst}")
-    else:
-        print(f"no {NRO} yet (mw2mp/build_switch.sh): run this again after the build")
+    for nro in NROS:
+        if os.path.isfile(nro):
+            shutil.copy2(nro, dst)
+            print(f"{os.path.basename(nro)} -> {dst}")
+        else:
+            print(f"no {nro} yet (its build_switch.sh): run this again after the build")
     print(f"done: copy {os.path.join(a.out, 'switch')} to the root of the SD card")
 
 

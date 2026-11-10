@@ -146,3 +146,28 @@ MW2 lives in `mw2mp/` (multiplayer, `default_mp.xex`) and later `mw2sp/`.
   - Open: black textures still show on the first map load of a session. Load hold isn't enough on its own, possibly
     textures rather than shaders/pipelines (texture shortcuts off, so not a stale stamp). The 50 s freeze (Xenos run)
     needs stack samples. D3D-level hooks (perf).
+- [~] 6 Campaign (`mw2sp/`, TU6 `default.xex`): same program as mw2mp (native renderer, native CRT, app, settings),
+  `mw2sp.nro` beside `mw2mp.nro` in `sdmc:/switch/mw2mp`; not yet run on hardware
+  - `default.xex` comes off the same disc as `default_mp.xex`; `tools/install/tu6_setup.py` now copies both xex and
+    requires `default.xexp` in the update, `tools/stage_sd_mw2mp.py` stages `mw2sp.nro` too. `xexdump work/load_tu6
+    default.xex work/dump_tu6` applies `default.xexp` (0.0.0.10 -> 0.0.6.10): base 0x82000000, entry 0x82370940,
+    32.5 MB image, `.text` 0x82090000 + 3,546,484.
+  - `mw2sp/overrides.toml` seeded from mw2-recompiled `config/MW2.toml`: setjmp `0x823DFF10`, longjmp `0x823E08C0`,
+    12 function extents (one branch ladder, 11 jump-table leaves), same register-local options and `skip_msr = true` as
+    mw2mp (328 mfmsr / 327 lwarx sites, same CAS-loop shape). Two unresolved tail branches declared standalone:
+    `0x82091758` (thunk table, same as mw2mp's `0x820A1640` family) and `0x82267FC8` (the campaign's twin of mw2mp's
+    `0x82368AE8`). `[rexcrt]`: memcpy `0x823DE1F0`, memset `0x823DE090` (same shapes as mw2mp's; keys stay
+    `mw2mp_*` so `mw2mp_crt.cpp` builds unchanged).
+  - `tools/codegen_mw2sp.sh`: 19,108 functions (37 from `mw2sp/gaps.toml`, `tools/codegen_gaps.py --text
+    82090000:823F1D74 --image-size 32505856`, report in `work/dump_tu6/codegen_gaps_mw2sp.txt`), 59 files; 6
+    read-before-write reports, all KNOWN (two `subfe rN,rN,rN`, three VMX copy kernels, setjmp itself); 14/14 setjmp
+    sites protected.
+  - Sharing: `mw2mp/mw2mp_sources.cmake` lists mw2mp's sources (all but `main.cpp`); `mw2sp/CMakeLists.txt` builds
+    them with `-include mw2sp/src/mw2sp_game_remap.h`. What mw2mp/src takes from `default_mp.xex` by address is only
+    the `cl_ingame` dvar and the CRT pair: its three D3D shader hooks (`sub_8259BC90`, `sub_8259C038`, `sub_825A2FB8`)
+    are BO2 addresses inside MW2's `.data` (no function in either program), so nothing to remap. The campaign has no
+    `cl_ingame`: `sv_running` stands in (`MW2_IN_GAME_DVAR`, dvar_t* at `0x833FDB58`, registered by `sub_822E15D8`).
+    Its own shader library `mw2sp_shaders.spvpack` (`MW2_SP=1 tools/mw2shaders/build_mw2mp_shaders.sh <work>`: every
+    disc zone that is not multiplayer) and pipeline cache folder `cache_sp`; `mw2sp.toml` for its settings.
+  - To check on hardware: the main menu (does `sv_running` stay 0 there, or does the menu run a level?), first level
+    load with the load hold, then the level itself.

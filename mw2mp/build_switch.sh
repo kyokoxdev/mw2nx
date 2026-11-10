@@ -6,6 +6,20 @@ set -euo pipefail
 APP="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$APP/.."
 OUT="$APP/out/switch"
+# MW2_PGO (profile-guided optimization, mw2mp/CMakeLists.txt; development only):
+#   generate  training build in out/switch-pgo. Run it with mw2mp_benchmark = true in a private match, leave the
+#             controller alone; at the end of the window it writes sdmc:/switch/mw2mp/pgo. Copy that folder to
+#             MW2_PGO_DIR (default data/pgo), then put the normal NRO back.
+#   use       normal build in out/switch with that profile (retrain after codegen or flag changes).
+case "${MW2_PGO:-}" in
+  generate) OUT="$APP/out/switch-pgo" ;;
+  use|"") ;;
+  *) echo "MW2_PGO must be generate or use" >&2; exit 1 ;;
+esac
+PGO_DIR="${MW2_PGO_DIR:-$(bash "$ROOT/tools/data_dir.sh")/pgo}"
+if [ "${MW2_PGO:-}" = "use" ] && [ -z "$(find "$PGO_DIR" -name '*.gcda' -print -quit 2>/dev/null)" ]; then
+  echo "MW2_PGO=use: no .gcda files in $PGO_DIR" >&2; exit 1
+fi
 export DEVKITPRO="${DEVKITPRO:-$HOME/devkitpro}"
 MESA_SDK="${MESA_SDK:-$(bash "$ROOT/tools/data_dir.sh")/mesa/mesa-unified-install/opt/devkitpro/portlibs/switch}"
 GEN="$APP/generated/default_mp"
@@ -26,6 +40,7 @@ if [ "${MW2_LTO:-0}" = "1" ]; then
 fi
 cmake -S "$APP" -B "$OUT" -G Ninja "-DCMAKE_MAKE_PROGRAM=$(command -v ninja)" \
   -DCMAKE_BUILD_TYPE=Release "-DCMAKE_CXX_FLAGS_RELEASE=$RELEASE" \
+  "-DMW2MP_PGO=${MW2_PGO:-}" "-DMW2MP_PGO_DIR=$PGO_DIR" \
   "-DMW2MP_GUEST_MEMORY_PLAIN=$([ "${MW2_GUEST_MEMORY_PLAIN:-1}" = "1" ] && echo ON || echo OFF)" \
   "-DCMAKE_TOOLCHAIN_FILE=$ROOT/tools/switch/cmake/switch-devkitA64.cmake" \
   "-DREXSDK_DIR=$ROOT/sdk" \

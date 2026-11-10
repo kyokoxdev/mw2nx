@@ -1,5 +1,6 @@
 """Sets up Modern Warfare 2 for mw2nx from your own disc: finds the ISO, then downloads title update 6 and lays out
-both in one folder (default work/load_tu6/): default_mp.xex from the disc, and the update's files beside it.
+both in one folder (default work/load_tu6/): default_mp.xex and default.xex (the campaign) from the disc, and the
+update's files beside them.
 
 Nothing is downloaded until the disc checks out, and a TU6 package already in iso/ or the output folder is used as is.
 
@@ -24,7 +25,7 @@ TU_NAME = "TU_10LC20N_0000018000000.00000000001GA"
 # The CoD Xenon archive at a fixed commit, as mw2-recompiled's launcher uses, so the file cannot change.
 TU_URL = ("https://raw.githubusercontent.com/codxenon/xbox360-title-updates/25de2389ce214dae6159fcd45a9581cb3b640bd9/"
           "games/Call%20of%20Duty%20-%20Modern%20Warfare%202%20%28USA%2C%20Europe%29/TU6/" + TU_NAME)
-TU_FILES = ("default_mp.xexp", "patch_mp.ff", "dlc1_ui_mp.ff", "dlc2_ui_mp.ff")
+TU_FILES = ("default_mp.xexp", "default.xexp", "patch_mp.ff", "dlc1_ui_mp.ff", "dlc2_ui_mp.ff")
 ISO_DIR = os.path.join(ROOT, "iso")
 DEFAULT_OUT = os.path.join(ROOT, "work", "load_tu6")
 
@@ -80,9 +81,9 @@ def run(iso, out, log):
         download(tu, log)
     s, entries = open_update(tu)
 
-    log("Copying default_mp.xex from the disc")
+    log("Copying default_mp.xex and default.xex from the disc")
     with xiso.Xiso(iso) as x:
-        x.extract(out, skip=lambda rel: rel.lower() != "default_mp.xex")
+        x.extract(out, skip=lambda rel: rel.lower() not in ("default_mp.xex", "default.xex"))
     for e in entries.values():
         log(f"Writing {e['name']}")
         with open(os.path.join(out, e["name"]), "wb") as f:

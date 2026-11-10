@@ -1,5 +1,5 @@
 // BO2-only systems the native renderer (src/native, from bo2-360-nx) calls into, answered "feature off" for MW2:
-// cheats, presets, the benchmark, GPU skinning, the credits line and the PC tools. Each one moves to a real MW2
+// cheats, presets, GPU skinning, the credits line and the PC tools. Each one moves to a real MW2
 // implementation when the renderer needs it (docs/MW2.md, milestone 4).
 
 #include <algorithm>
@@ -13,7 +13,6 @@
 #include <rex/platform.h>
 #include <rex/system/kernel_state.h>
 
-#include "mw2mp_benchmark.h"
 #include "mw2mp_cheats.h"
 #include "mw2mp_credits.h"
 #include "mw2mp_debug_options.h"
@@ -67,12 +66,6 @@ void ConfigureCores() {
 #endif
 }
 }  // namespace mw2mp
-
-namespace mw2mp::benchmark {
-void AnnotateFrame() {}
-int AbArm() { return -1; }
-int AbArmCached() { return -1; }
-}  // namespace mw2mp::benchmark
 
 namespace mw2mp::cheats {
 int GetCrosshairOverlays(CrosshairOverlay*, int) { return 0; }
@@ -135,8 +128,12 @@ namespace mw2mp::preset {
 // The current value is the byte at +12: the game itself sets cl_ingame to 1 when the connection state is 9 (active)
 // and the byte reads 0, and back to 0 otherwise (lwz r3,22796(r11); lbz r10,12(r3) near 0x82185120). false until the
 // dvar is registered.
+// The campaign (mw2sp/src/mw2sp_game_remap.h) has no cl_ingame and names its own dvar_t* here.
+#ifndef MW2_IN_GAME_DVAR
+#define MW2_IN_GAME_DVAR 0x825A590Cu
+#endif
 bool ClientInGame() {
-  constexpr uint32_t kClInGameDvar = 0x825A590Cu;
+  constexpr uint32_t kClInGameDvar = MW2_IN_GAME_DVAR;
   uint8_t* const base = rex::system::kernel_memory()->virtual_membase();
   const uint32_t dvar = rex::memory::load_and_swap<uint32_t>(base + kClInGameDvar);
   return dvar && base[dvar + 12] != 0;

@@ -234,6 +234,13 @@ KNOWN = {
     "sub_823AA1D0": "MW2: VMX copy kernel: xor r30,r30,r30 (zero whatever r30 held)",
     "sub_823AA560": "MW2: VMX copy kernel: stvlx128 saves of v64/v65 and xor r30,r30,r30",
     "sub_8241C710": "MW2: the game's setjmp itself (saves every register); every call goes through ppc_setjmp",
+    # MW2 campaign, TU6 (mw2sp/generated)
+    "sub_821A6420": "MW2 SP: subfe r29,r29,r29: the result is -1 + CA whatever r29 held",
+    "sub_82250308": "MW2 SP: subfe r19,r19,r19: the result is -1 + CA whatever r19 held",
+    "sub_823712B4": "MW2 SP: VMX copy kernel: stvlx128 v64/v65 to the stack in its prologue (a save)",
+    "sub_82371780": "MW2 SP: VMX copy kernel: xor r30,r30,r30 (zero whatever r30 held)",
+    "sub_82371B10": "MW2 SP: VMX copy kernel: stvlx128 saves of v64/v65 and xor r30,r30,r30",
+    "sub_823DFF10": "MW2 SP: the game's setjmp itself (saves every register); every call goes through ppc_setjmp",
 }
 
 

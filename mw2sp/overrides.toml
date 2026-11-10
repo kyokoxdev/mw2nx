@@ -1,0 +1,58 @@
+# ============================================================================
+#  MW2 campaign (TU6 default.xex) - manual declarations for the codegen
+#
+#  Starting point: addresses from PaulCombal/mw2-recompiled config/MW2.toml
+#  (XenonRecomp config, same TU6 image), as mw2mp/overrides.toml was seeded
+#  from MW2MP.toml. Differences from mw2mp: image base is the same (0x82000000)
+#  but every address below is the campaign's own.
+# ============================================================================
+
+# --- setjmp / longjmp (root keys: must stay ABOVE [functions]) ---------------
+setjmp_address = 0x823DFF10
+longjmp_address = 0x823E08C0
+
+# Register locals, as mw2mp/overrides.toml.
+cr_as_local = true
+xer_as_local = true
+ctr_as_local = true
+non_volatile_as_local = true
+
+# mfmsr / mtmsrd: no global lock, as mw2mp (run 028: the lock serialised every game thread). Re-check in
+# generated/ that each mfmsr region is a pure lwarx/stwcx. CAS loop before trusting this.
+skip_msr = true
+
+[functions]
+
+# --- Compact branch ladder the analyzer splits (mw2-recompiled) --------------
+"0x8232D838" = { size = 0x9C }
+
+# --- Leaf functions with jump tables, absent from .pdata (mw2-recompiled
+#     tools/fixbounds.py: bl targets, padding runs, case labels) -------------
+"0x820ED8D0" = { size = 0x98 }
+"0x82140530" = { size = 0x118 }
+"0x82140670" = { size = 0x114 }
+"0x82140810" = { size = 0x3B8 }
+"0x822C8A30" = { size = 0x88 }
+"0x822D0BF0" = { size = 0xE0 }
+"0x822D2220" = { size = 0x94 }
+"0x822DF148" = { size = 0x20C }
+"0x822DF358" = { size = 0x1E0 }
+"0x822E2778" = { size = 0x1B0 }
+"0x823C82B0" = { size = 0x14C }
+
+# --- Standalone functions the analyzer never claimed -------------------------
+# Thunk `addi r3,r3,4; b 0x82099158` (follows the thunk ending at 0x82091758); reached only by the tail branch in the
+# thunk table at 0x8209498C.
+"0x82091758" = { }   # addi r3,r3,4; b 0x82099158                    <- 0x8209498C
+# Follows the thunk `addi r3,r3,0x6C; b 0x82266C40` (ends 0x82267FC8); reached only by the tail branch in the bdz jump
+# ladder at 0x8226C304. Same body as mw2mp's 0x82368AE8 (lis r8,0x8200; lwz r11,0x40(r3); lfs f13,0x44(r3) ...).
+"0x82267FC8" = { }   # lis r8,0x8200; lwz r11,0x40(r3); lfs f13,0x44(r3) ... <- 0x8226C304
+
+# --- Native C library functions ([rexcrt]) -----------------------------------
+# The same XDK CRT as mw2mp: the keys stay mw2mp_* so mw2mp/src/mw2mp_crt.cpp builds unchanged for the campaign.
+# Matched against mw2mp's by instruction shape (equal apart from branch targets); call sites counted in generated/.
+[rexcrt]
+#  0x823DE1F0 memcpy (524 call sites): std r3,-8(r1); clrlwi r6,r3,29; dcbt r0,r4 ... (mw2mp 0x8241A9F0).
+mw2mp_memcpy = 0x823DE1F0
+#  0x823DE090 memset (372 call sites): addi r0,r5,1; mtctr r0; ori r6,r3,0 ... rlwimi r4,r4,8,16,23 (mw2mp 0x8241A890).
+mw2mp_memset = 0x823DE090

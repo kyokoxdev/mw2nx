@@ -15,6 +15,15 @@
 #include "native/render/mw2mp_native_precompile.h"
 #include "native/render/mw2mp_graphics_settings.h"
 
+// mw2sp builds this same app for the campaign (mw2sp/CMakeLists.txt): MW2_CAMPAIGN 1, MW2_APP_NAME "mw2sp". Both
+// programs share sdmc:/switch/mw2mp (the disc's files hold default.xex and default_mp.xex).
+#ifndef MW2_CAMPAIGN
+#define MW2_CAMPAIGN 0
+#endif
+#ifndef MW2_APP_NAME
+#define MW2_APP_NAME "mw2mp"
+#endif
+
 #if REX_PLATFORM_SWITCH
 // libnx's (switch.h's typedefs collide with rex): starts the bsd service that BSD sockets need on Horizon.
 struct SocketInitConfig;
@@ -26,11 +35,13 @@ class Mw2mpApp : public rex::ReXApp {
   using rex::ReXApp::ReXApp;
 
   static std::unique_ptr<rex::ui::WindowedApp> Create(rex::ui::WindowedAppContext& ctx) {
-    return std::unique_ptr<Mw2mpApp>(new Mw2mpApp(ctx, "mw2mp", PPCImageConfig));
+    return std::unique_ptr<Mw2mpApp>(new Mw2mpApp(ctx, MW2_APP_NAME, PPCImageConfig));
   }
 
-  // The SDK loads game:\default.xex (the campaign); multiplayer is default_mp.xex.
+  // The SDK loads game:\default.xex (the campaign, mw2sp: MW2_CAMPAIGN keeps it); multiplayer is default_mp.xex.
+#if !MW2_CAMPAIGN
   void OnLoadXexImage(std::string& xex_image) override { xex_image = "game:\\default_mp.xex"; }
+#endif
 
   // The emulated Xenos GPU unless the toml or command line names another (the cvar defaults to none: black screen).
   // mw2mp_renderer = native/skeleton: the port's own graphics system (native/), and ReXApp loads no plugin.
@@ -73,7 +84,7 @@ class Mw2mpApp : public rex::ReXApp {
     if (!std::filesystem::is_directory(dir / "game", ec) &&
         std::filesystem::is_directory("sdmc:/switch/mw2mp/game", ec)) {
       dir = "sdmc:/switch/mw2mp";
-      paths.config_path = dir / "mw2mp.toml";
+      paths.config_path = dir / MW2_APP_NAME ".toml";
     }
     if (dir.empty()) {
       return;
