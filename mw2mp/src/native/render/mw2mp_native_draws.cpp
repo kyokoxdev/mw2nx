@@ -46,6 +46,7 @@
 
 #include "mw2mp_graphics_settings.h"
 #include "../../mw2mp_preset.h"  // the graphics presets' texture detail
+#include "../../mw2mp_graphics_preset.h"  // the presets' dvars, held once a frame
 #include "../../mw2mp_benchmark.h"  // the benchmark A/B (mw2mp_native_nvk_copy_engine_b)
 #include "../../mw2mp_debug_options.h"  // the DEBUG page turns shortcuts off
 #include "../../mw2mp_debug_watch.h"
@@ -658,8 +659,14 @@ REXCVAR_DEFINE_INT32(mw2mp_native_load_hold_s, 60, "BO2",
 // objects missing). In a match a second thread compiles no more (368 pipelines in the first minute against 365 with
 // one, each taking twice as long: newlib's heap lock sets the pace there), while in the menus, where the cores are
 // free, two threads do twice the work of one. One thread by default: the second one outside a match has not been
-// measured on its own.
-REXCVAR_DEFINE_INT32(mw2mp_native_compile_threads, 1, "BO2",
+// measured on its own. The campaign takes two: its held frames at a level's start (WaitCompilesHeld) stop the game, so
+// the cores are as free as in the menus.
+#if defined(MW2_CAMPAIGN) && MW2_CAMPAIGN
+#define MW2MP_COMPILE_THREADS_DEFAULT 2
+#else
+#define MW2MP_COMPILE_THREADS_DEFAULT 1
+#endif
+REXCVAR_DEFINE_INT32(mw2mp_native_compile_threads, MW2MP_COMPILE_THREADS_DEFAULT, "BO2",
                      "Native renderer, with mw2mp_native_async_pipelines: how many threads compile pipelines. The "
                      "second only takes one outside a match (loading screens, menus) while two or more wait, so in a "
                      "match and with nothing queued it sleeps. 1 = one thread, as before")
@@ -6453,6 +6460,7 @@ class VulkanDrawsImpl final : public VulkanDraws {
     // mw2mp_native_pipelines_save_in_match says.
     SaveCacheWhenDue();
     UpdateLoadWindow();
+    mw2mp::gfx_preset::Apply();
   }
 
   // mw2mp_native_load_hold_s. Each call covers the draws since the previous one (one frame).
@@ -6471,13 +6479,44 @@ class VulkanDrawsImpl final : public VulkanDraws {
     const auto held_for = std::chrono::steady_clock::now() - in_match_since_;
     if (complete_frames_ < 30 && held_for < std::chrono::seconds(hold_s)) {
       ++held_frames_;
+#if defined(MW2_CAMPAIGN) && MW2_CAMPAIGN
+      WaitCompilesHeld(in_match_since_ + std::chrono::seconds(hold_s));
+#endif
       return true;
     }
     hold_open_ = false;
-    REXLOG_INFO("[native] load hold: {} frames kept off screen over {:.1f} s after the match started, ended by {}",
+    REXLOG_INFO("[native] load hold: {} frames kept off screen over {:.1f} s after the match started ({:.1f} s of it "
+                "with the game held for compiles), ended by {}",
                 held_frames_, std::chrono::duration<double>(held_for).count(),
+                std::chrono::duration<double>(held_waiting_).count(),
                 complete_frames_ < 30 ? "the time limit (draws still skipped)" : "30 complete frames, queue empty");
     return false;
+  }
+
+  // The campaign, a held frame (HoldOutput): the ring waits here for the pipelines that frame queued, so the game
+  // stops behind it, as a longer load with the loading image on screen, and both compile threads get the cores the
+  // game would take. Multiplayer cannot stop (a drop online); the campaign has no one to drop. With the game running,
+  // a mission's first visit compiled at 613 ms a pipeline, 17 per 10 s with 11,707 draws skipped per 10 s and the
+  // game at 15-20 fps (run mw2sp_004, the mission after S.S.D.D.: ~470 new pipelines).
+  void WaitCompilesHeld(std::chrono::steady_clock::time_point deadline) {
+    if (compile_pending_.empty()) {
+      return;
+    }
+    const auto start = std::chrono::steady_clock::now();
+    {
+      std::lock_guard<std::mutex> lock(compile_mutex_);
+      compile_held_ = true;
+    }
+    compile_cv_.notify_all();
+    while (!compile_pending_.empty() && std::chrono::steady_clock::now() < deadline) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(4));
+      CollectCompiledPipelines();
+    }
+    {
+      std::lock_guard<std::mutex> lock(compile_mutex_);
+      compile_held_ = false;
+    }
+    held_waiting_ += std::chrono::steady_clock::now() - start;
   }
 
   // End of a frame, ring thread: whether SpirvOf reads a missing shader at once (mw2mp_native_load_wait_s).
@@ -6490,6 +6529,7 @@ class VulkanDrawsImpl final : public VulkanDraws {
       hold_open_ = true;  // HoldOutput
       held_frames_ = 0;
       complete_frames_ = 0;
+      held_waiting_ = {};
     }
     if (!in_match) {
       hold_open_ = false;
@@ -6500,6 +6540,9 @@ class VulkanDrawsImpl final : public VulkanDraws {
     }
     in_match_previous_ = in_match;
     load_window_ = wait_s > 0 && (!in_match || now - in_match_since_ < std::chrono::seconds(wait_s));
+#if defined(MW2_CAMPAIGN) && MW2_CAMPAIGN
+    load_window_ = load_window_ || (wait_s > 0 && hold_open_);  // the game is held anyway (WaitCompilesHeld)
+#endif
   }
 
   // End of a frame, ring thread.
@@ -16349,7 +16392,8 @@ class VulkanDrawsImpl final : public VulkanDraws {
     for (;;) {
       compile_cv_.wait(lock, [this, helper] {
         return compile_stop_ ||
-               (helper ? compile_queue_.size() >= 2 && !mw2mp::cheats::InMatch() : !compile_queue_.empty());
+               (helper ? compile_queue_.size() >= 2 && (compile_held_ || !mw2mp::cheats::InMatch())
+                       : !compile_queue_.empty());
       });
       if (compile_stop_) {
         return;
@@ -17867,6 +17911,7 @@ class VulkanDrawsImpl final : public VulkanDraws {
   std::deque<CompileJob> compile_done_;
   std::atomic<bool> compiles_ready_{false};
   bool compile_stop_ = false;
+  bool compile_held_ = false;  // WaitCompilesHeld: the game is held, the helper may take jobs in a match
   std::thread compile_thread_;
   std::thread compile_helper_;  // mw2mp_native_compile_threads
   std::atomic<uint32_t> compiles_helper_{0};
@@ -17895,6 +17940,7 @@ class VulkanDrawsImpl final : public VulkanDraws {
   bool load_window_ = true, in_match_previous_ = false;
   bool hold_open_ = false;  // HoldOutput
   uint64_t skipped_at_output_ = 0, held_frames_ = 0, complete_frames_ = 0;
+  std::chrono::steady_clock::duration held_waiting_{};  // WaitCompilesHeld, this hold
   std::chrono::steady_clock::time_point in_match_since_{};
   uint64_t spirv_reads_now_ = 0, ns_spirv_reads_now_ = 0, spirv_reads_now_reported_ = 0,
            ns_spirv_reads_now_reported_ = 0;

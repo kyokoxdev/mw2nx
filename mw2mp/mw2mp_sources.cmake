@@ -3,6 +3,7 @@
 set(MW2MP_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/src/mw2mp_native_stubs.cpp
     ${CMAKE_CURRENT_LIST_DIR}/src/mw2mp_benchmark.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/src/mw2mp_graphics_preset.cpp
     # MW2's CRT memcpy/memset as native code ([rexcrt] in overrides.toml)
     ${CMAKE_CURRENT_LIST_DIR}/src/mw2mp_crt.cpp
     ${CMAKE_CURRENT_LIST_DIR}/src/mw2mp_page_writes.cpp

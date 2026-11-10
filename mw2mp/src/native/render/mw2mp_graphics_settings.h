@@ -62,6 +62,10 @@ void WatchSettingsInLive();
 // resolution and video_mode_refresh_rate), except the ones that come from the command line. Must run
 // before the game requests the video mode. Not called for BO2 (see above).
 void ApplySettingsGraphics();
+
+// Adaptive frame pacing (mw2mp_frame_pacing), once per Swap on the ring thread: the interval since the previous Swap
+// and what the frame cost without waiting for presentation (the busier of the ring and the GPU), in ms.
+void PaceFrame(double interval_ms, double cost_ms);
 // The start-up part that does apply to BO2: the handheld GPU clock request (none by default) and the overlay's FPS
 // block.
 void RequestBootClocks();

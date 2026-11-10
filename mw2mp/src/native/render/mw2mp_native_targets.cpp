@@ -2530,6 +2530,20 @@ class VulkanTargets final : public NativeTargets, public TargetContext {
                                delta(e::kPreparerScenery), times(e::kPreparerScenery),
                                delta(e::kPreparerOut), times(e::kPreparerOut));
         }
+        {
+          // Adaptive frame pacing (mw2mp_frame_pacing): what this frame cost without the waits for presentation,
+          // so a 30 FPS lock can tell when 60 fits again. The ring's working time includes its waits for the GPU
+          // and, inside RefreshGuestOutput's SDK part, the vblank wait a lock adds: both come off, and the GPU's
+          // own time (timestamps, x1.627 as above) stands in for the first.
+          const uint64_t ns_sdk = ns_before_call_ + ns_after_call_;
+          const uint64_t ring_ns = mw2mp::waits::g_ns_ring_working.load(std::memory_order_relaxed) - hitch_ns_ring_;
+          const uint64_t off_ns =
+              (ns_waits_gpu_ - hitch_ns_waits_gpu_) + (ns_wait_output_ - hitch_ns_wait_output_) + (ns_sdk - hitch_ns_sdk_);
+          const double ring_ms = ring_ns > off_ns ? double(ring_ns - off_ns) / 1e6 : 0.0;
+          const double gpu_ms = double(gpu_ns_ - hitch_gpu_ns_) / 1e6 * 1.627;
+          mw2mp::settings::PaceFrame(ms, std::max(ring_ms, gpu_ms));
+          hitch_ns_sdk_ = ns_sdk;
+        }
         for (uint32_t t = 0; t < mw2mp::waits::kNumTypes; ++t) {
           hitch_waits_ns_[t] = mw2mp::waits::g_ns[t].load(std::memory_order_relaxed);
           hitch_waits_times_[t] = mw2mp::waits::g_times[t].load(std::memory_order_relaxed);
@@ -7594,6 +7608,7 @@ class VulkanTargets final : public NativeTargets, public TargetContext {
   uint64_t hitch_waits_ns_[mw2mp::waits::kNumTypes] = {};
   uint64_t hitch_waits_times_[mw2mp::waits::kNumTypes] = {};
   uint64_t hitch_ns_waits_gpu_ = 0, hitch_ns_wait_output_ = 0;
+  uint64_t hitch_ns_sdk_ = 0;  // ns_before_call_ + ns_after_call_ when the previous frame closed (pacing)
   uint64_t hitch_bytes_hash_ = 0, hitch_hashes_postponed_ = 0;
   uint64_t hitch_draws_ = 0, hitch_ns_ring_ = 0, hitch_ns_textures_ = 0;
   uint64_t hitch_textures_uploads_ = 0, hitch_bytes_uploaded_ = 0, hitch_textures_created_ = 0;

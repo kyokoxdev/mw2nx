@@ -18,6 +18,7 @@
 #include "mw2mp_debug_options.h"
 #include "mw2mp_debug_watch.h"
 #include "mw2mp_gpu_skin.h"
+#include "mw2mp_graphics_preset.h"
 #include "mw2mp_memcpy_callers.h"
 #include "mw2mp_pc_profiler.h"
 #include "mw2mp_preset.h"
@@ -136,6 +137,11 @@ bool ClientInGame() {
   constexpr uint32_t kClInGameDvar = MW2_IN_GAME_DVAR;
   uint8_t* const base = rex::system::kernel_memory()->virtual_membase();
   const uint32_t dvar = rex::memory::load_and_swap<uint32_t>(base + kClInGameDvar);
+#ifdef MW2_CGAME_FLAG
+  if (!base[MW2_CGAME_FLAG]) {
+    return false;  // the campaign: a level is loading or none is loaded (mw2sp_game_remap.h)
+  }
+#endif
   return dvar && base[dvar + 12] != 0;
 }
 // mw2nx: false. FrontEnd() arms BO2's campaign front-end shortcuts (mw2mp_native_front_end_no_prepass and _reuse);
@@ -143,7 +149,7 @@ bool ClientInGame() {
 // shadow maps included (no shadows, surfaces lit flat; ~8,000 draws per 10 s, run 024), and the reuse compared scene
 // constants on every draw. MW2MP's menus have no 3D scene to save.
 bool FrontEnd() { return false; }
-uint32_t MipsMinus() { return 0; }
+uint32_t MipsMinus() { return mw2mp::gfx_preset::TextureMipsMinus(); }
 void NoteFirstVisitCompile() {}
 bool OnScreenNote(uint32_t (&)[4]) { return false; }
 bool OnScreenBanner(uint32_t (&)[8]) { return false; }

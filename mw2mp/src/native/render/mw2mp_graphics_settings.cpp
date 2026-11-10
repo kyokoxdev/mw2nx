@@ -10,7 +10,10 @@
 #include <rex/logging.h>
 #include <rex/ui/overlay/settings_overlay.h>
 
+#include <algorithm>
+#include <array>
 #include <atomic>
+#include <chrono>
 #include <cstdlib>
 #include <string>
 #include <vector>
@@ -105,9 +108,42 @@ REXCVAR_DEFINE_UINT32(mw2mp_swap_interval, 0, "Graphics",
                       "IMMEDIATE, that is interval 0, which is what removes the gap). 2 = 30 FPS "
                       "locked by the panel, only useful if the work fits in 33.3 ms. 1 = up to 60");
 
+/*
+ * Adaptive frame pacing: the interval above, chosen per scene (PaceFrame).
+ *
+ * Run mw2sp_006: the campaign swung between 16 and 50 ms within a second (in one 20 s window 482 frames at
+ * 15-18 ms, 348 at 18-25, 84 at 25-30 and 52 slower), which reads as stutter more than as a low frame rate. Where
+ * most frames miss 60 but fit 33.3 ms, interval 2 shows every frame for exactly two vblanks; where they do not fit
+ * 33.3 either (the heaviest stretches ran 36-75 ms with the GPU at 40-50 ms a frame), a lock would only round
+ * 35 ms up to 50, so it lets go; and it lets go when the frame's own cost (ring or GPU, measured without the wait
+ * the lock adds) shows 60 fits again. Off when mw2mp_swap_interval is set or the game's VSYNC forces an interval.
+ */
+#if defined(MW2_CAMPAIGN) && MW2_CAMPAIGN
+#define MW2MP_FRAME_PACING_DEFAULT "auto"
+#else
+#define MW2MP_FRAME_PACING_DEFAULT "off"  // multiplayer: run 037 median 17.5 ms, a lock would cost more than it gives
+#endif
+REXCVAR_DEFINE_STRING(mw2mp_frame_pacing, MW2MP_FRAME_PACING_DEFAULT, "Graphics",
+                      "Switch: auto locks to a steady 30 FPS where most frames miss 60 but fit 30, and unlocks where "
+                      "60 fits again or 30 does not fit either (steadier, fewer jumps between 60 and 20-30). off: "
+                      "never locks (mw2mp_swap_interval rules). Applied live")
+    .allowed({"auto", "off"});
+// The calibration knob: a locked frame whose cost (80th percentile) stays under this goes back to 60.
+REXCVAR_DEFINE_DOUBLE(mw2mp_frame_pacing_60_ms, 15.0, "Graphics",
+                      "Switch, mw2mp_frame_pacing = auto: the frame cost in ms (80th percentile, ring or GPU, "
+                      "without presentation waits) under which a 30 FPS lock goes back to 60. Lower: stays at 30 "
+                      "longer")
+    .range(8.0, 30.0);
+
 // Optional antialiasing on the output, applied live. The Xbox 360 draws the scene with MSAA; here there is none (it
-// costs GPU time, and it has hung NVK before), and FXAA smooths the edges for little work.
-REXCVAR_DEFINE_STRING(mw2mp_antialiasing, "off", "Graphics",
+// costs GPU time, and it has hung NVK before), and FXAA smooths the edges for little work. The campaign has it on by
+// default (edge shimmer in S.S.D.D., run mw2sp_004); multiplayer keeps it off.
+#if defined(MW2_CAMPAIGN) && MW2_CAMPAIGN
+#define MW2MP_ANTIALIASING_DEFAULT "fxaa"
+#else
+#define MW2MP_ANTIALIASING_DEFAULT "off"
+#endif
+REXCVAR_DEFINE_STRING(mw2mp_antialiasing, MW2MP_ANTIALIASING_DEFAULT, "Graphics",
                       "Image antialiasing. off: as until now. fxaa: smooths jagged edges (the Xbox 360 uses 2x MSAA, "
                       "which is not available here); costs some GPU")
     .allowed({"off", "fxaa"});
@@ -396,6 +432,63 @@ void WatchSettingsInLive() {
   rex::cvar::RegisterChangeCallback("mw2mp_visual_treatment", [](std::string_view, std::string_view value) {
     g_treatment_visual.store(ModeTreatment(value), std::memory_order_relaxed);
   });
+}
+
+// See mw2mp_frame_pacing. Only the ring thread calls it, so plain statics.
+void PaceFrame(double interval_ms, double cost_ms) {
+#if REX_PLATFORM_SWITCH
+  constexpr int kWindow = 30;  // frames per decision, 0.5-1 s
+  constexpr auto kDwell = std::chrono::seconds(2);  // the least time in a state before leaving it
+  static std::array<float, kWindow> intervals{}, costs{};
+  static int n = 0, calm = 0;
+  static bool locked = false;
+  static auto since = std::chrono::steady_clock::now();
+  if (interval_ms > 250.0) {
+    n = 0;  // a load or a pause says nothing about the scene
+    return;
+  }
+  intervals[n] = float(interval_ms);
+  costs[n] = float(cost_ms);
+  if (++n < kWindow) {
+    return;
+  }
+  n = 0;
+  const auto pct = [](std::array<float, kWindow> v, int p) {
+    const auto at = v.begin() + (kWindow - 1) * p / 100;
+    std::nth_element(v.begin(), at, v.end());
+    return double(*at);
+  };
+  const double p75 = pct(intervals, 75), p90 = pct(intervals, 90), cost80 = pct(costs, 80);
+  const double limit_60 = REXCVAR_GET(mw2mp_frame_pacing_60_ms);
+  const double slow = double(std::count_if(intervals.begin(), intervals.end(), [](float x) { return x > 36.0f; })) /
+                      kWindow;
+  const auto now = std::chrono::steady_clock::now();
+  const bool settled = now - since >= kDwell;
+  const uint32_t interval_user = REXCVAR_GET(mw2mp_swap_interval);
+  bool want = locked;
+  if (REXCVAR_GET(mw2mp_frame_pacing) != "auto" || interval_user != 0) {
+    want = false;
+  } else if (!locked) {
+    // Misses 60 often and fits 30, and the cost says so too (menus miss 60 by the game's own pacing at no cost:
+    // without this they would lock and unlock every few seconds).
+    want = settled && p75 > 18.5 && p90 < 32.0 && cost80 >= limit_60;
+  } else {
+    calm = cost80 < limit_60 ? calm + 1 : 0;
+    want = !(settled && (slow > 0.15 || calm >= 3));  // 30 does not fit, or 60 fits again
+  }
+  if (want == locked) {
+    return;
+  }
+  locked = want;
+  since = now;
+  calm = 0;
+  RexSwitchPerfSwapInterval(locked ? 2u : interval_user);
+  REXLOG_INFO("[pacing] {}: frames p75 {:.1f} ms, p90 {:.1f} ms, {:.0f} % over 36 ms; cost p80 {:.1f} ms",
+              locked ? "30 FPS lock" : "unlocked", p75, p90, slow * 100.0, cost80);
+#else
+  (void)interval_ms;
+  (void)cost_ms;
+#endif
 }
 
 }  // namespace mw2mp::settings

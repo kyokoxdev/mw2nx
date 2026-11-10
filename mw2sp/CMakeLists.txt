@@ -34,6 +34,37 @@ if(MW2SP_GUEST_MEMORY_PLAIN)
     target_compile_definitions(mw2sp_recomp PRIVATE BO2ZM_GUEST_MEMORY_PLAIN=1)
 endif()
 
+# Profile-guided optimization, as mw2mp/CMakeLists.txt (mw2sp/build_switch.sh, MW2_PGO): the generated code and the
+# app's hot native code, not the SDK. The training build writes sdmc:/switch/mw2sp/pgo at the end of the
+# mw2mp_benchmark window; object paths are relative to the build folder, so out/switch-pgo and out/switch match.
+set(MW2SP_PGO "" CACHE STRING "Switch: profile-guided optimization: generate, use or empty")
+set(MW2SP_PGO_DIR "" CACHE PATH "Switch, MW2SP_PGO=use: the folder with the training run's profile")
+if(MW2SP_PGO)
+    set(_mw2sp_pgo_native)
+    foreach(_f mw2mp_crt.cpp mw2mp_page_writes.cpp native/mw2mp_native_system.cpp
+               native/render/mw2mp_native_render.cpp native/render/mw2mp_native_targets.cpp
+               native/render/mw2mp_native_draws.cpp native/render/mw2mp_native_deferred.cpp
+               native/render/mw2mp_native_shaders.cpp native/render/mw2mp_shader_library.cpp
+               native/render/mw2mp_native_hooks.cpp native/render/mw2mp_native_texture_pool.cpp)
+        list(APPEND _mw2sp_pgo_native "${MW2MP_SRC}/${_f}")
+    endforeach()
+    if(MW2SP_PGO STREQUAL "generate")
+        # -fno-profile-values: devkitA64's libgcov reaches the indirect-call profiler's thread-locals through
+        # tpidr_el0, which is 0 on Horizon threads (bo2 faulted at 0xd68 in __gcov_indirect_call_profiler_v4).
+        set(_mw2sp_pgo_flags -fprofile-generate=/switch/mw2sp/pgo -fno-profile-values -fprofile-update=single
+            "-fprofile-prefix-path=${CMAKE_BINARY_DIR}")
+        target_compile_definitions(mw2sp PRIVATE MW2MP_PGO_GENERATE=1)
+        target_link_libraries(mw2sp PRIVATE gcov)
+    elseif(MW2SP_PGO STREQUAL "use")
+        set(_mw2sp_pgo_flags "-fprofile-use=${MW2SP_PGO_DIR}" "-fprofile-prefix-path=${CMAKE_BINARY_DIR}"
+            -fprofile-partial-training -fprofile-correction -Wno-missing-profile -Wno-coverage-mismatch)
+    else()
+        message(FATAL_ERROR "MW2SP_PGO must be generate, use or empty")
+    endif()
+    target_compile_options(mw2sp_recomp PRIVATE ${_mw2sp_pgo_flags})
+    set_property(SOURCE ${_mw2sp_pgo_native} APPEND PROPERTY COMPILE_OPTIONS ${_mw2sp_pgo_flags})
+endif()
+
 # sdmc:/switch/mw2sp/mw2sp.nro (hbmenu shows one NRO per folder): falls back to sdmc:/switch/mw2mp's game/, update/
 # and user/ folders (mw2mp/src/mw2mp_app.h); mw2sp_shaders.spvpack/.spvidx beside the NRO.
 rexglue_switch_add_nro(mw2sp NAME "mw2nx campaign" AUTHOR "kyokoxdev" VERSION "0.0.1")

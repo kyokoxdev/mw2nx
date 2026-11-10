@@ -40,7 +40,7 @@
 #include <rex/ui/vulkan/provider.h>
 #include <rex/ui/windowed_app_context.h>
 
-REXCVAR_DEFINE_STRING(mw2mp_renderer, "xenos", "BO2",
+REXCVAR_DEFINE_STRING(mw2mp_renderer, "native", "BO2",
                       "Graphics path: \"xenos\" (GPU emulation plugin), \"native\" (the native renderer) "
                       "or \"skeleton\" (keeps the game running, draws a test color)")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);

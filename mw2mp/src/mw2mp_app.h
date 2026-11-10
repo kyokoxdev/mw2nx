@@ -43,7 +43,8 @@ class Mw2mpApp : public rex::ReXApp {
   void OnLoadXexImage(std::string& xex_image) override { xex_image = "game:\\default_mp.xex"; }
 #endif
 
-  // The emulated Xenos GPU unless the toml or command line names another (the cvar defaults to none: black screen).
+  // The native renderer unless the toml or command line names another (mw2mp_renderer defaults to native: with no
+  // toml, as mw2sp had in run mw2sp_003, the Xenos emulation ran the campaign at 15 fps).
   // mw2mp_renderer = native/skeleton: the port's own graphics system (native/), and ReXApp loads no plugin.
   void OnPreSetup(rex::RuntimeConfig& config) override {
     if (mw2mp::native::Active()) {

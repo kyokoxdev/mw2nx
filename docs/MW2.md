@@ -209,3 +209,56 @@ MW2 lives in `mw2mp/` (multiplayer, `default_mp.xex`) and later `mw2sp/`.
     disc zone that is not multiplayer) and pipeline cache folder `cache_sp`; `mw2sp.toml` for its settings.
   - To check on hardware: the main menu (does `sv_running` stay 0 there, or does the menu run a level?), first level
     load with the load hold, then the level itself.
+  - Runs mw2sp_001-003: 001 crashed on `sdmc:/` paths (now rooted `/switch/...`), 002 on `0x8209CFC8` (overrides).
+    003 reached the menu and the first level's intro, all at 15 fps (title intro too): no `mw2sp.toml`, so
+    `mw2mp_renderer` stayed at its default `xenos` and the Xenos emulation drew (53-61 emulated draws a frame, fences
+    waited ~840 ms of every second, 230k emulated read faults/s while the Bink "Cinematic" thread ran at 85 %).
+    `mw2mp_renderer` now defaults to `native` (a fresh install has no toml either). Open: the Cinematic thread's cost
+    (stack samples: `sdmc:/switch/mw2sp/logs/rex/profile_stacks.flag`), and whether `sv_running` turns on at the
+    start of a load (the load hold would then end during the loading movie, before the level's pipelines compile).
+  - Run mw2sp_004 (native renderer, first run: empty `cache_sp`): S.S.D.D. ~30 fps (ring thread 100 %, 2.3-3.5 us a
+    draw, ~6,400 draws a frame against mp_afghan's ~3,400; GPU ~28 ms a frame), the next mission 15-20 fps (10k
+    draws, 953k triangles, GPU 40 ms a frame at 768 MHz, CPU 330 %). `sv_running` did turn on at the start of
+    trainer.ff's load and never went off between missions: the load hold ended inside the loading movie, never ran
+    for mission 2, and pipelines were saved only at start and on quit. Mission 2 then compiled its ~470 new pipelines
+    with the game running: 613 ms each, 17 per 10 s, 11,707 draws skipped per 10 s. Fixes: `MW2_CGAME_FLAG`
+    (`0x82648A8A`, CL_InitCGame `sub_821208D8` sets it, CL_ShutdownCGame `sub_8211FF88` clears it) gates
+    `ClientInGame` per level; in the campaign a held frame waits for its compiles (`WaitCompilesHeld`: the game
+    stops behind the ring, a longer first-visit load) with two compile threads; the load window covers the hold.
+    Open: what fills mission 2's GPU frame (`mw2mp_native_per_draw_stats_s` in `mw2sp.toml`), the light flicker in
+    S.S.D.D. (needs captures), and whether the game tolerates the ring held for tens of seconds (60 s cap).
+  - FXAA on by default in the campaign (`mw2mp_antialiasing`; the native renderer has no MSAA).
+  - Graphics presets (`mw2mp/src/mw2mp_graphics_preset.cpp`, `mw2mp_preset` = high/medium/low/very_low, campaign
+    default very_low): the game's own quality dvars (sm_*, r_dlightLimit, r_dof_enable, r_distortion, fx_drawClouds,
+    fx_marks*, ai_corpseCount, cg_brass, dynEnt_explodeMaxEnts) found by name in the dvar pool (`MW2_DVAR_POOL`
+    `0x8393DAB0`, 72-byte dvar_t, count at `MW2_DVAR_COUNT` `0x83938A90`) and written in place, held every frame below
+    high; texture detail through the renderer's mip floor. Multiplayer names no pool yet (no-op there).
+    `mw2mp_preset_test_s` steps through them for an A/B in one run.
+  - LTO and PGO for mw2sp (`MW2_LTO=1`, `MW2_PGO=generate|use`, profile in `data/pgo_sp`, written to
+    `sdmc:/switch/mw2sp/pgo` at the end of the `mw2mp_benchmark` window). Native rewrites wait for a profile of the
+    LTO build with its ELF (`debug/elf/`); candidates from mp run 040: the VMX bounds/plane culling loop (mp
+    `sub_8240DDA0`, sp `sub_823D1598`, 3.5 % on Main+Backend) and the worker-command dispatcher's polling (mp
+    `sub_823F0870`, 3.3 % on Worker2; sp's three Worker threads took ~60 % in run mw2sp_004).
+  - Run mw2sp_006 (LTO, preset low, 3 cores, GPU 768 MHz): playable, but frame times spread over 16-50 ms inside every
+    20 s window. Light stretches hold 60 (ring ~590 ms/s, GPU ~12 ms a frame); mid stretches mix 60 with 20-30
+    (ring ~980 ms/s, GPU 16-19 ms); the heaviest run 18-25 fps GPU-bound (real GPU 36-51 ms a frame, nearly all of it
+    the 1024x600 scene pass: 7-8k draws, 0.7-1.3 M triangles; the ring at ~1000 ms/s too). CPU ~300 % of 3 cores.
+    The r_*LodDist dvars are read only in `sub_82392EE0`, which hands each to `sub_82300BD0` per LOD
+    level; not confirmed as a LOD control, so not in the presets.
+    Added adaptive pacing (`mw2mp_frame_pacing`, campaign default auto, `[pacing]` log lines): interval 2 where most
+    frames miss 60 but fit 30 and the frame's own cost (ring without its waits, or GPU) says so, back to 0 where 60
+    fits (`mw2mp_frame_pacing_60_ms`, default 15) or 30 does not (over 15 % of frames past 36 ms).
+  - Campaign preset default now very_low, and the presets set a draw distance: `r_zfar` ("the distance at which
+    culling fog reaches 100% opacity; 0 is off", float 0 to FLT_MAX, registered in `sub_823A2F98`), 10000 / 6000 /
+    4000 units for medium / low / very_low, the level's own at high, as BO2 cut its draws with r_zfar.
+    `mw2mp_draw_distance` overrides it (-1 the preset's, 0 the level's own). The preset writer takes float dvars now.
+  - Model detail (BO2's other draw lever): TU6 registers no r_lodScale dvars, and r_highLodDist and its siblings
+    feed `sub_82300BD0`, an empty function. XModelGetLodForDist is `sub_82300B50` (campaign) / `sub_8232E1C0` (mp):
+    model r3, ramp distance f1, plain distance f2; versions from maxLoadedLod (+224) to numLods (+225), switch
+    distances at +64 (40-byte XModelLodInfo, numsurfs u16 at +68), radius +244, bounds +248 (checked against the getters
+    beside it). The presets hook it (`mw2mp_graphics_preset.cpp`) with BO2's rules: the ramp distance x 1 / 1.5 / 2 / 4
+    (high ... very_low, `mw2mp_model_detail` overrides), never better than the game's pick, never hiding a model the
+    game draws, long models measured from their nearest point, the second simplest kept when the simplest has fewer
+    surfaces. `[preset] model detail` logs picks every 10 s.
+  - Multiplayer presets: its dvar pool is `0x837A5890` (count `0x837A0868`, Dvar_RegisterNew `sub_8230EAA0`), so
+    `mw2mp_preset` now works there too (default still high: nothing changes unless chosen).

@@ -17,6 +17,9 @@
 
 #if defined(MW2MP_PGO_GENERATE)
 #include <sys/stat.h>
+#ifndef MW2_APP_NAME
+#define MW2_APP_NAME "mw2mp"  // mw2sp's remap header names its own folder
+#endif
 extern "C" void __gcov_dump(void);
 extern "C" void __gcov_reset(void);
 #endif
@@ -109,9 +112,10 @@ void AnnotateFrame() {
     g_done = true;
     Summarize(duration);
 #if defined(MW2MP_PGO_GENERATE)
-    mkdir("/switch/mw2mp/pgo", 0777);
+    mkdir("/switch/" MW2_APP_NAME "/pgo", 0777);
     __gcov_dump();
-    REXLOG_INFO("[pgo] profile written to sdmc:/switch/mw2mp/pgo: copy that folder to data/pgo on the PC");
+    REXLOG_INFO("[pgo] profile written to sdmc:/switch/" MW2_APP_NAME "/pgo: copy that folder to the PC (mw2mp: "
+                "data/pgo, mw2sp: data/pgo_sp)");
 #endif
   }
 }

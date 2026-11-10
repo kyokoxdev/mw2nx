@@ -47,6 +47,10 @@ skip_msr = true
 # Follows the thunk `addi r3,r3,0x6C; b 0x82266C40` (ends 0x82267FC8); reached only by the tail branch in the bdz jump
 # ladder at 0x8226C304. Same body as mw2mp's 0x82368AE8 (lis r8,0x8200; lwz r11,0x40(r3); lfs f13,0x44(r3) ...).
 "0x82267FC8" = { }   # lis r8,0x8200; lwz r11,0x40(r3); lfs f13,0x44(r3) ... <- 0x8226C304
+# AddRef-style body (`lwz r9,8(r3); ... addi r3,r9,1; stw r3,8(r11); blr`) the analyzer folded into the thunk before it,
+# 0x8209CFC0 `addi r3,r3,-4; b 0x8209CFC8`. Six vtable slots point at it directly (0x82068718, 0x82068A00, 0x82068A5C,
+# 0x82068A98, 0x82068D08, 0x82068E30). Run mw2sp_002: "[FATAL] Call to invalid or unregistered function at 0x8209CFC8".
+"0x8209CFC8" = { }   # lwz r9,8(r3); mr r11,r3; addi r10,r3,4; addi r3,r9,1 ... <- vtables at 0x82068718
 
 # --- Native C library functions ([rexcrt]) -----------------------------------
 # The same XDK CRT as mw2mp: the keys stay mw2mp_* so mw2mp/src/mw2mp_crt.cpp builds unchanged for the campaign.
