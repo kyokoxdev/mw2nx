@@ -13,6 +13,7 @@ GEN="$APP/generated/default"
 # The build depends on tools/codegen_mw2sp.sh's fix-ups: fail early without them.
 python3 -I "$ROOT/tools/setjmp_locals.py" --verify --gen "$GEN"
 python3 -I "$ROOT/tools/guest_barriers.py" --check --gen "$GEN"
+python3 -I "$ROOT/tools/direct_calls.py" --check --gen "$GEN"
 
 # Plain guest loads and stores in the generated code (MW2SP_GUEST_MEMORY_PLAIN; bo2 measured +5.8 % on the console),
 # safe with guest_barriers.py's barriers, checked above. MW2_GUEST_MEMORY_PLAIN=0 builds the volatile form.

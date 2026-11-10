@@ -33,6 +33,11 @@ SOURCES = [os.path.join(ROOT, "app", "src"), os.path.join(ROOT, "app", "CMakeLis
 # The campaign build (bo2cp, campaign/generated) also has hooks of its own in campaign/src, among them the app/src hooks
 # renamed to its addresses (campaign/src/native/bo2cp_game_remap.h); they count only for its generated code.
 CAMPAIGN_SOURCES = [os.path.join(ROOT, "campaign", "src"), os.path.join(ROOT, "campaign", "CMakeLists.txt")]
+# mw2nx: mw2mp's hooks are in mw2mp/src; the campaign (mw2sp) builds those same sources with its own remap header, so
+# its generated code counts mw2mp/src's addresses and mw2sp/src's.
+MW2MP_SOURCES = [os.path.join(ROOT, "mw2mp", "src"), os.path.join(ROOT, "mw2mp", "CMakeLists.txt"),
+                 os.path.join(ROOT, "sdk", "src"), os.path.join(ROOT, "sdk", "include")]
+MW2SP_SOURCES = MW2MP_SOURCES + [os.path.join(ROOT, "mw2sp", "src"), os.path.join(ROOT, "mw2sp", "CMakeLists.txt")]
 SKIP_EXT = (".a", ".o", ".obj", ".png", ".jpg", ".bin", ".lib", ".dll", ".exe", ".pdb", ".spv")
 CALL_ONLY = "call only"  # a line the port marks: a function it calls through the dispatch table, not a hook
 ADDRESS = re.compile(r"(?<![0-9A-Fa-f])(82[0-9A-Fa-f]{6})(?![0-9A-Fa-f])")
@@ -41,7 +46,13 @@ CALL = re.compile(r"(?<![\w])(__imp__)?sub_([0-9A-F]{8})\(ctx, base\);")
 
 def hooked(gen=GEN):
     names = set()
-    sources = SOURCES + (CAMPAIGN_SOURCES if "campaign" in os.path.normpath(gen).split(os.sep) else [])
+    parts = os.path.normpath(os.path.abspath(gen)).split(os.sep)
+    if "mw2sp" in parts:
+        sources = MW2SP_SOURCES
+    elif "mw2mp" in parts:
+        sources = MW2MP_SOURCES
+    else:
+        sources = SOURCES + (CAMPAIGN_SOURCES if "campaign" in parts else [])
     for root in sources:
         if os.path.isfile(root):
             paths = [root]

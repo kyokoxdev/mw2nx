@@ -80,10 +80,12 @@ class Mw2mpApp : public rex::ReXApp {
   void OnConfigurePaths(rex::PathConfig& paths) override {
     std::error_code ec;
     auto dir = rex::filesystem::GetExecutableFolder();
-    // Emulators may run the NRO from a temporary copy: fall back to the install folder.
+    // Emulators may run the NRO from a temporary copy, and mw2sp runs from sdmc:/switch/mw2sp with no game/ of its
+    // own: fall back to mw2mp's folder. Rooted "/switch/..." (newlib's default device is the SD), not "sdmc:/...":
+    // libstdc++ treats "sdmc:/..." as relative and std::filesystem::absolute (Runtime::SetupVfs) prepends the cwd.
     if (!std::filesystem::is_directory(dir / "game", ec) &&
-        std::filesystem::is_directory("sdmc:/switch/mw2mp/game", ec)) {
-      dir = "sdmc:/switch/mw2mp";
+        std::filesystem::is_directory("/switch/mw2mp/game", ec)) {
+      dir = "/switch/mw2mp";
       paths.config_path = dir / MW2_APP_NAME ".toml";
     }
     if (dir.empty()) {

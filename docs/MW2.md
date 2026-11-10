@@ -41,7 +41,8 @@ MW2 lives in `mw2mp/` (multiplayer, `default_mp.xex`) and later `mw2sp/`.
    hardware. Switch is the only target: no desktop builds.
 4. **Native renderer**: port bo2's `app/src/native/render` (PM4 -> Vulkan, build-time shader pack) to MW2's D3D
    layer; mw2-recompiled `docs/d3d9-seam.md`, `rendering.md`, `shaders.md` describe MW2's side.
-5. **Perf**: LTO, PGO, 4th core, as bo2 `docs/technical.md`.
+5. **Perf**: LTO, PGO, 4th core, as bo2 `docs/technical.md`; then direct calls, locals, native hot paths,
+   D3D-level hooks (plan in Status, milestone 5).
 6. **Campaign** (`default.xex`, `mw2-recompiled/config/MW2.toml`).
 7. **Packaging (installable NSP)**, only once the whole game (multiplayer and campaign) is done: the program ships
    as an NSP with no game data in it. On first start it creates its folders on the SD card (`game/`, `update/`, `user/`, each with a short "put X here" note) and, while files are
@@ -51,6 +52,17 @@ MW2 lives in `mw2mp/` (multiplayer, `default_mp.xex`) and later `mw2sp/`.
    builder's own console keys); a full application gets more memory than an NRO run as an applet. NPDM allows cores
    0-3 (`highest_cpu_id: 3`, as sphaira's "CPU Cores 4" forwarder), so the fourth core (`mw2mp_cpu_cores`) works
    from the NSP without a forwarder.
+   - One app, one title ID, for both modes: it asks Multiplayer or Campaign at start (today two NROs, `mw2mp.nro`
+     and `mw2sp.nro`, each in its own `sdmc:/switch/` folder because hbmenu shows one NRO per folder). Needs both
+     recompiled images in one program (mw2sp builds the same sources with `mw2sp_game_remap.h` today).
+   - Mode switch from inside the game: on the 360 the campaign menu's Multiplayer (and back) launches the other xex
+     through `XamLoaderLaunchTitle`, which the SDK lists but does not implement. Candidate: the app restarts itself
+     in the other mode (`appletRestartProgram` with the mode as the launch parameter) instead of tearing down the
+     guest in place.
+   - Paths: no executable folder on the SD card for an installed app. Game data already falls back to
+     `sdmc:/switch/mw2mp` (`mw2mp/src/mw2mp_app.h`); the shader packs (`mw2mp_shaders.*`, `mw2sp_shaders.*`) are
+     still read from `GetExecutableFolder()` (`mw2mp_native_render.cpp`) and must move to that fixed folder. They are
+     built from the disc's zones, so they stay on the SD card, staged by the player, never in the NSP.
 
 ## Status
 
@@ -146,8 +158,34 @@ MW2 lives in `mw2mp/` (multiplayer, `default_mp.xex`) and later `mw2sp/`.
   - Open: black textures still show on the first map load of a session. Load hold isn't enough on its own, possibly
     textures rather than shaders/pipelines (texture shortcuts off, so not a stale stamp). The 50 s freeze (Xenos run)
     needs stack samples. D3D-level hooks (perf).
+- [~] 5 Perf. Order below = payoff per effort; each step measured with `mw2mp_benchmark` before the next.
+  - [x] -O3 (`build_switch.sh`), 4th core (`mw2mp_cpu_cores` 4 from a 4-core forwarder or the NSP).
+  - [x] LTO: `MW2_LTO=1` builds and links in 15 GB WSL (+8 GB swap; link ~7 min, no swap used): `mw2mp.nro`
+    45.5 MB. Not yet measured on hardware (bo2: +10 %).
+  - [~] PGO: `MW2_PGO=generate` training build (`out/switch-pgo`, 46.5 MB) dumps gcov at the end of the
+    `mw2mp_benchmark` window to `sdmc:/switch/mw2mp/pgo`; `MW2_PGO=use MW2_LTO=1` is the final build. Train only after
+    the codegen-level steps below: a profile goes stale whenever the generated code changes.
+  - [ ] Direct calls (`tools/direct_calls.py`, not yet run for MW2). Every `sub_X` is a weak alias of `__imp__sub_X`
+    so a hook can replace it, and GCC never inlines through a weak alias, not even with LTO: the 54k direct calls in
+    the generated code are all opaque today. The tool rewrites calls to unhooked functions to `__imp__sub_X`. mw2mp
+    has no live hooks (the three BO2 shader hooks are dead), so nearly every call qualifies. Add to
+    `tools/codegen_mw2mp.sh` and `tools/codegen_mw2sp.sh`, rebuild, measure.
+  - [ ] Locals (`tools/localize.py`): more guest registers as C++ locals in the hottest functions, from a list made
+    from profiles (bo2's `app/locals.txt`). Needs the profiles from the next step.
+  - [ ] Profiles on hardware (`pc_profiler`, `tools/profile_sym.py`, `tools/pc_profile_report.py`): stack samples of
+    every game thread in a match, symbolised to `sub_X`. Drives the next three steps.
+  - [ ] Native hot paths, as bo2 (culling, entity scan, sound mixer, LZX decoder, CPU skinning, limiter): MW2's
+    equivalents from the profile, replaced with `[rexcrt]` or `REX_HOOK_RAW` as memcpy/memset are.
+  - [ ] Texture write stamps: hooks on MW2's VMX copy routines and plain-store writers mark changed pages, so the
+    texture shortcuts (re-hash/re-upload skipped for unchanged pages) can come on.
+  - [ ] GPU skinning: bo2's port (stubbed off in `mw2mp_native_stubs.cpp`).
+  - [ ] D3D-level hooks: the ring thread is the busiest (75-100 %, run 029). bo2's D3D marker hands the renderer
+    what the game's D3D calls set instead of decoding it back out of PM4. Needs MW2's D3D functions mapped (device
+    state setters near `0x82169A00`/`0x82169DE0`, constants `0x82174868`, flush `0x821752D0`; the campaign's
+    `0x8211AFC0`, `0x82122E60`, `0x821238C8` by instruction shape). Biggest job, biggest lever on the renderer.
 - [~] 6 Campaign (`mw2sp/`, TU6 `default.xex`): same program as mw2mp (native renderer, native CRT, app, settings),
-  `mw2sp.nro` beside `mw2mp.nro` in `sdmc:/switch/mw2mp`; not yet run on hardware
+  `sdmc:/switch/mw2sp/mw2sp.nro` + `mw2sp_shaders.*` in their own folder (hbmenu shows one NRO per folder), using
+  `sdmc:/switch/mw2mp`'s game/, update/, user/ and `mw2sp.toml`; not yet run on hardware
   - `default.xex` comes off the same disc as `default_mp.xex`; `tools/install/tu6_setup.py` now copies both xex and
     requires `default.xexp` in the update, `tools/stage_sd_mw2mp.py` stages `mw2sp.nro` too. `xexdump work/load_tu6
     default.xex work/dump_tu6` applies `default.xexp` (0.0.0.10 -> 0.0.6.10): base 0x82000000, entry 0x82370940,

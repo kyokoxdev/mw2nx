@@ -34,5 +34,6 @@ if(MW2SP_GUEST_MEMORY_PLAIN)
     target_compile_definitions(mw2sp_recomp PRIVATE BO2ZM_GUEST_MEMORY_PLAIN=1)
 endif()
 
-# sdmc:/switch/mw2mp/mw2sp.nro, beside mw2mp.nro: the same game/, update/ and user/ folders (mw2mp/src/mw2mp_app.h).
+# sdmc:/switch/mw2sp/mw2sp.nro (hbmenu shows one NRO per folder): falls back to sdmc:/switch/mw2mp's game/, update/
+# and user/ folders (mw2mp/src/mw2mp_app.h); mw2sp_shaders.spvpack/.spvidx beside the NRO.
 rexglue_switch_add_nro(mw2sp NAME "mw2nx campaign" AUTHOR "kyokoxdev" VERSION "0.0.1")

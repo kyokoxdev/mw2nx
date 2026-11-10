@@ -1,11 +1,14 @@
 # Symbolizes the console profiler's log: replaces each "image+0xNNN" (the SDK profiler's own format) in
 # logs/rex/rex_profile.log with the function (and file) from the ELF of the same build (app/out/switch/bo2zm, the
-# unstripped executable the build leaves beside the NRO; an ELF of a different build gives wrong names).
+# unstripped executable the build leaves beside the NRO; mw2nx: mw2mp/out/switch/mw2mp; an ELF of a different build
+# gives wrong names).
 # usage: python tools/profile_sym.py rex_profile.log bo2zm_<commit>.elf out.txt
-import re, subprocess, sys
+import os, re, subprocess, sys
 
 ADDR_RE = r"image\+0x([0-9a-f]+)"
-ADDR2LINE = r"C:\devkitPro\devkitA64\bin\aarch64-none-elf-addr2line.exe"
+# devkitA64's addr2line: DEVKITPRO (Linux default ~/devkitpro), C:\devkitPro on Windows.
+_DKP = os.environ.get("DEVKITPRO") or (r"C:\devkitPro" if os.name == "nt" else os.path.expanduser("~/devkitpro"))
+ADDR2LINE = os.path.join(_DKP, "devkitA64", "bin", "aarch64-none-elf-addr2line" + (".exe" if os.name == "nt" else ""))
 src, elf, dst = sys.argv[1:4]
 text = open(src, encoding="utf-8", errors="replace").read()
 addrs = sorted(set(re.findall(ADDR_RE, text)))
@@ -21,7 +24,7 @@ for i in range(0, len(addrs), CHUNK):
         loc = out[2 * k + 1] if 2 * k + 1 < len(out) else "?"
         loc = re.sub(r".*[/\\]", "", loc).split(" ")[0]
         func = re.sub(r"\(anonymous namespace\)::", "", func)
-        func = re.sub(r"bo2zm::native::", "", func)
+        func = re.sub(r"(bo2zm|mw2mp)::native::", "", func)
         func = re.sub(r"\(.*", "", func)  # drop the parameter list
         names[a] = "%s@%s" % (func[-70:], loc)
 

@@ -1,7 +1,9 @@
 """Assembles the SD-card folder for mw2mp from your own disc and title update 6:
 
   <out>/switch/mw2mp/mw2mp.nro   (mw2mp/build_switch.sh)
-  <out>/switch/mw2mp/mw2sp.nro   the campaign (mw2sp/build_switch.sh), same folders
+  <out>/switch/mw2sp/mw2sp.nro   the campaign (mw2sp/build_switch.sh) in its own folder: hbmenu shows one NRO per
+                                 folder. With no game/ beside it, it uses sdmc:/switch/mw2mp's folders
+                                 (mw2mp/src/mw2mp_app.h); mw2sp_shaders.spvpack/.spvidx go beside mw2sp.nro.
   <out>/switch/mw2mp/game/       the disc's files ($SystemUpdate left out) + the update's .xexp
   <out>/switch/mw2mp/update/     the rest of title update 6 (patch_mp.ff, dlc1_ui_mp.ff, dlc2_ui_mp.ff)
 
@@ -68,8 +70,10 @@ def main():
 
     for nro in NROS:
         if os.path.isfile(nro):
-            shutil.copy2(nro, dst)
-            print(f"{os.path.basename(nro)} -> {dst}")
+            to = os.path.join(a.out, "switch", os.path.basename(nro)[:-4])
+            os.makedirs(to, exist_ok=True)
+            shutil.copy2(nro, to)
+            print(f"{os.path.basename(nro)} -> {to}")
         else:
             print(f"no {nro} yet (its build_switch.sh): run this again after the build")
     print(f"done: copy {os.path.join(a.out, 'switch')} to the root of the SD card")
