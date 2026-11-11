@@ -73,6 +73,8 @@ static const uint32_t kSpirvGlowSmooth[1] = {0};
 
 #include <rex/cvar.h>
 #include <rex/filesystem.h>
+#include <rex/filesystem/devices/host_path_file.h>  // DropRangeCache, before the pipeline cache save
+#include "mw2mp_microcode_versions.h"  // WriteAll on a map change (campaign)
 
 #include <rex/graphics/registers.h>
 #include <rex/graphics/xenos.h>
@@ -655,6 +657,21 @@ REXCVAR_DEFINE_INT32(mw2mp_native_load_hold_s, 60, "BO2",
                      "being read) are not shown, so the loading image stays until the first complete frame or this "
                      "many seconds. 0 = shown with the missing surfaces black, as before")
     .range(0, 300);
+// Past the load hold, a new area's first visit still compiles pipelines with the game running, and their draws are
+// skipped: black spots, and a bright flash when a post pass is the one missing (run mw2sp_008: ~840 new pipelines,
+// up to 14,749 draws skipped in 10 s). A frame with draws skipped is then submitted but not shown, so the screen
+// repeats the last complete frame (a short stall instead of holes), at most this many frames in a row so a long
+// burst of compiles never freezes the picture.
+#if defined(MW2_CAMPAIGN) && MW2_CAMPAIGN
+#define MW2MP_HOLD_INCOMPLETE_DEFAULT 3  // 20 in run mw2sp_009: 3167 frames repeated, seen as stutter
+#else
+#define MW2MP_HOLD_INCOMPLETE_DEFAULT 0
+#endif
+REXCVAR_DEFINE_INT32(mw2mp_native_hold_incomplete_frames, MW2MP_HOLD_INCOMPLETE_DEFAULT, "BO2",
+                     "Native renderer: after the load hold, a frame with draws skipped (pipeline compiling, shader "
+                     "being read) repeats the last frame shown instead of showing the missing surfaces, up to this "
+                     "many frames in a row. 0 = shown with holes, as before")
+    .range(0, 120);
 // A first visit to a map compiles its ~230 pipelines on one thread at 155-192 ms each (~40 s with
 // objects missing). In a match a second thread compiles no more (368 pipelines in the first minute against 365 with
 // one, each taking twice as long: newlib's heap lock sets the pace there), while in the menus, where the cores are
@@ -1223,8 +1240,17 @@ REXCVAR_DEFINE_BOOL(mw2mp_native_texture_by_writes_young_ab, false, "BO2",
  * at 150-370 us each on the ring thread, and ~30 % of them have the same guest bytes and shape as a live texture
  * unused for more than 120 frames (mw2mp_native_diag_reuse). On the console ~30 % of new textures took a cold image,
  * for +0.3 % (inside the noise), so it is off by default.
+ *
+ * The campaign is another matter (run mw2sp_007): 700-1,300 new textures per 10 s, ~90 % of them the same bytes as a
+ * live one (645 of 823 in one window with that one cold), the cache stuck at its 75 % mark releasing ~35,000 textures
+ * in 16 minutes and uploading them again. On by default there.
  */
-REXCVAR_DEFINE_BOOL(mw2mp_native_texture_reuse, false, "BO2",
+#if defined(MW2_CAMPAIGN) && MW2_CAMPAIGN
+#define MW2MP_TEXTURE_REUSE_DEFAULT true
+#else
+#define MW2MP_TEXTURE_REUSE_DEFAULT false
+#endif
+REXCVAR_DEFINE_BOOL(mw2mp_native_texture_reuse, MW2MP_TEXTURE_REUSE_DEFAULT, "BO2",
                     "Native renderer: a new texture with the same guest bytes and shape as a texture "
                     "unused for 120 frames takes that one's image (nothing created, read or uploaded). false = always "
                     "a new image")
@@ -6470,7 +6496,14 @@ class VulkanDrawsImpl final : public VulkanDraws {
     const bool incomplete = skipped != skipped_at_output_;
     skipped_at_output_ = skipped;
     if (!hold_open_ || hold_s <= 0) {
-      return false;
+      // mw2mp_native_hold_incomplete_frames: past the load hold, a frame with draws skipped repeats the last one shown
+      // instead of showing holes (black spots, a flash when a post pass is missing), up to N frames in a row.
+      static const int32_t hold_max = REXCVAR_GET(mw2mp_native_hold_incomplete_frames);
+      incomplete_held_ = incomplete && incomplete_held_ < uint32_t(hold_max) ? incomplete_held_ + 1 : 0;
+      if (incomplete_held_ != 0) {
+        ++incomplete_held_total_;
+      }
+      return incomplete_held_ != 0;
     }
     // One complete frame was not enough (run 036: hold ended at 8.6 s with 7 pipelines still compiling, then ~120
     // more compiled over 40 s with 2,000-5,000 draws skipped per 10 s): the end needs an empty compile queue and
@@ -6535,6 +6568,10 @@ class VulkanDrawsImpl final : public VulkanDraws {
       hold_open_ = false;
     }
     if (in_match != in_match_previous_) {
+#if defined(MW2_CAMPAIGN) && MW2_CAMPAIGN
+      // The zone loader writes microcode with stores nobody reports (mw2mp_microcode_versions.h, WriteAll).
+      mw2mp::native::microcode::WriteAll();
+#endif
       REXLOG_INFO("[native] cl_ingame {}: shaders not in memory are {} for the next {} s", in_match ? "on" : "off",
                   wait_s > 0 ? "read at once" : "skipped while read", in_match ? wait_s : 0);
     }
@@ -9467,8 +9504,9 @@ class VulkanDrawsImpl final : public VulkanDraws {
     REXLOG_INFO("[native] C6: pipeline cache {} ({} KB read from {}{})",
                 cache_pipelines_ != VK_NULL_HANDLE ? "on" : "not available",
                 data.size() >> 10, path.string(), files_old_ ? ", from the two earlier files" : "");
-    // The writer thread always saves both parts; it starts from what is on disk.
-    written_cache_ = std::move(data);
+    // Not kept: a second copy of the cache in memory all game long (51-66 MB) is what ran out of memory in run
+    // mw2sp_009. The writer takes it from the driver when it writes.
+    std::vector<uint8_t>().swap(data);
     if (files_old_) {
       // they came from the two older files: moved to the new one on the first save even if nothing changed
       bytes_cache_saved_ = 0;
@@ -9564,7 +9602,25 @@ class VulkanDrawsImpl final : public VulkanDraws {
         !bytes || (bytes == bytes_cache_saved_ && !always)) {
       return {};
     }
-    std::vector<uint8_t> data(bytes);
+    std::vector<uint8_t>().swap(written_cache_);  // the old copy goes before the new one is allocated
+    std::vector<uint8_t> data;
+    try {
+      data.resize(bytes);
+    } catch (const std::bad_alloc&) {
+      // Run mw2sp_010: the 192 MB range cache (~1,000 buffers of 64-256 KB) left no 66 MB block, and both saves
+      // were skipped. It refills from the SD; the learned pipelines would otherwise be compiled again next run.
+      const uint64_t dropped_mb = rex::filesystem::DropRangeCache();
+      try {
+        data.resize(bytes);
+        REXLOG_INFO("[native] C6: pipeline cache's {} KB allocated after emptying the range cache ({} MB)",
+                    bytes >> 10, dropped_mb);
+      } catch (const std::bad_alloc&) {
+        REXLOG_WARN("[native] C6: no memory for the pipeline cache's {} KB (range cache of {} MB emptied too): "
+                    "not saved this time",
+                    bytes >> 10, dropped_mb);
+        return {};
+      }
+    }
     const VkResult result = data_cache_(device_, cache_pipelines_, &bytes, data.data());
     if ((result != VK_SUCCESS && result != VK_INCOMPLETE) || !bytes) {
       return {};
@@ -9642,10 +9698,17 @@ class VulkanDrawsImpl final : public VulkanDraws {
       }
       // The stamp file goes before the file it would no longer describe, and comes back after it when
       // every listed pipeline is in it.
+      if (written_cache_.empty()) {
+        written_cache_ = TakeCacheData(true);  // a write for the list alone: the cache again from the driver
+        if (written_cache_.empty()) {
+          continue;  // no memory or no cache: the file on disk stays as it is
+        }
+      }
       mw2mp::native::precompile::Withdraw(PathFilePipelines());
       if (WriteFilePipelines(resave != 1, ms_taken) && (verified || vouch)) {
         mw2mp::native::precompile::Vouch(PathFilePipelines());
       }
+      std::vector<uint8_t>().swap(written_cache_);  // freed until the next write
     }
   }
 
@@ -10510,40 +10573,46 @@ class VulkanDrawsImpl final : public VulkanDraws {
     if (vcache_.empty()) {
       return;
     }
-    const uint64_t mixed = (key ^ (key >> 29)) * 0x9E3779B97F4A7C15ull;
-    const char* set = reinterpret_cast<const char*>(&vcache_[(mixed >> 40) % kVertexCacheSets * 4]);
-    for (size_t at = 0; at < 4 * sizeof(VertexCacheEntry); at += 64) {
-      __builtin_prefetch(set + at);
-    }
+    __builtin_prefetch(&vcache_tags_[VertexCacheSet(key)]);
     __builtin_prefetch(&mw2mp::page_writes::g_stamps[(physical & 0x1FFFFFFFu) >> 12]);
   }
 
   // The table: 4-way sets, no allocation. A range found in its set is used (and stamped); a new one takes the
   // set's oldest slot, so a range that has not been drawn for a while may lose its entry (and is hashed again from
   // scratch: copied as usual once, then into the pool).
+  static size_t VertexCacheSet(uint64_t key) {
+    const uint64_t mixed = (key ^ (key >> 29)) * 0x9E3779B97F4A7C15ull;
+    return (mixed >> 40) % kVertexCacheSets;
+  }
+
+  // Keys and stamps of a set share one 64-byte line (VertexCacheTags): a lookup reads that line and, on a hit, the
+  // way's entry. Run mw2sp_010: with them inside the 80-byte entries a set spanned 5 lines and the lookup in
+  // IndexCacheByWrites alone took 5 % of the ring thread.
   VertexCacheEntry& VertexCacheSlot(uint64_t key) {
     if (vcache_.empty()) {
       vcache_.resize(kVertexCacheSets * 4);
+      vcache_tags_.reset(new VertexCacheTags[kVertexCacheSets]());
     }
-    const uint64_t mixed = (key ^ (key >> 29)) * 0x9E3779B97F4A7C15ull;
-    VertexCacheEntry* set = &vcache_[(mixed >> 40) % kVertexCacheSets * 4];
-    VertexCacheEntry* oldest = set;
+    const size_t index = VertexCacheSet(key);
+    VertexCacheTags& tags = vcache_tags_[index];
+    VertexCacheEntry* set = &vcache_[index * 4];
+    int oldest = 0;
     for (int way = 0; way < 4; ++way) {
-      if (set[way].key == key) {
-        set[way].stamp = frame_;
+      if (tags.key[way] == key) {
+        tags.stamp[way] = frame_;
         return set[way];
       }
-      if (set[way].stamp < oldest->stamp) {
-        oldest = &set[way];
+      if (tags.stamp[way] < tags.stamp[oldest]) {
+        oldest = way;
       }
     }
-    if (oldest->key != 0) {
+    if (tags.key[oldest] != 0) {
       ++vcache_evicted_;
     }
-    *oldest = VertexCacheEntry{};
-    oldest->key = key;
-    oldest->stamp = frame_;
-    return *oldest;
+    set[oldest] = VertexCacheEntry{};
+    tags.key[oldest] = key;
+    tags.stamp[oldest] = frame_;
+    return set[oldest];
   }
 
   // Room in the pool being filled; when it is full, the other one (if it has rested), dropping the full one's copies.
@@ -16533,10 +16602,11 @@ class VulkanDrawsImpl final : public VulkanDraws {
     const uint32_t helper = compiles_helper_.load(std::memory_order_relaxed);
     MW2MP_REPORT_RING("[native] C6 pipelines compiled on a thread, last 10 s: {} ({:.1f} ms on average, worst "
                       "{:.1f} ms; {} by the second thread), {} still compiling; {} draws skipped while their pipeline "
-                      "compiled; ahead of the queue {} ({} moved up; since start)",
+                      "compiled; ahead of the queue {} ({} moved up; since start); {} incomplete frames held (since "
+                      "start)",
                       compiled, compiled ? double(ns) / 1e6 / double(compiled) : 0.0, double(compile_ns_worst_) / 1e6,
                       helper - compiles_helper_reported_, compile_pending_.size(), waited, compiles_first_,
-                      compiles_promoted_);
+                      compiles_promoted_, incomplete_held_total_);
     compiles_helper_reported_ = helper;
     compile_ns_worst_ = 0;
   }
@@ -17504,9 +17574,12 @@ class VulkanDrawsImpl final : public VulkanDraws {
     uint64_t frame_left = 0;  // when the cache last stopped filling it (frame_)
     VkDeviceSize dirty_lo = ~VkDeviceSize(0), dirty_hi = 0;  // written in this submission
   };
-  struct VertexCacheEntry {
-    uint64_t key = 0;        // address, bytes and order (VertexCache); 0 = empty
-    uint64_t stamp = 0;      // frame_ of its last use (the set's oldest is replaced)
+  struct alignas(64) VertexCacheTags {
+    uint64_t key[4];    // per way: address, bytes and order (VertexCache); 0 = empty
+    uint64_t stamp[4];  // per way: frame_ of its last use (the set's oldest is replaced)
+  };
+  static_assert(sizeof(VertexCacheTags) == 64, "one cache line per set");
+  struct alignas(64) VertexCacheEntry {
     uint64_t hash_seen = 0;  // XXH3 | 1 (or ChangeSum | 1) of the guest bytes the last time it was drawn
     uint64_t hash_pool = 0;  // XXH3 | 1 of the bytes of its persistent copy (0: none)
     uint64_t sum_pool = 0;   // ChangeSum | 1 of the same bytes
@@ -17519,11 +17592,13 @@ class VulkanDrawsImpl final : public VulkanDraws {
     uint32_t hits = 0;        // by writes: hits since its pool copy (the guard checks the first ones)
     uint16_t min = 0, max = 0;  // an index range's (mw2mp_native_index_cache)
   };
+  static_assert(sizeof(VertexCacheEntry) == 64, "an entry in one cache line: a hit reads the tags' line and this");
   std::array<VertexPool, 2> vpools_{};
   uint32_t vpool_ = 0;  // the pool being filled
   std::array<uint32_t, 2> vpool_generation_{1, 1};
-  static constexpr size_t kVertexCacheSets = 65536;  // x 4 ways x 48 bytes = 12 MB
+  static constexpr size_t kVertexCacheSets = 65536;  // x 4 ways x 64 bytes = 16 MB, + 4 MB of tags
   std::vector<VertexCacheEntry> vcache_;
+  std::unique_ptr<VertexCacheTags[]> vcache_tags_;  // aligned by new (C++17); one per set
   std::vector<uint8_t> vcache_scratch_;
   bool vcache_ready_ = false, vcache_active_ = false, vcache_off_ = false, vcache_coherent_ = false;
   bool vcache_by_writes_ = false;  // mw2mp_native_vertex_cache_by_writes
@@ -17940,6 +18015,8 @@ class VulkanDrawsImpl final : public VulkanDraws {
   bool load_window_ = true, in_match_previous_ = false;
   bool hold_open_ = false;  // HoldOutput
   uint64_t skipped_at_output_ = 0, held_frames_ = 0, complete_frames_ = 0;
+  uint32_t incomplete_held_ = 0;  // mw2mp_native_hold_incomplete_frames: frames in a row repeated
+  uint64_t incomplete_held_total_ = 0;
   std::chrono::steady_clock::duration held_waiting_{};  // WaitCompilesHeld, this hold
   std::chrono::steady_clock::time_point in_match_since_{};
   uint64_t spirv_reads_now_ = 0, ns_spirv_reads_now_ = 0, spirv_reads_now_reported_ = 0,

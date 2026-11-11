@@ -65,6 +65,17 @@ if(MW2SP_PGO)
     set_property(SOURCE ${_mw2sp_pgo_native} APPEND PROPERTY COMPILE_OPTIONS ${_mw2sp_pgo_flags})
 endif()
 
+# Line tables (-g1) for the native renderer, as bo2's BO2ZM_DEBUG_LINES, always on: -g does not change the code GCC
+# generates and the NRO carries no debug sections, so every unstripped ELF can split ring-thread samples by line
+# (tools/profile_inline.py). Run mw2sp_009's ring spent ~5.5 of ~8.3 us a draw outside the timed substages.
+if(REXGLUE_PLATFORM_SWITCH)
+    set_property(SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/../mw2mp/src/native/render/mw2mp_native_render.cpp
+                 ${CMAKE_CURRENT_SOURCE_DIR}/../mw2mp/src/native/render/mw2mp_native_draws.cpp
+                 ${CMAKE_CURRENT_SOURCE_DIR}/../mw2mp/src/native/render/mw2mp_native_targets.cpp
+                 APPEND PROPERTY COMPILE_OPTIONS -g1)
+    target_link_options(mw2sp PRIVATE -g1)
+endif()
+
 # sdmc:/switch/mw2sp/mw2sp.nro (hbmenu shows one NRO per folder): falls back to sdmc:/switch/mw2mp's game/, update/
 # and user/ folders (mw2mp/src/mw2mp_app.h); mw2sp_shaders.spvpack/.spvidx beside the NRO.
 rexglue_switch_add_nro(mw2sp NAME "mw2nx campaign" AUTHOR "kyokoxdev" VERSION "0.0.1")

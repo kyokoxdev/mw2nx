@@ -17,7 +17,9 @@ ap.add_argument("--lines", action="store_true", help="group by the outermost fra
 ap.add_argument("--only", default=None, help="only outermost functions whose name contains this")
 ap.add_argument("--inner", action="store_true", help="group by the innermost frame (the inlined function) instead")
 a = ap.parse_args()
-ADDR2LINE = r"C:\devkitPro\devkitA64\bin\aarch64-none-elf-addr2line.exe"
+import os
+ADDR2LINE = os.path.join(os.environ.get("DEVKITPRO", os.path.expanduser("~/devkitpro")), "devkitA64", "bin",
+                         "aarch64-none-elf-addr2line" + (".exe" if os.name == "nt" else ""))
 
 counts = Counter()
 inside, samples = False, 0

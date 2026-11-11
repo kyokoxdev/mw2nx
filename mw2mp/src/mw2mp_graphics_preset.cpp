@@ -52,7 +52,7 @@
 #endif
 
 #if defined(MW2_CAMPAIGN) && MW2_CAMPAIGN
-#define MW2MP_PRESET_DEFAULT "very_low"  // run mw2sp_006: even low ran GPU-bound at 18-25 fps in the heaviest stretches
+#define MW2MP_PRESET_DEFAULT "low"  // run mw2sp_007: very_low's texture mip floor and model detail looked worse
 #else
 #define MW2MP_PRESET_DEFAULT "high"
 #endif
@@ -67,16 +67,34 @@ REXCVAR_DEFINE_STRING(mw2mp_preset, MW2MP_PRESET_DEFAULT, "Graphics",
 // The calibration knob for the draw distance (r_zfar, see kSettings), per level and per player.
 REXCVAR_DEFINE_INT32(mw2mp_draw_distance, -1, "Graphics",
                      "Draw distance in game units, where culling fog reaches full opacity and the world past it is not "
-                     "drawn. -1: the preset's (very_low 4000, low 6000, medium 10000, high the level's own). 0: the "
-                     "level's own. Applied at once")
+                     "drawn (no fog shows on the console). -1 or 0: the level's own (every preset). "
+                     "Applied at once")
     .range(-1, 100000);
 
 // The calibration knob for model detail (the hook on XModelGetLodForDist below; campaign only).
 REXCVAR_DEFINE_DOUBLE(mw2mp_model_detail, 0.0, "Graphics",
                       "Campaign: how much sooner models switch to their simpler versions (their switch distances are "
-                      "divided by this). 0: the preset's (very_low 4, low 2, medium 1.5, high 1 = the game's own). A "
+                      "divided by this). 0: the preset's (very_low 2, low 1.5, medium 1.25, high 1 = the game's own). A "
                       "model the game draws is never hidden by it, only simplified. Applied at once")
     .range(0.0, 8.0);
+
+// Scene resolution. The game's video setup (campaign sub_8238E5D0, multiplayer sub_823C3DD0; r3 = the video config,
+// the IW vidConfig) reads XGetVideoMode and writes the 3D scene size at +8/+12 (1024x600 with HD output, 896x576 SD),
+// the display size at +16/+20 (1280x720) and the MSAA samples at +24 (2). Every scene target, viewport and the final
+// stretch to the display follow +8/+12, so scaling them here draws fewer pixels with nothing else changed. The 360
+// drew MW2 at 1024x600; BO2 at 880x720. Run mw2sp_004: 40 ms of GPU a frame at 768 MHz in the second mission, with
+// the fragment ALU as the limit.
+#if defined(MW2_CAMPAIGN) && MW2_CAMPAIGN
+#define MW2MP_SCENE_SCALE_DEFAULT 85
+#else
+#define MW2MP_SCENE_SCALE_DEFAULT 100
+#endif
+REXCVAR_DEFINE_INT32(mw2mp_scene_scale, MW2MP_SCENE_SCALE_DEFAULT, "Graphics",
+                     "3D scene resolution in percent of the game's own (1024x600, as the Xbox 360), per axis; the HUD "
+                     "and the output stay at 1280x720. 85 = 864x512 (72 % of the pixels), 75 = 768x448. Lower: "
+                     "faster on the GPU, blurrier. 100 = the game's own. Needs a restart")
+    .range(50, 100)
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 
 REXCVAR_DEFINE_INT32(mw2mp_preset_test_s, 0, "BO2",
                      "Test helper: in a level, step to the next lower preset every N seconds (high, medium, low, "
@@ -126,7 +144,9 @@ constexpr Setting kSettings[] = {
     // FLT_MAX, sub_823A2F98). The world fogs out up to it and is culled past it: in run mw2sp_006 the heaviest
     // stretches drew 7-8k draws and 0.7-1.3 M triangles a frame, GPU-bound at 36-51 ms. BO2 cut draws the same way
     // (r_zfar 900-2500 on its zombies maps). mw2mp_draw_distance overrides it.
-    {"r_zfar", kFloat, {kGame, 10000, 6000, 4000}},
+    // Run mw2sp_007: at 4000 no fog showed on the console (the 360 shaders seem not to draw it), so every preset
+    // keeps the level's own; the knob stays for anyone who wants the distance.
+    {"r_zfar", kFloat, {kGame, kGame, kGame, kGame}},
 };
 constexpr size_t kCount = sizeof(kSettings) / sizeof(kSettings[0]);
 // Texture detail (the renderer's mip floor for the world; UI keeps full detail).
@@ -134,7 +154,9 @@ constexpr uint32_t kMipsMinus[kLevels] = {0, 0, 0, 1};
 
 // Model detail (MW2_XMODEL_LOD_FOR_DIST): the factor the hook scales a model's version distance by, per level. 4 at
 // very low as BO2's LOW model detail, its very low preset's (there, with draw distance, half the game's draws).
-constexpr float kModelFactors[kLevels] = {1.0f, 1.5f, 2.0f, 4.0f};
+// Run mw2sp_007: at 4 up to 37 % of the picks were simpler than the game's and the switches showed as pop-in, so
+// halved.
+constexpr float kModelFactors[kLevels] = {1.0f, 1.25f, 1.5f, 2.0f};
 std::atomic<float> g_model_factor{1.0f};
 std::atomic<uint32_t> g_model_picks{0};    // the hook's calls since the last report
 std::atomic<uint32_t> g_model_simpler{0};  // of those, a simpler version than the game's
@@ -332,6 +354,40 @@ uint32_t TextureMipsMinus() {
 }
 
 }  // namespace mw2mp::gfx_preset
+
+namespace {
+// mw2mp_scene_scale: after the game's video setup, its scene size scaled, width in steps of 16 and height in steps of 8
+// (Xenos EDRAM tiles), proportions kept.
+void ScaleScene(PPCContext& ctx, uint8_t* base, void (*setup)(PPCContext&, uint8_t*)) {
+  const uint32_t config = ctx.r3.u32;
+  setup(ctx, base);
+  static const int32_t scale = REXCVAR_GET(mw2mp_scene_scale);
+  if (scale >= 100) {
+    return;
+  }
+  uint8_t* const p = base + config;
+  const uint32_t width = rex::memory::load_and_swap<uint32_t>(p + 8);
+  const uint32_t height = rex::memory::load_and_swap<uint32_t>(p + 12);
+  const uint32_t scaled_width = std::max(16u, (width * uint32_t(scale) + 800) / 1600 * 16);
+  const uint32_t scaled_height = std::max(8u, (height * uint32_t(scale) + 400) / 800 * 8);
+  rex::memory::store_and_swap<uint32_t>(p + 8, scaled_width);
+  rex::memory::store_and_swap<uint32_t>(p + 12, scaled_height);
+  REXLOG_INFO("[preset] scene {}x{} -> {}x{} ({} %), display {}x{}", width, height, scaled_width, scaled_height,
+              scale, rex::memory::load_and_swap<uint32_t>(p + 16), rex::memory::load_and_swap<uint32_t>(p + 20));
+}
+}  // namespace
+
+#if defined(MW2_CAMPAIGN) && MW2_CAMPAIGN
+REX_EXTERN(__imp__sub_8238E5D0);
+REX_HOOK_RAW(sub_8238E5D0) {
+  ScaleScene(ctx, base, __imp__sub_8238E5D0);
+}
+#else
+REX_EXTERN(__imp__sub_823C3DD0);
+REX_HOOK_RAW(sub_823C3DD0) {
+  ScaleScene(ctx, base, __imp__sub_823C3DD0);
+}
+#endif
 
 #ifdef MW2_XMODEL_LOD_FOR_DIST
 // Model detail: the campaign's XModelGetLodForDist, sub_82300B50 (model r3, ramp distance f1, plain distance f2; returns

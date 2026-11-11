@@ -16,6 +16,9 @@ cr_as_local = true
 xer_as_local = true
 ctr_as_local = true
 non_volatile_as_local = true
+# Scratch vector registers (v0, v32-v63) as locals, as BO2 (app/overrides.toml: +1.7 %). Not an argument or a return
+# value; tools/read_before_write.py --strict checks no function reads one before writing it.
+vector_scratch_as_local = true
 
 # mfmsr / mtmsrd: no global lock, as mw2mp (run 028: the lock serialised every game thread). Re-check in
 # generated/ that each mfmsr region is a pure lwarx/stwcx. CAS loop before trusting this.

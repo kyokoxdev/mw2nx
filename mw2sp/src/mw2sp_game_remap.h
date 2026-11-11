@@ -2,8 +2,9 @@
 // mw2sp builds, mw2sp/CMakeLists.txt), so those files build for this program unchanged.
 //
 // What mw2mp/src takes from default_mp.xex by address: the cl_ingame dvar (below) and the CRT's memcpy/memset
-// ([rexcrt] in mw2sp/overrides.toml). Its three D3D hooks (sub_8259BC90, sub_8259C038, sub_825A2FB8) are BO2
-// addresses that fall in MW2's .data: no function of either program has them, so they stay as they are.
+// ([rexcrt] in mw2sp/overrides.toml). Its three reference D3D hooks (sub_8259BC90, sub_8259C038, sub_825A2FB8) are
+// addresses no function of either program has (compiled out); the campaign's own microcode writers (sub_820B6B10,
+// sub_820B72C0) are hooked in mw2mp_native_hooks.cpp under MW2_CAMPAIGN.
 
 #pragma once
 

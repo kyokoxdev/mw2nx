@@ -1451,3 +1451,57 @@ REX_HOOK_RAW(sub_825A2FB8) {
   mc::FinishWrite(slot);
 }
 #endif  // MW2MP_REFERENCE_GAME_HOOKS
+
+/*
+ * The campaign's (TU6 default.xex) microcode writers, read from the generated code. Its D3D keeps one patched copy per
+ * VS variant: sub_820B7A10 (the draw's shader setup) loads the VS from [V+872] + [VS+32], V = VS + [VS+896+8*i], with
+ * [V+876] bytes, and the PS from [S+40] + [PS+24], S = PS + [PS+64], with [S+44] bytes (Physical() as here).
+ *   - sub_820B6B10 (r3 VS, r4 destination, r5 declaration, r6 strides) patches the fetches. Callers: sub_820B78D0 in
+ *     place on variant i (return 0x820B7998; only when the GPU passed the variant's fence [VS+416*i+64]),
+ *     sub_820B8380 in place on each variant when the game binds a VS to a declaration (0x820B848C), sub_820B7630 on the
+ *     ring's IM_LOAD_IMMEDIATE copy (0x820B7768).
+ *   - sub_820B72C0 (r4 destination) nulls outputs: sub_820B8380 in place on variant 0 (0x820B8428), sub_820B7630 on the
+ *     copy (0x820B773C).
+ * In place, r4 is the microcode's start (the address the IM_LOAD carries), so its slot is the IM_LOAD's.
+ * New microcode comes with the zone loader's plain stores: UpdateLoadWindow marks every slot on a map change. Any
+ * other call site turns the shortcut off (g_patches_others), and the ring still compares 1 load in 4,096.
+ */
+#if defined(MW2_CAMPAIGN) && MW2_CAMPAIGN && !defined(MW2MP_NATIVE_SHADER_LIBRARY)
+namespace {
+void ReportMicrocodePatch(PPCContext& ctx, uint8_t* base, void (*original)(PPCContext&, uint8_t*), bool in_room,
+                          bool in_copy) {
+  namespace mc = mw2mp::native::microcode;
+  const uint32_t target = ctx.r4.u32;
+  const uint32_t return_address = uint32_t(ctx.lr);
+  if (in_copy) {
+    mc::Count(mc::g_patches_in_copy);
+    original(ctx, base);
+    return;
+  }
+  const uint32_t slot = mc::SlotOf(mc::Physical(target) & ~uint32_t(3));
+  mc::BeginWrite(slot);
+  original(ctx, base);
+  // The counts, before FinishWrite's global++: a ring that sees the new global value already sees them.
+  if (in_room) {
+    mc::Count(mc::g_patches_in_room);
+  } else {
+    mc::g_other_return.store(return_address, std::memory_order_relaxed);
+    mc::g_other_target.store(target, std::memory_order_relaxed);
+    mc::Count(mc::g_patches_others);
+  }
+  mc::FinishWrite(slot);
+}
+}  // namespace
+
+REX_EXTERN(__imp__sub_820B6B10);
+REX_HOOK_RAW(sub_820B6B10) {
+  const uint32_t lr = uint32_t(ctx.lr);
+  ReportMicrocodePatch(ctx, base, __imp__sub_820B6B10, lr == 0x820B7998u || lr == 0x820B848Cu, lr == 0x820B7768u);
+}
+
+REX_EXTERN(__imp__sub_820B72C0);
+REX_HOOK_RAW(sub_820B72C0) {
+  const uint32_t lr = uint32_t(ctx.lr);
+  ReportMicrocodePatch(ctx, base, __imp__sub_820B72C0, lr == 0x820B8428u, lr == 0x820B773Cu);
+}
+#endif  // MW2_CAMPAIGN

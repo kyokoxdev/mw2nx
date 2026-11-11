@@ -60,7 +60,7 @@
 //         ... (the usual copy) ...
 //         dedupe_.Annotate(source.address, source.bytes, uint32_t(source.order), offset);
 //
-// The table has kSlots entries of 40 bytes (640 KB) and is cleared by generation, without
+// The table has kSlots entries of 32 bytes (512 KB) and is cleared by generation, without
 // memset.
 
 #pragma once
@@ -77,7 +77,7 @@ class DedupeVertices {
   // they fit easily in 4096 slots. The collisions() counter tells whether it falls short: if it
   // rises, double it here.
   /*
-   * 16384 slots (640 KB). Compared with 4096, collisions per report drop about 3.6x (from 19,705-33,121
+   * 16384 slots (512 KB since entries are 32 bytes). Compared with 4096, collisions per report drop about 3.6x (from 19,705-33,121
    * to 5,423-6,725), but the savings barely move (30 % -> 31 %, 1.83 -> 1.84 MB per frame): collisions
    * were never the limit. The real ceiling of the safe half is ~30-38 % of the bytes, not the 41-49 %
    * the diagnostic measures, because the table is cleared on every slot change (NewFrame, several times
@@ -90,8 +90,8 @@ class DedupeVertices {
 
   // A frame starts: everything recorded before becomes invalid (the upload buffer has been reset).
   void NewFrame(uint64_t frame) {
-    // frame_ can never equal kEmpty, which marks an unused entry.
-    frame_ = frame == kEmpty ? 0 : frame;
+    // frame_ can never equal kEmpty, which marks an unused entry. Kept as 32 bits (wraps after ~2 years at 60 FPS).
+    frame_ = uint32_t(frame) == kEmpty ? 0 : uint32_t(frame);
   }
 
   // The guest may have synchronized with the GPU and rewritten memory: what was recorded
@@ -138,6 +138,9 @@ class DedupeVertices {
   // Records a copy just made. 'hash' is only used in the paranoid mode of Find.
   void Annotate(uint64_t address, uint32_t bytes, uint32_t order, uint64_t offset,
               uint64_t hash = 0) {
+    if (offset > UINT32_MAX) {
+      return;  // the entry keeps 32 bits of offset; never the case with the upload buffer's size
+    }
     const uint64_t key = Key(address, order);
     // Two ways. The way that already holds this range, else one with no live entry, else the second.
     // Entries live long (flush waits do not clear the table), and a direct-mapped table lost ~2-3 % of its live
@@ -155,7 +158,7 @@ class DedupeVertices {
     }
     e.key = key;
     e.bytes = bytes;
-    e.offset = offset;
+    e.offset = uint32_t(offset);
     e.hash = hash;
     e.frame = frame_;
     e.generation = generation_;
@@ -170,17 +173,19 @@ class DedupeVertices {
   uint64_t discrepancies() const { return discrepancies_; }
 
  private:
-  static constexpr uint64_t kEmpty = ~uint64_t(0);
+  static constexpr uint32_t kEmpty = ~uint32_t(0);
 
+  // 32 bytes: the two ways of a lookup (index, index ^ 1) are one 64-byte line (table_ is aligned). Run mw2sp_010:
+  // with 40-byte entries the pair often spanned two lines and Find was 5 % of the ring thread.
   struct Input {
     uint64_t key = 0;           // (address << 2) | order
-    uint64_t offset = 0;          // offset inside the upload buffer
     uint64_t hash = 0;          // paranoid mode only
-    uint64_t frame = kEmpty;  // kEmpty = never used
+    uint32_t offset = 0;          // offset inside the upload buffer
+    uint32_t frame = kEmpty;  // kEmpty = never used
     uint32_t bytes = 0;
     uint32_t generation = 0;      // incremented by every Forget()
   };
-  static_assert(sizeof(Input) == 40, "the entry has to fit in 40 bytes");
+  static_assert(sizeof(Input) == 32, "two ways in one cache line");
 
   static uint64_t Key(uint64_t address, uint32_t order) {
     return (address << 2) | (uint64_t(order) & 0x3);
@@ -196,8 +201,8 @@ class DedupeVertices {
     return size_t(x) & (kSlots - 1);
   }
 
-  std::array<Input, kSlots> table_{};
-  uint64_t frame_ = 0;
+  alignas(64) std::array<Input, kSlots> table_{};
+  uint32_t frame_ = 0;
   uint32_t generation_ = 0;
 
   uint64_t queries_ = 0;

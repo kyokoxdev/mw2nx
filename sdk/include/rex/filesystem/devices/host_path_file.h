@@ -74,6 +74,10 @@ struct RangeStats {
 };
 RangeStats ReadRangeStats();
 
+// Empties the exact-range cache (it stays on and refills), for a caller that needs one large block of heap now.
+// Returns the MB released.
+uint64_t DropRangeCache();
+
 // Diagnostics (switch_io_report_files): the files read most since the previous call, by bytes, as one
 // line ("name: reads, MB; ..."), at most 'top' of them. Empty when the cvar is off or nothing was read.
 std::string TakeFilesReport(size_t top);

@@ -150,6 +150,20 @@ inline void WarnCreation(const uint8_t* base, uint32_t object, bool vertices) {
   FinishWrite(slot);
 }
 
+// Every slot as written, for writers nobody reports: on a map change (cl_ingame on or off) the campaign's zone loader
+// may put another shader's microcode where a cached one was, with plain stores (mw2mp_native_draws.cpp,
+// UpdateLoadWindow). start == end afterwards, as after any finished write.
+inline void WriteAll() {
+  for (SlotEntry& slot : g_slots) {
+    slot.start.fetch_add(1, std::memory_order_relaxed);
+  }
+  std::atomic_thread_fence(std::memory_order_seq_cst);
+  for (SlotEntry& slot : g_slots) {
+    slot.end.fetch_add(1, std::memory_order_release);
+  }
+  g_global.fetch_add(1, std::memory_order_release);
+}
+
 // ---- PM4 ring thread ----
 
 // Fast path: the global without a barrier. The CP_RB_WPTR chain (release in the game, acquire in the ring)

@@ -117,6 +117,10 @@ REXCVAR_DEFINE_UINT32(mw2mp_swap_interval, 0, "Graphics",
  * 33.3 either (the heaviest stretches ran 36-75 ms with the GPU at 40-50 ms a frame), a lock would only round
  * 35 ms up to 50, so it lets go; and it lets go when the frame's own cost (ring or GPU, measured without the wait
  * the lock adds) shows 60 fits again. Off when mw2mp_swap_interval is set or the game's VSYNC forces an interval.
+ *
+ * Run mw2sp_007: with a lock at p75 > 18.5 ms it locked where the game ran 47-53 FPS (p75 19-21 ms) and flipped
+ * between 30 and unlocked every few seconds; the 30 FPS lock felt very sluggish. It now locks only where the game
+ * cannot hold ~40 FPS (p75 over 25 ms, cost p80 over 22 ms) and unlocks once the cost says ~50 FPS fits (20 ms).
  */
 #if defined(MW2_CAMPAIGN) && MW2_CAMPAIGN
 #define MW2MP_FRAME_PACING_DEFAULT "auto"
@@ -124,15 +128,15 @@ REXCVAR_DEFINE_UINT32(mw2mp_swap_interval, 0, "Graphics",
 #define MW2MP_FRAME_PACING_DEFAULT "off"  // multiplayer: run 037 median 17.5 ms, a lock would cost more than it gives
 #endif
 REXCVAR_DEFINE_STRING(mw2mp_frame_pacing, MW2MP_FRAME_PACING_DEFAULT, "Graphics",
-                      "Switch: auto locks to a steady 30 FPS where most frames miss 60 but fit 30, and unlocks where "
-                      "60 fits again or 30 does not fit either (steadier, fewer jumps between 60 and 20-30). off: "
+                      "Switch: auto locks to a steady 30 FPS only where the game cannot hold ~40 FPS but fits 30, and "
+                      "unlocks where ~50 FPS fits again or 30 does not fit either (steadier, fewer jumps between 60 and 20-30). off: "
                       "never locks (mw2mp_swap_interval rules). Applied live")
     .allowed({"auto", "off"});
 // The calibration knob: a locked frame whose cost (80th percentile) stays under this goes back to 60.
-REXCVAR_DEFINE_DOUBLE(mw2mp_frame_pacing_60_ms, 15.0, "Graphics",
+REXCVAR_DEFINE_DOUBLE(mw2mp_frame_pacing_60_ms, 20.0, "Graphics",
                       "Switch, mw2mp_frame_pacing = auto: the frame cost in ms (80th percentile, ring or GPU, "
-                      "without presentation waits) under which a 30 FPS lock goes back to 60. Lower: stays at 30 "
-                      "longer")
+                      "without presentation waits) under which a 30 FPS lock is lifted (20 = about 50 FPS fits). "
+                      "Lower: stays at 30 longer")
     .range(8.0, 30.0);
 
 // Optional antialiasing on the output, applied live. The Xbox 360 draws the scene with MSAA; here there is none (it
@@ -471,7 +475,8 @@ void PaceFrame(double interval_ms, double cost_ms) {
   } else if (!locked) {
     // Misses 60 often and fits 30, and the cost says so too (menus miss 60 by the game's own pacing at no cost:
     // without this they would lock and unlock every few seconds).
-    want = settled && p75 > 18.5 && p90 < 32.0 && cost80 >= limit_60;
+    // Only below ~40 FPS: 45-55 FPS unlocked felt better than a 30 lock (run mw2sp_007).
+    want = settled && p75 > 25.0 && p90 < 32.0 && cost80 >= limit_60 + 2.0;
   } else {
     calm = cost80 < limit_60 ? calm + 1 : 0;
     want = !(settled && (slow > 0.15 || calm >= 3));  // 30 does not fit, or 60 fits again

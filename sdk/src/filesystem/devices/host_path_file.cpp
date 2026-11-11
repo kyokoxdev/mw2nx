@@ -108,7 +108,8 @@ REXCVAR_DEFINE_INT32(switch_io_cache_mb, 0, "Filesystem",
  * not slightly worse but worthless, because entries are evicted before they are reused and nothing hits.
  *
  * The memory comes from the host heap (1,024 MB, runtime_switch.cpp), of which the guest backing and the thread
- * stacks take ~506 MB; the GPU budget is separate. 64 MB leaves margin; 128 would not in the worst case.
+ * stacks take ~506 MB; the GPU budget is separate. (Started from hbloader, libnx takes the ~3.2 GB heap it set up
+ * instead, runtime_switch.cpp, which is what lets MW2 use 192 MB; see switch_io_ranges_mb.)
  *
  * The lock is not held across the disk read: it is taken to look up the table and released before going to disk.
  * The data lives in a shared_ptr, so copying it needs no lock either, and an eviction cannot free the buffer
@@ -135,14 +136,17 @@ REXCVAR_DEFINE_INT32(switch_io_ipak_mb_s, 32, "Filesystem",
 REXCVAR_DEFINE_BOOL(switch_io_report_files, false, "Filesystem",
                     "Diagnostics: the [io] summary also lists the files read most in its interval (reads, MB)");
 
-REXCVAR_DEFINE_INT32(switch_io_ranges_mb, 64, "Filesystem",
-                     "Read cache by exact range, total cap in MB (0 = off). 64 = the footprint "
-                     "of the repeated reads with no evictions; more buys nothing.");
+// MW2 (runs mw2sp_007 and mw2mp_040): its streamed images (imagefileN.pak) are reread 50-75 % of the time in reads of
+// 64-256 KB, all under the old 256 KB floor, and the 64 MB cap was full with ~1,700 evictions; some rereads took
+// 300-470 ms on the SD and showed as texture pop-in. The heap hbloader hands over is ~3.2 GB, so 192 MB fits.
+REXCVAR_DEFINE_INT32(switch_io_ranges_mb, 192, "Filesystem",
+                     "Read cache by exact range, total cap in MB (0 = off). 192 = holds MW2's reread streamed "
+                     "images (64 was full, with evictions).");
 
 // Floor, in KB. A 4 MB floor would leave out the small requests that repeat most (a few hundred KB to 2 MB).
-REXCVAR_DEFINE_INT32(switch_io_ranges_min_kb, 256, "Filesystem",
-                     "Only reads of this many KB or more are cached. 256 = the point where the simulation "
-                     "stops gaining (with 128 evictions go up and hits go down).");
+REXCVAR_DEFINE_INT32(switch_io_ranges_min_kb, 64, "Filesystem",
+                     "Only reads of this many KB or more are cached. 64 = MW2's smallest reread image reads "
+                     "(BO2's simulation preferred 256 at the old 64 MB cap).");
 
 // Compatibility: the old cvar in MB. If a toml sets it to a value > 0, it overrides the KB one.
 REXCVAR_DEFINE_INT32(switch_io_ranges_min_mb, 0, "Filesystem",
@@ -344,8 +348,8 @@ bool ReadWithCache(FileHandle* fh, uint32_t id, std::span<uint8_t> buffer, size_
  *
  * The table is a vector and is scanned in full. This is deliberate: it was sized for a 32 MB cap
  * and a 4 MB floor per entry, where at most eight entries fit and the linear search is eight
- * integer comparisons (the current 64 MB cap and 256 KB floor allow up to 256). A hash map would
- * only add a hash function, a rehash that invalidates references and a possible collision that
+ * integer comparisons (a 192 MB cap and 64 KB floor allow up to 3,072, still a few us per lookup).
+ * A hash map would only add a hash function, a rehash that invalidates references and a possible collision that
  * would serve another file's data.
  * ================================================================================================
  */
@@ -528,6 +532,22 @@ void SaveRange(uint32_t id, uint64_t offset_bytes, uint32_t requested, const uin
   g_range_bytes_live.store(g_ranges_bytes, std::memory_order_relaxed);
 }
 }  // namespace
+
+uint64_t DropRangeCache() {
+  std::vector<RangeEntry> old;
+  {
+    std::lock_guard lock(g_ranges_mutex);
+    old.swap(g_ranges);
+    g_ranges_bytes = 0;
+  }
+  g_range_entries.store(0, std::memory_order_relaxed);
+  g_range_bytes_live.store(0, std::memory_order_relaxed);
+  uint64_t bytes = 0;
+  for (const auto& e : old) {
+    bytes += e.data->size();
+  }
+  return bytes >> 20;  // freed here, outside the lock (a reader still holding a shared_ptr frees its own)
+}
 
 RangeStats ReadRangeStats() {
   RangeStats e;

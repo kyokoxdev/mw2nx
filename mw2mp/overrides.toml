@@ -18,6 +18,9 @@ cr_as_local = true
 xer_as_local = true
 ctr_as_local = true
 non_volatile_as_local = true
+# Scratch vector registers (v0, v32-v63) as locals, as BO2 (app/overrides.toml: +1.7 %). Not an argument or a return
+# value; tools/read_before_write.py --strict checks no function reads one before writing it.
+vector_scratch_as_local = true
 
 # --- mfmsr / mtmsrd: no global lock (root key), as bo2's app/overrides.toml ---
 # 330 sites wrap lwarx/stwcx. atomics in "mfmsr rX; mtmsrd r13,1 ... mtmsrd rX,1".
