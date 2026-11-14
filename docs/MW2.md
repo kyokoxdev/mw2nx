@@ -229,8 +229,8 @@ MW2 lives in `mw2mp/` (multiplayer, `default_mp.xex`) and later `mw2sp/`.
     Open: what fills mission 2's GPU frame (`mw2mp_native_per_draw_stats_s` in `mw2sp.toml`), the light flicker in
     S.S.D.D. (needs captures), and whether the game tolerates the ring held for tens of seconds (60 s cap).
   - FXAA on by default in the campaign (`mw2mp_antialiasing`; the native renderer has no MSAA).
-  - Graphics presets (`mw2mp/src/mw2mp_graphics_preset.cpp`, `mw2mp_preset` = high/medium/low/very_low, campaign
-    default very_low): the game's own quality dvars (sm_*, r_dlightLimit, r_dof_enable, r_distortion, fx_drawClouds,
+  - Graphics presets (`mw2mp/src/mw2mp_graphics_preset.cpp`, `mw2mp_preset` = high/medium/low/very_low, default
+    very_low in both programs): the game's own quality dvars (sm_*, r_dlightLimit, r_dof_enable, r_distortion, fx_drawClouds,
     fx_marks*, ai_corpseCount, cg_brass, dynEnt_explodeMaxEnts) found by name in the dvar pool (`MW2_DVAR_POOL`
     `0x8393DAB0`, 72-byte dvar_t, count at `MW2_DVAR_COUNT` `0x83938A90`) and written in place, held every frame below
     high; texture detail through the renderer's mip floor. Multiplayer names no pool yet (no-op there).
@@ -262,4 +262,4 @@ MW2 lives in `mw2mp/` (multiplayer, `default_mp.xex`) and later `mw2sp/`.
     game draws, long models measured from their nearest point, the second simplest kept when the simplest has fewer
     surfaces. `[preset] model detail` logs picks every 10 s.
   - Multiplayer presets: its dvar pool is `0x837A5890` (count `0x837A0868`, Dvar_RegisterNew `sub_8230EAA0`), so
-    `mw2mp_preset` now works there too (default still high: nothing changes unless chosen).
+    `mw2mp_preset` now works there too (default very_low since 2026-11-14, as the campaign).

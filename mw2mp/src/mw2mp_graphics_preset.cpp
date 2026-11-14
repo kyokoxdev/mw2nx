@@ -51,13 +51,7 @@
 #define MW2_XMODEL_LOD_FOR_DIST 1
 #endif
 
-#if defined(MW2_CAMPAIGN) && MW2_CAMPAIGN
-#define MW2MP_PRESET_DEFAULT "very_low"
-#else
-#define MW2MP_PRESET_DEFAULT "high"
-#endif
-
-REXCVAR_DEFINE_STRING(mw2mp_preset, MW2MP_PRESET_DEFAULT, "Graphics",
+REXCVAR_DEFINE_STRING(mw2mp_preset, "very_low", "Graphics",
                       "Graphics preset: high (the game's own settings, as the Xbox 360 runs it), medium, low or "
                       "very_low. Lower presets trade draw distance, shadows, dynamic lights, screen effects (depth "
                       "of field, distortion, clouds), decals, corpses and debris, and texture detail for frame rate. "

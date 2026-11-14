@@ -1505,3 +1505,25 @@ REX_HOOK_RAW(sub_820B72C0) {
   ReportMicrocodePatch(ctx, base, __imp__sub_820B72C0, lr == 0x820B8428u, lr == 0x820B773Cu);
 }
 #endif  // MW2_CAMPAIGN
+
+// D3D's GPU hang handler. Every D3D wait on the GPU (SP sub_820BDC78, MP sub_820DA5F0) calls it once its millisecond
+// tick shows 5000 ms without GPU progress. Without a debugger it sets the device's "hung" bits (byte +10941 |= 3), and
+// from then on every wait returns at once: D3D stops waiting for the GPU for the rest of the session and reuses
+// command buffers and resources the ring has not consumed yet. Run mw2sp_030: the console slept 205 s mid-level (the
+// tick kept counting), textures went black after the resume and 8 minutes later the ring ran a reused command buffer
+// and called CALLBACK_ADDRESS's cleared value, "[FATAL] ... at guest address 0x0BADF00D". The same 5 s can also pass
+// in a long load or shader compile stall. Returning 0 is the handler's own path when a debugger is attached: the
+// wait restarts its 5 s window and keeps waiting.
+#if defined(MW2_CAMPAIGN) && MW2_CAMPAIGN
+REX_HOOK_RAW(sub_820CD488) {
+#else
+REX_HOOK_RAW(sub_820EBBA0) {
+#endif
+  (void)base;
+  static std::atomic<uint32_t> count{0};
+  const uint32_t n = count.fetch_add(1, std::memory_order_relaxed) + 1;
+  if (n <= 8 || (n & (n - 1)) == 0) {
+    REXLOG_WARN("[native] D3D GPU hang check fired (#{}): 5 s without GPU progress seen by the game; kept waiting", n);
+  }
+  ctx.r3.u64 = 0;
+}
