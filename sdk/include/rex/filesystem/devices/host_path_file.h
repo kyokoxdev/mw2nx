@@ -63,7 +63,10 @@ struct RangeStats {
   uint64_t entries = 0;
   uint64_t live_bytes = 0;
   uint64_t evictions = 0;
-  uint64_t cap_mb = 0;  // the cvar, so the summary does not have to declare it on its own
+  uint64_t cap_mb = 0;  // the cvar, halved by each shed (ShedRangeCache), so the summary need not declare it
+  uint64_t sheds = 0;   // times it gave its memory back
+  uint64_t heap_used_mb = 0;       // the C heap (Switch; 0 elsewhere): in use
+  uint64_t heap_available_mb = 0;  // and still available (RexSwitchHeapStats)
   // Why something was not cached. Without this the cache could not be tuned.
   uint64_t low_floor = 0;          // reads too small
   uint64_t over_ceiling = 0;         // too large
@@ -77,6 +80,13 @@ RangeStats ReadRangeStats();
 // Empties the exact-range cache (it stays on and refills), for a caller that needs one large block of heap now.
 // Returns the MB released.
 uint64_t DropRangeCache();
+
+// Under memory pressure (the heap floor, an allocation that failed, a thread that could not be created): empties the
+// cache and halves its cap, off after the third time. wait = false only tries the lock (the new handler). Returns the
+// MB released (0: nothing to give).
+uint64_t ShedRangeCache(bool wait);
+// The cap in MB as it is now (0 = off).
+uint64_t RangeCapMb();
 
 // Diagnostics (switch_io_report_files): the files read most since the previous call, by bytes, as one
 // line ("name: reads, MB; ..."), at most 'top' of them. Empty when the cvar is off or nothing was read.

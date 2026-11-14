@@ -73,7 +73,11 @@ struct CountersIo {
 };
 
 CountersIo g_io;
+// [io] SLOW per report period (reset by the periodic [io] report). A lifetime cap of 300 ran out in the first
+// 2-8 minutes (mw2sp_022 at 21:10:22, 025 at 23:52:41), so gameplay SD stalls after that left no trace.
+constexpr uint32_t kIoWarningsPerReport = 40;
 std::atomic<uint32_t> g_io_warnings{0};
+std::atomic<uint32_t> g_write_warnings{0};  // [io] SLOW: writing (own cap: the load's slow reads use theirs)
 std::atomic<uint64_t> g_io_next_summary{0};
 
 /*
@@ -319,13 +323,20 @@ void MaybeSummaryIo(uint64_t now_us) {
   REXKRNL_INFO(
       "[io] range-cache: {} hits / {} misses ({:.0f} %), {:.1f} MB from RAM against {:.1f} MB "
       "from the SD; {} live entries ({:.1f} MB of {} cap), {} evictions; not cached: {} below the "
-      "floor of {} KB, {} above the ceiling, {} from the load sweep ({:.1f} MB){}",
+      "floor of {} KB, {} above the ceiling, {} from the load sweep ({:.1f} MB); {} sheds; heap {} MB in use, "
+      "{} MB left{}",
       ranges.hits, ranges.misses,
       ranges_total ? 100.0 * double(ranges.hits) / double(ranges_total) : 0.0,
       ranges.bytes_ram / (1024.0 * 1024.0), ranges.bytes_disk / (1024.0 * 1024.0), ranges.entries,
       ranges.live_bytes / (1024.0 * 1024.0), ranges.cap_mb, ranges.evictions, ranges.low_floor,
       ranges.floor_kb, ranges.over_ceiling, ranges.sequential,
-      ranges.sequential_bytes / (1024.0 * 1024.0), ranges.no_memory ? " [OFF: out of memory]" : "");
+      ranges.sequential_bytes / (1024.0 * 1024.0), ranges.sheds, ranges.heap_used_mb, ranges.heap_available_mb,
+      ranges.no_memory ? " [OFF: out of memory]" : "");
+  if (const uint32_t slow = g_io_warnings.exchange(0, std::memory_order_relaxed); slow > kIoWarningsPerReport) {
+    REXKRNL_INFO("[io] SLOW: {} more opens/reads over the warning time not shown in this period",
+                 slow - kIoWarningsPerReport);
+  }
+  rex::system::LogHostStacks();  // once a minute
   const std::string files = rex::filesystem::TakeFilesReport(8);
   if (!files.empty()) {
     REXKRNL_INFO("[io] files read most: {}", files);
@@ -344,7 +355,7 @@ inline void AnnotateOpen(uint64_t us, bool ok, const std::string_view path_str) 
 
   const int32_t warning_ms = REXCVAR_GET(switch_io_warning_ms);
   if (warning_ms > 0 && us >= static_cast<uint64_t>(warning_ms) * 1000ull &&
-      g_io_warnings.fetch_add(1, std::memory_order_relaxed) < 300) {
+      g_io_warnings.fetch_add(1, std::memory_order_relaxed) < kIoWarningsPerReport) {
     REXKRNL_WARN("[io] SLOW: opening '{}' took {:.1f} ms ({})", path_str, us / 1000.0,
                  ok ? "opened" : "does not exist");
   }
@@ -361,7 +372,7 @@ inline void AnnotateRead(uint64_t us, uint32_t bytes, const std::string_view pat
 
   const int32_t warning_ms = REXCVAR_GET(switch_io_warning_ms);
   if (warning_ms > 0 && us >= static_cast<uint64_t>(warning_ms) * 1000ull &&
-      g_io_warnings.fetch_add(1, std::memory_order_relaxed) < 300) {
+      g_io_warnings.fetch_add(1, std::memory_order_relaxed) < kIoWarningsPerReport) {
     // The offset is included. Without it a sequential sweep cannot be told apart from a reread.
     REXKRNL_WARN("[io] SLOW: reading {} bytes of '{}' at {} took {:.1f} ms{}", bytes, path_str,
                  offset_bytes, us / 1000.0, reread ? " (REREAD)" : "");
@@ -843,9 +854,22 @@ u32 NtWriteFile_entry(u32 file_handle, u32 event_handle, u32 apc_routine, mapped
     if (true || file->is_synchronous()) {
       // Synchronous request.
       uint32_t bytes_written = 0;
+      const uint64_t write_start_us = NowUs();
       result = file->Write(buffer.guest_address(), buffer_length,
                            byte_offset_ptr ? static_cast<uint64_t>(*byte_offset_ptr) : -1,
                            &bytes_written, apc_context.guest_address());
+      /*
+       * Checkpoint saves were 67-80 ms ring-idle hitches (mw2sp_021/022/025): the write runs on the calling game
+       * thread. Whether the game asked for async I/O (handle not synchronous, event or APC) tells if a real async
+       * path would be faithful to the console or would change what the game expects.
+       */
+      if (const uint64_t us = NowUs() - write_start_us;
+          us >= 5000 && g_write_warnings.fetch_add(1, std::memory_order_relaxed) < 100) {
+        REXKRNL_WARN("[io] SLOW: writing {} bytes of '{}' took {:.1f} ms (handle {}, event {}, APC {})",
+                     buffer_length, file->path(), us / 1000.0,
+                     file->is_synchronous() ? "synchronous" : "asynchronous", event_handle ? "yes" : "no",
+                     (apc_routine & ~1u) ? "yes" : "no");
+      }
 
       if (io_status_block) {
         io_status_block->status = result;

@@ -5,7 +5,8 @@ NRO or the exe). At start-up it also reads every list in cache/prewarm/*.bin and
 menus (bo2zm_native_draws.cpp, LoadExtraListsPipelines), so a map's pipelines can be compiled before its first visit.
 
 This tool makes such lists. A list holds shader hashes and pipeline states derived from the game's shaders: it is
-the player's own data, like the cache, and is never committed or shipped with the port.
+the player's own data, like the cache. (The per-level lists in mw2sp/pipelines/, recorded with
+mw2mp_native_record_map_lists, are shipped: keys and fingerprints only, no game bytes.)
 
 usage:
   python -I tools/pipelines_list.py info <pipelines.bin | list.bin>

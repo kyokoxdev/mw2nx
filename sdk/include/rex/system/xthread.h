@@ -291,6 +291,12 @@ static_assert_size(X_KTHREAD, 0xAB0);
 
 class XThread : public XObject {
  public:
+  // A copy of the name set_name gave it, taken under its lock (the [stack] report, LogHostStacks).
+  std::string thread_name_copy() {
+    std::lock_guard<std::mutex> lock(thread_lock_);
+    return thread_name_;
+  }
+
   static const XObject::Type kObjectType = XObject::Type::Thread;
 
   static constexpr uint32_t kStackAddressRangeBegin = 0x70000000;
@@ -383,6 +389,8 @@ class XThread : public XObject {
 
   rex::thread::Thread* thread() { return thread_.get(); }
   runtime::ThreadState* thread_state() { return thread_state_.get(); }
+  uint32_t stack_base() const { return stack_base_; }    // high address, exclusive
+  uint32_t stack_limit() const { return stack_limit_; }  // low address
 
   virtual bool Save(stream::ByteStream* stream) override;
   static object_ref<XThread> Restore(KernelState* kernel_state, stream::ByteStream* stream);
@@ -451,5 +459,26 @@ class XHostThread : public XThread {
  private:
   std::function<int()> host_fn_;
 };
+
+// guest_wait_probe: one kernel wait of the calling guest thread, timed with its guest callers, from construction to
+// destruction (XObject::Wait/WaitMultiple/SignalAndWait, XThread::Delay). owner: for a critical section, the guest
+// thread object that holds it.
+enum class WaitKind : uint8_t { kObject = 0, kAny = 1, kSignalAndWait = 2, kSleep = 3, kCriticalSection = 4 };
+class WaitProbe {
+ public:
+  explicit WaitProbe(WaitKind kind, uint32_t owner = 0);
+  ~WaitProbe();
+  WaitProbe(const WaitProbe&) = delete;
+  WaitProbe& operator=(const WaitProbe&) = delete;
+
+ private:
+  bool active_ = false;
+};
+// The [waits] line: what each guest thread waited on during the last window_ms (the renderer's [hitch] frame).
+void LogGuestWaits(double window_ms);
+
+// Switch, guest_thread_stack_watermark: once a minute (called more often, it returns at once) the log's [stack] line,
+// how deep each guest thread's host stack has gone. Called by the kernel's periodic [io] report.
+void LogHostStacks();
 
 }  // namespace rex::system

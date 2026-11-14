@@ -76,6 +76,15 @@ if(REXGLUE_PLATFORM_SWITCH)
     target_link_options(mw2sp PRIVATE -g1)
 endif()
 
+# Switch test build: the ring thread's memcpy, memmove, memset and memcmp calls by call site in the log every 10 s
+# (../mw2mp/src/mw2mp_memcpy_callers.cpp). On with MW2_MEMCPY_CALLERS=1 bash mw2sp/build_switch.sh; never in a player
+# build.
+option(MW2SP_MEMCPY_CALLERS "Switch test build: log the ring thread's memcpy calls by call site" OFF)
+if(REXGLUE_PLATFORM_SWITCH AND MW2SP_MEMCPY_CALLERS)
+    target_sources(mw2sp PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../mw2mp/src/mw2mp_memcpy_callers.cpp)
+    target_link_options(mw2sp PRIVATE "-Wl,--wrap=memcpy,--wrap=memmove,--wrap=memset,--wrap=memcmp")
+endif()
+
 # sdmc:/switch/mw2sp/mw2sp.nro (hbmenu shows one NRO per folder): falls back to sdmc:/switch/mw2mp's game/, update/
 # and user/ folders (mw2mp/src/mw2mp_app.h); mw2sp_shaders.spvpack/.spvidx beside the NRO.
 rexglue_switch_add_nro(mw2sp NAME "mw2nx campaign" AUTHOR "kyokoxdev" VERSION "0.0.1")

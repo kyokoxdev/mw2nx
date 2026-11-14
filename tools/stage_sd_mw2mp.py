@@ -4,6 +4,7 @@
   <out>/switch/mw2sp/mw2sp.nro   the campaign (mw2sp/build_switch.sh) in its own folder: hbmenu shows one NRO per
                                  folder. With no game/ beside it, it uses sdmc:/switch/mw2mp's folders
                                  (mw2mp/src/mw2mp_app.h); mw2sp_shaders.spvpack/.spvidx go beside mw2sp.nro.
+  <out>/switch/<p>/pipelines/    <p>/pipelines/*.bin, the per-level pipeline lists, if the repo has them
   <out>/switch/mw2mp/game/       the disc's files ($SystemUpdate left out) + the update's .xexp
   <out>/switch/mw2mp/update/     the rest of title update 6 (patch_mp.ff, dlc1_ui_mp.ff, dlc2_ui_mp.ff)
 
@@ -74,6 +75,11 @@ def main():
             os.makedirs(to, exist_ok=True)
             shutil.copy2(nro, to)
             print(f"{os.path.basename(nro)} -> {to}")
+            # Per-level pipeline lists (mw2mp_native_record_map_lists): no game data, shipped with the port.
+            lists = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(nro))), "pipelines")
+            if os.path.isdir(lists):
+                shutil.copytree(lists, os.path.join(to, "pipelines"), dirs_exist_ok=True)
+                print(f"{lists} -> {os.path.join(to, 'pipelines')}")
         else:
             print(f"no {nro} yet (its build_switch.sh): run this again after the build")
     print(f"done: copy {os.path.join(a.out, 'switch')} to the root of the SD card")

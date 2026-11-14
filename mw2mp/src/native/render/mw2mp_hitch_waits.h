@@ -44,6 +44,14 @@ inline std::atomic<uint64_t> g_hashes_postponed{0};
 // 18-54 ms for space) while the texture checks stay under 8 MB, so these counters show where the ring's own time
 // went. Only the ring thread writes them.
 inline std::atomic<uint64_t> g_draws{0};             // draws read from the ring
+// New pipelines on the ring (PipelineOf): the driver-cache probe, or the creation itself when compiles are not async,
+// and how many. Run mw2sp_022's oilrig frames of 185-340 ms of ring work with few draws came while compiles ran.
+inline std::atomic<uint64_t> g_ns_pipelines_ring{0};
+inline std::atomic<uint64_t> g_pipelines_ring{0};
+// New microcode identified on the ring (LoadShaderCached -> NativeShaders::Identify): reads candidate containers
+// from the shader pack on the SD. 13 came during mw2sp_025's gulag burst (00:04:16-20) of 0.1-1.6 s frames.
+inline std::atomic<uint64_t> g_ns_identify_ring{0};
+inline std::atomic<uint64_t> g_identify_ring{0};
 inline std::atomic<uint64_t> g_ns_ring_working{0};  // reading and executing packets
 inline std::atomic<uint64_t> g_ns_textures{0};         // check, detile and prepare the textures in use
 inline std::atomic<uint64_t> g_textures_uploads{0};    // textures that changed and are uploaded again

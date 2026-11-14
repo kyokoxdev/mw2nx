@@ -4,6 +4,8 @@
 
 #include <algorithm>
 
+#include <rex/system/xmemory.h>
+
 namespace mw2mp::page_writes {
 
 std::atomic<bool> g_enabled{false};
@@ -52,6 +54,8 @@ void NextEpoch() {
 
 void Enable(bool on) {
   g_enabled.store(on, std::memory_order_relaxed);
+  // File reads into physical memory (IW4 streams images and zone data straight into place) stamp too.
+  rex::memory::g_physical_read_hook = on ? &MarkPhysical : nullptr;
 }
 
 }  // namespace mw2mp::page_writes

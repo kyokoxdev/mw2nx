@@ -27,6 +27,11 @@
 
 #include <rex/cvar.h>
 #include <rex/logging.h>
+#include <rex/platform.h>
+
+#if REX_PLATFORM_SWITCH
+#include "../../core/threading_switch.h"  // RexSwitchHeapStats
+#endif
 
 #include <fmt/format.h>
 
@@ -155,6 +160,13 @@ REXCVAR_DEFINE_INT32(switch_io_ranges_min_mb, 0, "Filesystem",
 // Per-entry ceiling: a single read cannot take more than this out of the total cap.
 REXCVAR_DEFINE_INT32(switch_io_ranges_max_mb, 12, "Filesystem",
                      "No range cache entry is larger than this many MB.");
+
+// Run mw2sp_022: the C heap also backs the GPU memory, and at the fourth level the game's own CreateThread failed
+// (C0000017), a texture's 16 MB staging was refused and the pipeline cache could not be saved, while this cache held
+// 184-191 MB. It yields now: below this much heap left it empties and halves its cap (down to an eighth, then off).
+REXCVAR_DEFINE_INT32(switch_io_heap_floor_mb, 160, "Filesystem",
+                     "The range cache empties and halves its cap when the heap has less than this many MB left "
+                     "(0 = never)");
 
 namespace rex::filesystem {
 
@@ -368,6 +380,8 @@ std::vector<RangeEntry> g_ranges;
 uint64_t g_ranges_use = 0;
 uint64_t g_ranges_bytes = 0;
 bool g_ranges_no_memory = false;  // turned itself off for lack of RAM: not retried
+std::atomic<int> g_ranges_shift{0};  // the cap is switch_io_ranges_mb >> this (ShedRangeCache)
+std::atomic<uint32_t> g_ranges_sheds{0};
 
 // Counters. Atomic so the periodic summary can read them without taking the lock.
 std::atomic<uint64_t> g_ranges_hits{0};
@@ -397,8 +411,12 @@ int64_t FloorBytes() {
 
 // Does this read go into the cache? Only the size decides; the constructor already took care of
 // the file being read-only when it gave (or did not give) it an id.
+int64_t CapBytes() {
+  return (int64_t(REXCVAR_GET(switch_io_ranges_mb)) * 1024 * 1024) >> g_ranges_shift.load(std::memory_order_relaxed);
+}
+
 bool RangeEligible(size_t requested) {
-  const int64_t cap = int64_t(REXCVAR_GET(switch_io_ranges_mb)) * 1024 * 1024;
+  const int64_t cap = CapBytes();
   if (cap <= 0) {
     return false;
   }
@@ -478,30 +496,43 @@ void SaveRange(uint32_t id, uint64_t offset_bytes, uint32_t requested, const uin
     }
   }
 
+#if REX_PLATFORM_SWITCH
+  // The heap floor, checked at most once a second (mallinfo walks the free lists).
+  if (const int32_t floor_mb = REXCVAR_GET(switch_io_heap_floor_mb); floor_mb > 0) {
+    static std::atomic<int64_t> checked_at{0};
+    const int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::steady_clock::now().time_since_epoch())
+                            .count();
+    int64_t last = checked_at.load(std::memory_order_relaxed);
+    if (now - last >= 1000 && checked_at.compare_exchange_strong(last, now, std::memory_order_relaxed)) {
+      uint64_t used = 0, available = 0;
+      RexSwitchHeapStats(&used, &available);
+      if (available < uint64_t(floor_mb) << 20) {
+        if (const uint64_t freed = ShedRangeCache(true); freed) {
+          REXLOG_WARN("[io] range-cache: heap low ({} MB left, {} MB in use): {} MB released, cap now {} MB{}",
+                      available >> 20, used >> 20, freed, RangeCapMb(), RangeCapMb() ? "" : " (off)");
+        }
+        return;  // nothing new goes in while the heap is low
+      }
+    }
+  }
+#endif
+
   std::shared_ptr<std::vector<uint8_t>> copy;
   try {
     copy = std::make_shared<std::vector<uint8_t>>(data, data + bytes);
   } catch (const std::bad_alloc&) {
-    // If the console does not have that RAM, the cache turns off and is not retried. The game keeps
-    // reading from disk as usual: it can never bring the process down for lack of memory.
-    uint64_t had_mb = 0;
-    {
-      std::lock_guard lock(g_ranges_mutex);
-      had_mb = g_ranges_bytes >> 20;
-      g_ranges_no_memory = true;
-      g_ranges.clear();
-      g_ranges_bytes = 0;
-    }
-    g_range_entries.store(0, std::memory_order_relaxed);
-    g_range_bytes_live.store(0, std::memory_order_relaxed);
-    REXLOG_WARN("[io] range-cache: out of memory, turning off (it was at {} MB). The game keeps reading "
-                "from disk as before",
-                had_mb);
+    // If the console does not have that RAM, the cache empties and halves its cap (off after the third time). The
+    // game keeps reading from disk as usual: it can never bring the process down for lack of memory.
+    const uint64_t freed = ShedRangeCache(true);
+    REXLOG_WARN("[io] range-cache: out of memory: {} MB released, cap now {} MB{}. The game keeps reading from disk "
+                "as before",
+                freed, RangeCapMb(), RangeCapMb() ? "" : " (off)");
     return;
   }
 
-  const size_t cap = size_t(REXCVAR_GET(switch_io_ranges_mb)) * 1024u * 1024u;
   std::lock_guard lock(g_ranges_mutex);
+  const size_t cap = size_t(CapBytes());
   for (const auto& e : g_ranges) {
     if (e.id == id && e.offset_bytes == offset_bytes && e.requested == requested) {
       return;  // another thread asked for the same range and got there first: its copy is just as good
@@ -531,6 +562,50 @@ void SaveRange(uint32_t id, uint64_t offset_bytes, uint32_t requested, const uin
   g_range_entries.store(g_ranges.size(), std::memory_order_relaxed);
   g_range_bytes_live.store(g_ranges_bytes, std::memory_order_relaxed);
 }
+}  // namespace
+
+uint64_t ShedRangeCache(bool wait) {
+  std::vector<RangeEntry> old;
+  {
+    std::unique_lock lock(g_ranges_mutex, std::defer_lock);
+    if (wait) {
+      lock.lock();
+    } else if (!lock.try_lock()) {
+      return 0;  // the new handler, on a thread that may hold it: nothing released
+    }
+    if (g_ranges.empty()) {
+      return 0;  // nothing to give: the cap stays
+    }
+    old.swap(g_ranges);
+    g_ranges_bytes = 0;
+    if (g_ranges_shift.fetch_add(1, std::memory_order_relaxed) + 1 > 3) {
+      g_ranges_no_memory = true;  // an eighth of the cap was still too much: off
+    }
+  }
+  g_ranges_sheds.fetch_add(1, std::memory_order_relaxed);
+  g_range_entries.store(0, std::memory_order_relaxed);
+  g_range_bytes_live.store(0, std::memory_order_relaxed);
+  uint64_t bytes = 0;
+  for (const auto& e : old) {
+    bytes += e.data->size();
+  }
+  return bytes >> 20;
+}
+
+uint64_t RangeCapMb() {
+  std::lock_guard lock(g_ranges_mutex);
+  return g_ranges_no_memory ? 0 : uint64_t(CapBytes() >> 20);
+}
+
+namespace {
+// operator new, out of memory: the range cache gives its memory back and the allocation is retried; with nothing
+// left to give, bad_alloc as before. Malloc callers (the driver, libnx) do not come here: the heap floor covers them.
+void ShedForNew() {
+  if (ShedRangeCache(false) == 0) {
+    throw std::bad_alloc();
+  }
+}
+const bool g_new_handler_set = (std::set_new_handler(ShedForNew), true);
 }  // namespace
 
 uint64_t DropRangeCache() {
@@ -563,12 +638,18 @@ RangeStats ReadRangeStats() {
   e.sequential = g_range_sequential.load(std::memory_order_relaxed);
   e.sequential_bytes = g_range_sequential_mb.load(std::memory_order_relaxed);
   e.floor_kb = uint64_t(FloorBytes() / 1024);
-  const int32_t cap = REXCVAR_GET(switch_io_ranges_mb);
-  e.cap_mb = cap > 0 ? uint64_t(cap) : 0;
   {
     std::lock_guard lock(g_ranges_mutex);
     e.no_memory = g_ranges_no_memory;
+    e.cap_mb = CapBytes() > 0 ? uint64_t(CapBytes() >> 20) : 0;
   }
+  e.sheds = g_ranges_sheds.load(std::memory_order_relaxed);
+#if REX_PLATFORM_SWITCH
+  uint64_t used = 0, available = 0;
+  RexSwitchHeapStats(&used, &available);
+  e.heap_used_mb = used >> 20;
+  e.heap_available_mb = available >> 20;
+#endif
   return e;
 }
 

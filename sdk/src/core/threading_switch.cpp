@@ -21,7 +21,15 @@
 #include <switch.h>
 
 #include <errno.h>
+#include <malloc.h>
 #include <sched.h>
+#include <stdlib.h>
+#include <unistd.h>
+
+#include <algorithm>
+#include <new>
+#include <utility>
+#include <vector>
 
 #include <mutex>
 #include <unordered_map>
@@ -355,6 +363,125 @@ bool RexSwitchSetCurrentThreadCoreMask(uint64_t mask) {
     preferred = __builtin_ctzll(new_mask);
   }
   return R_SUCCEEDED(svcSetThreadCoreMask(h, preferred, u32(new_mask)));
+}
+
+void RexSwitchHeapStats(uint64_t* used, uint64_t* available) {
+  extern char* fake_heap_end;  // libnx: the end of the heap newlib's sbrk hands out
+  const struct mallinfo info = mallinfo();
+  const uintptr_t brk = uintptr_t(sbrk(0));
+  const uintptr_t end = uintptr_t(fake_heap_end);
+  *used = uint64_t(info.uordblks);
+  *available = uint64_t(info.fordblks) + (end > brk ? end - brk : 0);
+}
+
+namespace {
+struct Pieced {
+  uint8_t* view = nullptr;
+  std::vector<std::pair<void*, size_t>> pieces;  // heap block, bytes; mapped in order from view
+  size_t mapped = 0;                             // pieces mapped so far
+};
+
+void UnmapPieced(Pieced* p) {
+  size_t at = 0;
+  for (size_t i = 0; i < p->mapped; ++i) {
+    svcUnmapMemory(p->view + at, p->pieces[i].first, p->pieces[i].second);
+    at += p->pieces[i].second;
+  }
+  for (const auto& [block, n] : p->pieces) {
+    free(block);  // only once unmapped: the heap's pages are not accessible while mapped elsewhere
+  }
+  delete p;
+}
+}  // namespace
+
+void* RexSwitchAllocPieced(size_t bytes, void** handle) {
+  *handle = nullptr;
+  const size_t total = (bytes + 0xFFF) & ~size_t(0xFFF);
+  Pieced* p = new (std::nothrow) Pieced;
+  if (!p || !total) {
+    delete p;
+    return nullptr;
+  }
+  size_t got = 0;
+  size_t piece = size_t(8) << 20;
+  try {
+    while (got < total) {
+      const size_t want = std::min(piece, total - got);  // both multiples of 4 KB
+      if (void* block = aligned_alloc(0x1000, want)) {
+        p->pieces.emplace_back(block, want);
+        got += want;
+      } else if (piece > (size_t(64) << 10)) {
+        piece >>= 1;
+      } else {
+        break;
+      }
+    }
+  } catch (const std::bad_alloc&) {
+  }
+  if (got < total) {
+    UnmapPieced(p);
+    return nullptr;
+  }
+  virtmemLock();
+  p->view = static_cast<uint8_t*>(virtmemFindStack(total, 0x4000));
+  bool ok = p->view != nullptr;
+  for (size_t at = 0; ok && p->mapped < p->pieces.size(); ++p->mapped) {
+    const auto& [block, n] = p->pieces[p->mapped];
+    ok = R_SUCCEEDED(svcMapMemory(p->view + at, block, n));
+    if (!ok) {
+      break;
+    }
+    at += n;
+  }
+  virtmemUnlock();
+  if (!ok) {
+    UnmapPieced(p);
+    return nullptr;
+  }
+  *handle = p;
+  return p->view;
+}
+
+void RexSwitchFreePieced(void* handle) {
+  if (handle) {
+    UnmapPieced(static_cast<Pieced*>(handle));
+  }
+}
+
+static constexpr uint64_t kStackPattern = 0xA5A5A5A5A5A5A5A5ull;
+
+bool RexSwitchStackPrepare(uintptr_t* base, size_t* size) {
+  *base = 0;
+  *size = 0;
+  const uintptr_t sp = uintptr_t(__builtin_frame_address(0));
+  MemoryInfo info{};
+  u32 page = 0;
+  if (R_FAILED(svcQueryMemory(&info, &page, sp)) || !info.size || sp < info.addr ||
+      sp >= info.addr + info.size) {
+    return false;
+  }
+  const uintptr_t fill_end = (sp & ~uintptr_t(0xFFF)) - 0x4000;  // well below this frame and memset's own
+  if (fill_end <= info.addr) {
+    return false;
+  }
+  for (uint64_t* p = reinterpret_cast<uint64_t*>(info.addr); p < reinterpret_cast<uint64_t*>(fill_end); ++p) {
+    *p = kStackPattern;
+  }
+  *base = info.addr;
+  *size = info.size;
+  return true;
+}
+
+size_t RexSwitchStackUsed(uintptr_t base, size_t size) {
+  if (!base || !size) {
+    return 0;
+  }
+  for (uintptr_t page = base; page < base + size; page += 0x1000) {
+    if (*reinterpret_cast<const volatile uint64_t*>(page) != kStackPattern) {
+      return base + size - page;
+    }
+  }
+  return 0;
 }
 
 }  // extern "C"

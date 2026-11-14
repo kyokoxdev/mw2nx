@@ -96,6 +96,20 @@ REXCVAR_DEFINE_INT32(mw2mp_scene_scale, MW2MP_SCENE_SCALE_DEFAULT, "Graphics",
     .range(50, 100)
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 
+// Adaptive shadows and dynamic lights. Run mw2sp_021, favela_escape's market: 5-7k draws a frame, the ring thread's
+// draw work ~730 ms/s at 33 FPS (~520 ms/s at 58 FPS elsewhere). The sun's shadow map draws every caster again and each
+// dynamic light the surfaces it lights, so they go off while the draw work stays high and come back once it is low.
+REXCVAR_DEFINE_BOOL(mw2mp_adaptive_shadows, true, "Graphics",
+                    "Shadows and dynamic lights switch off while the renderer is overloaded (draw work above "
+                    "mw2mp_adaptive_off_ms for 2 s) and back on once it is light (below mw2mp_adaptive_on_ms for 5 s). "
+                    "false = the preset's always");
+REXCVAR_DEFINE_INT32(mw2mp_adaptive_off_ms, 650, "Graphics",
+                     "Adaptive shadows: draw work in ms per second above which shadows and dynamic lights go off")
+    .range(100, 1000);
+REXCVAR_DEFINE_INT32(mw2mp_adaptive_on_ms, 450, "Graphics",
+                     "Adaptive shadows: draw work in ms per second below which they come back")
+    .range(50, 1000);
+
 REXCVAR_DEFINE_INT32(mw2mp_preset_test_s, 0, "BO2",
                      "Test helper: in a level, step to the next lower preset every N seconds (high, medium, low, "
                      "very_low, high, ...), logged as '[preset] test'. 0 = off")
@@ -149,6 +163,58 @@ constexpr Setting kSettings[] = {
     {"r_zfar", kFloat, {kGame, kGame, kGame, kGame}},
 };
 constexpr size_t kCount = sizeof(kSettings) / sizeof(kSettings[0]);
+// Settings the adaptive mode takes to their very_low value: shadows and dynamic lights.
+bool Adaptive(const char* name) {
+  return std::strncmp(name, "sm_", 3) == 0 || std::strcmp(name, "r_dlightLimit") == 0;
+}
+bool g_reduced = false;  // adaptive shadows: off now
+
+// Once a second: draw work in ms/s against the thresholds (2 s above to go off, 5 s below to come back).
+// Run mw2sp_022: with shadows off the draw work falls well under the threshold to come back, so in a heavy area they
+// came back and went off again 4-20 s later (8 of 20 times): shadows blinking. Going off again within 30 s of coming
+// back doubles the wait before the next return (5, 10, 20, 40, at most 80 s); a minute on resets it.
+void UpdateAdaptive(int level) {
+  static auto at = std::chrono::steady_clock::now();
+  static uint64_t work_at = g_draw_work_ns.load(std::memory_order_relaxed);
+  static int above = 0, below = 0;
+  static int wait_s = 5;     // seconds below the threshold before they come back
+  static int on_for_s = 60;  // seconds since they came back (a level starts as if long on)
+  const auto now = std::chrono::steady_clock::now();
+  const double seconds = std::chrono::duration<double>(now - at).count();
+  if (seconds < 1.0) {
+    return;
+  }
+  const uint64_t work = g_draw_work_ns.load(std::memory_order_relaxed);
+  const double ms = double(work - work_at) / 1e6 / seconds;
+  at = now;
+  work_at = work;
+  if (!REXCVAR_GET(mw2mp_adaptive_shadows) || level >= 3 || !mw2mp::preset::ClientInGame()) {
+    above = below = 0;
+    g_reduced = false;
+    wait_s = 5;
+    on_for_s = 60;
+    return;
+  }
+  above = ms > REXCVAR_GET(mw2mp_adaptive_off_ms) ? above + 1 : 0;
+  below = ms < REXCVAR_GET(mw2mp_adaptive_on_ms) ? below + 1 : 0;
+  if (!g_reduced) {
+    if (++on_for_s >= 60) {
+      wait_s = 5;
+    }
+  }
+  if (!g_reduced && above >= 2) {
+    g_reduced = true;
+    if (on_for_s < 30) {
+      wait_s = std::min(wait_s * 2, 80);  // back too soon: wait longer next time
+    }
+    REXLOG_INFO("[preset] adaptive: shadows and dynamic lights OFF (draw work {:.0f} ms/s; back after {} s below)",
+                ms, wait_s);
+  } else if (g_reduced && below >= wait_s) {
+    g_reduced = false;
+    on_for_s = 0;
+    REXLOG_INFO("[preset] adaptive: shadows and dynamic lights back on (draw work {:.0f} ms/s)", ms);
+  }
+}
 // Texture detail (the renderer's mip floor for the world; UI keeps full detail).
 constexpr uint32_t kMipsMinus[kLevels] = {0, 0, 0, 1};
 
@@ -293,8 +359,10 @@ void Apply() {
       level = int((level + steps) % kLevels);
     }
   }
+  UpdateAdaptive(level);
 #ifdef MW2_DVAR_POOL
   static int applied = -1;
+  static bool applied_reduced = false;
   static size_t found_logged = 0;
   uint8_t* const base = rex::system::kernel_memory()->virtual_membase();
   Resolve(base);
@@ -306,10 +374,14 @@ void Apply() {
     ++found;
     // Below high, held every frame; high restores the default once, on the change (or when the dvar appears).
     int32_t value = kSettings[s].value[level];
+    const bool adaptive = Adaptive(kSettings[s].name);
+    if (g_reduced && adaptive) {
+      value = kSettings[s].value[3];
+    }
     if (std::strcmp(kSettings[s].name, "r_zfar") == 0 && REXCVAR_GET(mw2mp_draw_distance) >= 0) {
       value = REXCVAR_GET(mw2mp_draw_distance);  // 0: the level's own (the registered 0)
     }
-    if (value != kGame || level != applied || found > found_logged) {
+    if (value != kGame || level != applied || found > found_logged || (adaptive && g_reduced != applied_reduced)) {
       Write(base, s, value, true);
     }
   }
@@ -329,6 +401,7 @@ void Apply() {
     applied = level;
     found_logged = found;
   }
+  applied_reduced = g_reduced;
 #endif
   g_applied.store(level, std::memory_order_relaxed);
   const double model_detail = REXCVAR_GET(mw2mp_model_detail);
@@ -351,6 +424,45 @@ void Apply() {
 
 uint32_t TextureMipsMinus() {
   return kMipsMinus[g_applied.load(std::memory_order_relaxed)];
+}
+
+std::string MapName() {
+#ifdef MW2_DVAR_POOL
+  // "mapname", a string dvar: its current value (+12) points at the name. Set when the server spawns a level.
+  static uint32_t dvar = 0, scanned = 0;
+  const uint8_t* const base = rex::system::kernel_memory()->virtual_membase();
+  if (!dvar) {
+    const uint32_t count = rex::memory::load_and_swap<uint32_t>(base + MW2_DVAR_COUNT);
+    if (count == scanned || count > 4096) {
+      return {};
+    }
+    scanned = count;
+    for (uint32_t i = 0; i < count && !dvar; ++i) {
+      const uint32_t d = MW2_DVAR_POOL + i * 72;
+      if (SameName(base, rex::memory::load_and_swap<uint32_t>(base + d), "mapname")) {
+        dvar = d;
+      }
+    }
+    if (!dvar) {
+      return {};
+    }
+  }
+  const uint32_t text = rex::memory::load_and_swap<uint32_t>(base + dvar + 12);
+  if (text < 0x80000000u) {
+    return {};
+  }
+  std::string name;
+  for (const char* s = reinterpret_cast<const char*>(base + text); *s && name.size() < 64; ++s) {
+    const char c = *s;
+    if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_')) {
+      return {};  // not a file name: not trusted
+    }
+    name += c;
+  }
+  return name;
+#else
+  return {};
+#endif
 }
 
 }  // namespace mw2mp::gfx_preset

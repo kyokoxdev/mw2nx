@@ -32,6 +32,7 @@
 //   geometry. See docs/native-renderer.md.
 
 #include "mw2mp_native_render.h"
+#include "../../mw2mp_graphics_preset.h"  // adaptive shadows (draw work)
 #include "../mw2mp_native_system.h"
 
 #include "mw2mp_hitch_waits.h"
@@ -3459,7 +3460,9 @@ class NativeRenderSystem final : public rex::system::IGraphicsSystem {
     if ((phase_stopwatch_draws_++ & (kStopwatchDrawsEvery - 1)) == kStopwatchDrawsEvery / 2) {
       const auto start = Clock::now();
       targets_->Draw(request);
-      time_draws_ns_ += NanosecondsSince(start) * kStopwatchDrawsEvery;
+      const uint64_t ns = NanosecondsSince(start) * kStopwatchDrawsEvery;
+      time_draws_ns_ += ns;
+      mw2mp::gfx_preset::g_draw_work_ns.fetch_add(ns, std::memory_order_relaxed);  // adaptive shadows
     } else {
       targets_->Draw(request);
     }
@@ -4337,7 +4340,18 @@ class NativeRenderSystem final : public rex::system::IGraphicsSystem {
         for (uint32_t i = 0; i < size; ++i) {
           load->host[i] = rex::memory::load_and_swap<uint32_t>(copy + size_t(i) * 4);
         }
-        load->input = shaders_.loaded() ? shaders_.Identify(type == 0, load->host) : nullptr;
+        if (shaders_.loaded()) {
+          const auto start_identify = std::chrono::steady_clock::now();
+          load->input = shaders_.Identify(type == 0, load->host);
+          mw2mp::waits::g_ns_identify_ring.fetch_add(
+              uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() -
+                                                                            start_identify)
+                           .count()),
+              std::memory_order_relaxed);
+          mw2mp::waits::g_identify_ring.fetch_add(1, std::memory_order_relaxed);
+        } else {
+          load->input = nullptr;
+        }
         load->hash = XXH3_64bits(load->host.data(), bytes);
         load->generation = ++generations_microcode_;
         load->validated = false;

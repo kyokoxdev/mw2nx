@@ -36,7 +36,10 @@ REXCVAR_DEFINE_INT32(mw2mp_cpu_cores, 4, "MW2",
                      "nothing. 3 = the three cores every launch has")
     .range(3, 4)
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
-REXCVAR_DEFINE_STRING(mw2mp_core3_threads, "Server:0xF:59,Audio Worker:0x8:43,XMA Decoder:0x8:43", "MW2",
+// The renderer's vertex copy thread (cores 2-3, its own priority 0x2E): on cores 0-2 beside the game threads it ran
+// ~0.3 % and the ring did 2/3 of the copies itself (run mw2sp_019).
+REXCVAR_DEFINE_STRING(mw2mp_core3_threads,
+                      "Server:0xF:59,Audio Worker:0x8:43,XMA Decoder:0x8:43,BO2 vertex copies:0xC:46", "MW2",
                       "Switch, 4-core forwarder only: threads moved to core 3, as comma-separated \"name prefix[:core "
                       "mask[:priority]]\" (0x8 = core 3 alone, 0xF = cores 0-3). \"\" = none moved")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
@@ -78,13 +81,17 @@ const Picture* Images() { return nullptr; }
 bool Place(uint32_t, uint32_t, Placement&) { return false; }
 }  // namespace mw2mp::credits
 
-// ponytail: texture write-stamp shortcuts off. Only memcpy/memset stamp pages (mw2mp_crt.cpp); MW2's VMX copies and
-// plain-store writers do not, so a skipped texture recheck could go stale. Hook the remaining writers, then turn it
-// on. The vertex and index caches are on: their guard checksums the first hits of every copy and marks ranges changed
+// Texture write-stamp shortcuts on, as bo2 (its default). memcpy/memset and the VMX copy kernels (mw2mp_crt.cpp), file
+// reads and memexport stamp pages; a writer that does not stamp is caught by the guard (every recheck for the first
+// 4,000, then 1 in 16, or 1 in 4 while young), logged as "changed without a stamp", and its pages count as written from
+// then on.
+// The vertex and index caches are on: their guard checksums the first hits of every copy and marks ranges changed
 // without a stamp as always written. The constants shortcut (only the constants a shader reads, from its microcode
 // analysis) does not use stamps at all and is on.
 namespace mw2mp::debug {
-bool TextureShortcutsOff() { return true; }
+// Run mw2sp_018 (on) went wrong (black/green viewmodel, then a crash) while file reads and the VMX copy kernels did
+// not stamp; both stamp now (page_writes::Enable, mw2mp_crt.cpp). Plain-store writers (Bink frames) stay on the guard.
+bool TextureShortcutsOff() { return false; }
 bool ConstantsShortcutOff() { return false; }
 bool CachesOff() { return false; }
 void WatchPhysicalPages(const std::vector<uint32_t>&, Watch, const std::vector<uint64_t>*) {}
@@ -107,9 +114,10 @@ void Refused(const char*, uint32_t, uint32_t, uint32_t, uint32_t) {}
 void Compare(const uint8_t*, const uint8_t*, uint32_t, uint32_t, uint32_t) {}
 }  // namespace mw2mp::gpu_skin
 
+// Weak: the MW2SP_MEMCPY_CALLERS test build links the real ones (mw2mp_memcpy_callers.cpp).
 namespace mw2mp::memcpy_callers {
-void MarkThread() {}
-void Report() {}
+__attribute__((weak)) void MarkThread() {}
+__attribute__((weak)) void Report() {}
 }  // namespace mw2mp::memcpy_callers
 
 namespace mw2mp::native {

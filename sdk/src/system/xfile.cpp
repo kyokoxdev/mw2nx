@@ -21,6 +21,10 @@
 
 #include <span>
 
+namespace rex::memory {
+void (*g_physical_read_hook)(uint32_t physical, uint32_t bytes) = nullptr;
+}  // namespace rex::memory
+
 namespace rex::system {
 
 XFile::XFile(KernelState* kernel_state, rex::filesystem::File* file, bool synchronous)
@@ -168,6 +172,9 @@ X_STATUS XFile::ReadInternal(uint32_t buffer_guest_address, uint32_t buffer_leng
               buffer_physical_heap->TriggerCallbacks(
                   rex::thread::global_critical_region::AcquireDirect(), buffer_guest_address,
                   buffer_length, true, true);
+              if (auto hook = rex::memory::g_physical_read_hook) {
+                hook(buffer_physical_heap->GetPhysicalAddress(buffer_guest_address), buffer_length);
+              }
             }
 
             if (byte_offset) {

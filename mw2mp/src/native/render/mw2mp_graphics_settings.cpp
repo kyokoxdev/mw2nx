@@ -122,11 +122,10 @@ REXCVAR_DEFINE_UINT32(mw2mp_swap_interval, 0, "Graphics",
  * between 30 and unlocked every few seconds; the 30 FPS lock felt very sluggish. It now locks only where the game
  * cannot hold ~40 FPS (p75 over 25 ms, cost p80 over 22 ms) and unlocks once the cost says ~50 FPS fits (20 ms).
  */
-#if defined(MW2_CAMPAIGN) && MW2_CAMPAIGN
-#define MW2MP_FRAME_PACING_DEFAULT "auto"
-#else
-#define MW2MP_FRAME_PACING_DEFAULT "off"  // multiplayer: run 037 median 17.5 ms, a lock would cost more than it gives
-#endif
+// Off in both. Multiplayer: run 037 median 17.5 ms, a lock would cost more than it gives. Campaign: in runs 019-020
+// every lock let go within 2-10 s (32-37 times a run) with 7-40 % of the locked frames over 36 ms, each shown for
+// 50 ms: it added 20 FPS frames instead of steadying them.
+#define MW2MP_FRAME_PACING_DEFAULT "off"
 REXCVAR_DEFINE_STRING(mw2mp_frame_pacing, MW2MP_FRAME_PACING_DEFAULT, "Graphics",
                       "Switch: auto locks to a steady 30 FPS only where the game cannot hold ~40 FPS but fits 30, and "
                       "unlocks where ~50 FPS fits again or 30 does not fit either (steadier, fewer jumps between 60 and 20-30). off: "
@@ -447,6 +446,7 @@ void PaceFrame(double interval_ms, double cost_ms) {
   static int n = 0, calm = 0;
   static bool locked = false;
   static auto since = std::chrono::steady_clock::now();
+  static auto relock_after = since;  // after letting go because 30 did not fit
   if (interval_ms > 250.0) {
     n = 0;  // a load or a pause says nothing about the scene
     return;
@@ -462,7 +462,7 @@ void PaceFrame(double interval_ms, double cost_ms) {
     std::nth_element(v.begin(), at, v.end());
     return double(*at);
   };
-  const double p75 = pct(intervals, 75), p90 = pct(intervals, 90), cost80 = pct(costs, 80);
+  const double p75 = pct(intervals, 75), p90 = pct(intervals, 90), cost80 = pct(costs, 80), cost90 = pct(costs, 90);
   const double limit_60 = REXCVAR_GET(mw2mp_frame_pacing_60_ms);
   const double slow = double(std::count_if(intervals.begin(), intervals.end(), [](float x) { return x > 36.0f; })) /
                       kWindow;
@@ -476,10 +476,16 @@ void PaceFrame(double interval_ms, double cost_ms) {
     // Misses 60 often and fits 30, and the cost says so too (menus miss 60 by the game's own pacing at no cost:
     // without this they would lock and unlock every few seconds).
     // Only below ~40 FPS: 45-55 FPS unlocked felt better than a 30 lock (run mw2sp_007).
-    want = settled && p75 > 25.0 && p90 < 32.0 && cost80 >= limit_60 + 2.0;
+    // Run mw2sp_019 locked at cost p80 25-30 ms and let go 2-10 s later, 37 times in 18 min: every locked frame over
+    // 33.3 ms showed for 50 ms (20 FPS). Now the cost's p90 has to fit 30 too, and after a lock that did not fit it
+    // waits 15 s before trying again.
+    want = settled && now >= relock_after && p75 > 25.0 && p90 < 32.0 && cost80 >= limit_60 + 2.0 && cost90 < 30.0;
   } else {
     calm = cost80 < limit_60 ? calm + 1 : 0;
     want = !(settled && (slow > 0.15 || calm >= 3));  // 30 does not fit, or 60 fits again
+    if (!want && slow > 0.15) {
+      relock_after = now + std::chrono::seconds(15);
+    }
   }
   if (want == locked) {
     return;

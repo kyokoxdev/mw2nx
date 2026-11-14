@@ -399,6 +399,7 @@ void RtlEnterCriticalSection_entry(ppc_ptr_t<X_RTL_CRITICAL_SECTION> cs) {
 
   if (rex::thread::atomic_inc(&cs->lock_count) != 0) {
     // Create a full waiter.
+    rex::system::WaitProbe probe(rex::system::WaitKind::kCriticalSection, cs->owning_thread);
     xeKeWaitForSingleObject(reinterpret_cast<void*>(cs.host_address()), 8, 0, 0, nullptr);
   }
 

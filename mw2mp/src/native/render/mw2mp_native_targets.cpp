@@ -44,6 +44,7 @@
 #include <rex/logging.h>
 #include <rex/math.h>
 #include <rex/graphics/registers.h>
+#include <rex/system/xthread.h>  // LogGuestWaits, the [waits] line of a [hitch]
 #include <rex/system/xmemory.h>
 #include <rex/ui/presenter.h>
 #include <rex/ui/vulkan/device.h>
@@ -2517,6 +2518,12 @@ class VulkanTargets final : public NativeTargets, public TargetContext {
                       diff_of(e::g_textures_hash_ring, hitch_textures_hash_ring_),
                       double(diff_of(e::g_ns_hash_ring, hitch_ns_hash_ring_)) / 1e6,
                       double(diff_of(e::g_ns_waiting_hashes, hitch_ns_waiting_hashes_)) / 1e6);
+          MW2MP_REPORT_RING("[hitch] ring, new pipelines: {} probed in the driver's cache in {:.1f} ms; new shaders: {} "
+                            "identified (pack reads) in {:.1f} ms",
+                            diff_of(e::g_pipelines_ring, hitch_pipelines_ring_),
+                            double(diff_of(e::g_ns_pipelines_ring, hitch_ns_pipelines_ring_)) / 1e6,
+                            diff_of(e::g_identify_ring, hitch_identify_ring_),
+                            double(diff_of(e::g_ns_identify_ring, hitch_ns_identify_ring_)) / 1e6);
           /*
            * The game's side. Four of the seven gameplay stutters in one run come from the preparer (the executor
            * waiting for the handoff, or waiting for commands inside the list, with the ring idle), and the wait
@@ -2529,6 +2536,9 @@ class VulkanTargets final : public NativeTargets, public TargetContext {
                                delta(e::kPreparerList), times(e::kPreparerList),
                                delta(e::kPreparerScenery), times(e::kPreparerScenery),
                                delta(e::kPreparerOut), times(e::kPreparerOut));
+          // The game's side for MW2 (the hooks above are BO2's functions and read 0 here): what every guest thread
+          // waited on during this frame, and who did not wait (guest_wait_probe).
+          rex::system::LogGuestWaits(ms);
         }
         {
           // Adaptive frame pacing (mw2mp_frame_pacing): what this frame cost without the waits for presentation,
@@ -2573,6 +2583,10 @@ class VulkanTargets final : public NativeTargets, public TargetContext {
         hitch_ns_hash_snapshot_ = mw2mp::waits::g_ns_hash_snapshot.load(std::memory_order_relaxed);
         hitch_textures_hash_ring_ = mw2mp::waits::g_textures_hash_ring.load(std::memory_order_relaxed);
         hitch_ns_hash_ring_ = mw2mp::waits::g_ns_hash_ring.load(std::memory_order_relaxed);
+        hitch_pipelines_ring_ = mw2mp::waits::g_pipelines_ring.load(std::memory_order_relaxed);
+        hitch_ns_pipelines_ring_ = mw2mp::waits::g_ns_pipelines_ring.load(std::memory_order_relaxed);
+        hitch_identify_ring_ = mw2mp::waits::g_identify_ring.load(std::memory_order_relaxed);
+        hitch_ns_identify_ring_ = mw2mp::waits::g_ns_identify_ring.load(std::memory_order_relaxed);
         hitch_ns_waiting_hashes_ = mw2mp::waits::g_ns_waiting_hashes.load(std::memory_order_relaxed);
         hitch_ns_wait_output_ = ns_wait_output_;
         hitch_gpu_ns_ = gpu_ns_;
@@ -7619,6 +7633,8 @@ class VulkanTargets final : public NativeTargets, public TargetContext {
   uint64_t hitch_ns_waiting_bindings_ = 0;
   uint64_t hitch_textures_hash_thread_ = 0, hitch_ns_hash_thread_ = 0, hitch_ns_hash_snapshot_ = 0;
   uint64_t hitch_textures_hash_ring_ = 0, hitch_ns_hash_ring_ = 0, hitch_ns_waiting_hashes_ = 0;
+  uint64_t hitch_pipelines_ring_ = 0, hitch_ns_pipelines_ring_ = 0;
+  uint64_t hitch_identify_ring_ = 0, hitch_ns_identify_ring_ = 0;
   // Why the restore does not swap. See the block in RestoreContent.
   uint64_t no_swap_no_transfer_dst_ = 0;
   uint64_t no_swap_target_no_prepare_ = 0;

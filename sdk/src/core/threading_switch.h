@@ -176,6 +176,30 @@ bool RexSwitchSetCurrentThreadCoreMask(uint64_t mask);
 /* Which core the calling thread is running on right now. It can only be asked about oneself. */
 int RexSwitchCurrentCore(void);
 
+/*
+ * The C heap (newlib's, which also backs the GPU memory: nouveau_horizon_memory.c memaligns it): bytes in use and
+ * bytes still available (free chunks plus the part of the heap the allocator has not taken yet).
+ */
+void RexSwitchHeapStats(uint64_t* used, uint64_t* available);
+
+/*
+ * One contiguous range of `bytes` (rounded up to 4 KB) built from page-aligned heap pieces of 8 MB down to 64 KB,
+ * each mapped into one free stretch of the stack region with svcMapMemory (as libnx maps thread stacks). For a large
+ * transient buffer when the heap has the memory but no single block that big (run mw2sp_022: the 73-80 MB pipeline
+ * cache save failed three times). Returns the range, or NULL; *handle is what RexSwitchFreePieced takes back.
+ */
+void* RexSwitchAllocPieced(size_t bytes, void** handle);
+void RexSwitchFreePieced(void* handle);
+
+/*
+ * Host stack high-water mark (guest_thread_stack_watermark). Prepare, on the thread itself at its start: finds its
+ * stack mapping (svcQueryMemory on sp), fills what lies below the current frame with a pattern and returns the
+ * mapping. Used, from any thread: the bytes from the top down to the lowest page whose first word lost the pattern
+ * (4 KB granularity).
+ */
+bool RexSwitchStackPrepare(uintptr_t* base, size_t* size);
+size_t RexSwitchStackUsed(uintptr_t base, size_t size);
+
 #ifdef __cplusplus
 }
 #endif

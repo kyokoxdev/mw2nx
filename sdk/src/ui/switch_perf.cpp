@@ -1093,9 +1093,12 @@ Result __wrap_nwindowQueueBuffer(NWindow* nw, s32 slot, const NvMultiFence* fenc
   const u64 since = armGetSystemTick();
   const int forced = g_interval_forced.load(std::memory_order_relaxed);
   const unsigned requested = forced >= 0 ? unsigned(forced) : g_interval_swap.load(std::memory_order_relaxed);
-  if ((forced >= 0 || requested != 0) && nw != nullptr && nw->swap_interval != requested) {
+  // 0 after a non-zero interval puts 0 back (run mw2sp_013: the pacing unlock left interval 2 on for the whole run).
+  static unsigned applied = 0;  // only the presenting thread queues buffers
+  if ((forced >= 0 || requested != 0 || applied != 0) && nw != nullptr && nw->swap_interval != requested) {
     nwindowSetSwapInterval(nw, requested);
   }
+  applied = requested;
   const Result rc = __real_nwindowQueueBuffer(nw, slot, fence);
   Annotate(kQueueBuffer, since);
   return rc;

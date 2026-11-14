@@ -689,6 +689,18 @@ REXCVAR_DEFINE_INT32(mw2mp_native_compile_threads, MW2MP_COMPILE_THREADS_DEFAULT
                      "match and with nothing queued it sleeps. 1 = one thread, as before")
     .range(1, 2)
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+// Run mw2sp_022 (oilrig, no map list yet): 1,149 pipelines compiled in play at 150-500 ms each, every one by the first
+// thread ("0 by the second thread"): bursts of 10-30 left the new area black for 3-9 s (8,683 draws skipped in one
+// 10 s window). In a level the second thread now helps too while two or more wait; with nothing queued it sleeps.
+#if defined(MW2_CAMPAIGN) && MW2_CAMPAIGN
+#define MW2MP_COMPILE_HELP_IN_MATCH_DEFAULT true
+#else
+#define MW2MP_COMPILE_HELP_IN_MATCH_DEFAULT false
+#endif
+REXCVAR_DEFINE_BOOL(mw2mp_native_compile_help_in_match, MW2MP_COMPILE_HELP_IN_MATCH_DEFAULT, "BO2",
+                    "With mw2mp_native_compile_threads 2: the second thread also compiles in a level (not only in "
+                    "menus and loading screens) while two or more pipelines wait. Clears the black areas of a "
+                    "first visit about twice as fast, at the cost of a core while it works");
 REXCVAR_DEFINE_BOOL(mw2mp_native_test_async_all, false, "BO2",
                     "Test helper, with mw2mp_native_async_pipelines: every pipeline the session creates goes to the "
                     "compile thread, those in the driver's cache too, as on a console that never compiled them (the "
@@ -753,6 +765,15 @@ REXCVAR_DEFINE_INT32(mw2mp_native_prewarm_threads, 2, "BO2",
 REXCVAR_DEFINE_STRING(mw2mp_native_prewarm_lists, "cache/prewarm", "BO2",
                       "Native renderer: the folder, beside the NRO or the exe, whose *.bin prewarm lists are read at "
                       "start-up besides the pipelines file's own (tools/pipelines_list.py makes them)")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+// Per-level pipeline lists, pipelines/<mapname>.bin beside the NRO (shipped with the port; state keys and shader
+// fingerprints, no game data). At each level's load its listed pipelines are compiled on every core while the loading
+// image stays up (the load hold waits for them), so a first visit has no in-game compiles: a longer load instead of
+// black spots and stutter.
+REXCVAR_DEFINE_BOOL(mw2mp_native_record_map_lists, false, "BO2",
+                    "Native renderer: every pipeline a level draws is added to pipelines/<mapname>.bin (merged with "
+                    "what the file already has) when the level ends or the game goes back to the menu. To make the "
+                    "lists the port ships: play each level to its end. false = the lists are only read")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 REXCVAR_DEFINE_BOOL(mw2mp_native_test_export_list, false, "BO2",
                     "Test helper: the session's prewarm list is also written to logs/mw2mp_prewarm_list.bin (at most "
@@ -1094,6 +1115,13 @@ REXCVAR_DEFINE_INT32(mw2mp_native_vertex_cache_mb, 96, "BO2",
                      "Native renderer: size in MB of each of the vertex cache's two persistent buffers")
     .range(4, 256)
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+// Run mw2sp_021: each draw's vertex range is [vmin, vmax] of its indices, so one buffer drawn by many draws had one
+// pool copy per sub-range: 18 MB distinct filled 96 MB pools, ~6 switches and ~300 MB of refills per 10 s.
+REXCVAR_DEFINE_INT32(mw2mp_native_vertex_cache_whole_kb, 256, "BO2",
+                     "Native renderer: with the vertex cache by writes, a vertex buffer of at most this many KB is "
+                     "cached whole (one copy for all its draws' sub-ranges). 0 = per draw range")
+    .range(0, 4096)
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 REXCVAR_DEFINE_BOOL(mw2mp_native_vertex_cache_sum, true, "BO2",
                     "Native renderer: the vertex cache checks a range with Fletcher sums of its 16-byte blocks "
                     "(ChangeSum, no multiplies) instead of XXH3 (~2 GB/s on the console). false = XXH3");
@@ -1176,7 +1204,7 @@ REXCVAR_DEFINE_BOOL(mw2mp_native_input_front, true, "BO2",
 REXCVAR_DEFINE_BOOL(mw2mp_native_input_front_ab, false, "BO2",
                     "Test, with mw2mp_benchmark_ab_s: A/B factor 1 is mw2mp_native_input_front")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
-REXCVAR_DEFINE_BOOL(mw2mp_native_prefetch_cache_lines, false, "BO2",
+REXCVAR_DEFINE_BOOL(mw2mp_native_prefetch_cache_lines, true, "BO2",
                     "Native renderer: prefetch the vertex and index caches' table lines and write stamps "
                     "of each draw early. false = looked up cold")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
@@ -1542,6 +1570,26 @@ namespace mw2mp::native {
 std::atomic<uint32_t> g_syncs_ring{0};
 std::atomic<bool> g_syncs_on_flush_waits{false};
 namespace {
+// Equal or not, 8 bytes at a time with no early exit (GCC vectorizes the loop). Not memcmp at the per-draw sites: out
+// of line it is a call each (run mw2sp_016: ~5 % of the ring), and inlined (-finline-stringops) GCC compares byte by
+// byte for the ordering (run mw2sp_017: the 720-byte shared block compare alone took 21.8 % of the ring).
+template <size_t N>
+inline bool SameBytes(const void* a, const void* b) {
+  const auto* x = static_cast<const unsigned char*>(a);
+  const auto* y = static_cast<const unsigned char*>(b);
+  uint64_t d = 0;
+  size_t i = 0;
+  for (; i + 8 <= N; i += 8) {
+    uint64_t u, v;
+    std::memcpy(&u, x + i, 8);
+    std::memcpy(&v, y + i, 8);
+    d |= u ^ v;
+  }
+  for (; i < N; ++i) {
+    d |= x[i] ^ y[i];
+  }
+  return d == 0;
+}
 
 /*
  * A pass's category from its render target, in one place.
@@ -3484,6 +3532,8 @@ class VulkanDrawsImpl final : public VulkanDraws {
       xenos::Endian order;
       uint32_t bytes;
       uint64_t address;  // physical, of the first byte used
+      uint32_t start;      // bytes from the buffer's start to address
+      uint32_t available;  // the buffer's bytes (fetch constant)
     };
     // mw2mp_native_fewer_copies: every binding below writes its source or rejects the draw, and only
     // the bindings' sources are read, so the 384 bytes need no zeroing.
@@ -3515,7 +3565,7 @@ class VulkanDrawsImpl final : public VulkanDraws {
       }
       sources[b] = {memory_->TranslatePhysical(uint32_t(address + start)),
                      static_cast<xenos::Endian>(d1 & 0x3), uint32_t(needed),
-                     address + start};
+                     address + start, uint32_t(start), uint32_t(available)};
       // Its vertex cache set and stamp line, fetched before the uploads stage looks them up.
       if (prefetch_lines_ && vcache_active_ && vcache_by_writes_) {
         PrefetchCacheLines(((address + start) & 0x1FFFFFFF) | (uint64_t(uint32_t(needed) & 0x3FFFFFF) << 29) |
@@ -3668,7 +3718,7 @@ class VulkanDrawsImpl final : public VulkanDraws {
       // Valid until cache.valid_until (with the cross-frame cache disabled, only its own frame)
       if ((cache_between_frames_ ? frame_ <= cache.valid_until : cache.frame == frame_) &&
           cache.generation == generation_textures_ && cache.mip_min == mip_min && SlotCurrent(cache) &&
-          std::memcmp(cache.fetch.data(), fetch, sizeof(cache.fetch)) == 0) {
+          SameBytes<sizeof(cache.fetch)>(cache.fetch.data(), fetch)) {
         shared[cache.heap * 16 + sampler.reg_index] = cache.slot;
         shared[48 + sampler.reg_index] = cache.sampler;
         WriteInvSize(shared, sampler.reg_index, cache.width, cache.height);
@@ -3692,9 +3742,9 @@ class VulkanDrawsImpl final : public VulkanDraws {
       const size_t set = (XXH3_64bits(fetch, sizeof(uint32_t) * 6) ^ (uint64_t(mip_min) << 1)) &
                          (cache_fetch_.size() - 2);
       CacheSampler* via = &cache_fetch_[set];
-      if (via->mip_min != mip_min || std::memcmp(via->fetch.data(), fetch, sizeof(via->fetch)) != 0) {
+      if (via->mip_min != mip_min || !SameBytes<sizeof(via->fetch)>(via->fetch.data(), fetch)) {
         CacheSampler* const other = &cache_fetch_[set + 1];
-        if ((other->mip_min == mip_min && std::memcmp(other->fetch.data(), fetch, sizeof(other->fetch)) == 0) ||
+        if ((other->mip_min == mip_min && SameBytes<sizeof(other->fetch)>(other->fetch.data(), fetch)) ||
             other->frame == UINT64_MAX ||
             (via->frame != UINT64_MAX && other->valid_until < via->valid_until)) {
           via = other;
@@ -3704,7 +3754,7 @@ class VulkanDrawsImpl final : public VulkanDraws {
       uint64_t valid_until = frame_;
       if ((cache_between_frames_ ? frame_ <= per_fetch.valid_until : per_fetch.frame == frame_) &&
           per_fetch.generation == generation_textures_ && per_fetch.mip_min == mip_min && SlotCurrent(per_fetch) &&
-          std::memcmp(per_fetch.fetch.data(), fetch, sizeof(per_fetch.fetch)) == 0) {
+          SameBytes<sizeof(per_fetch.fetch)>(per_fetch.fetch.data(), fetch)) {
         slot_texture = per_fetch.slot;
         heap = per_fetch.heap;
         slot_sampler = per_fetch.sampler;
@@ -3714,7 +3764,7 @@ class VulkanDrawsImpl final : public VulkanDraws {
         ++samplers_cache_fetch_;
       } else {
         // Why the table misses ("C6 sampler cache by fetch" report, every 10 s).
-        if (per_fetch.mip_min != mip_min || std::memcmp(per_fetch.fetch.data(), fetch, sizeof(per_fetch.fetch)) != 0) {
+        if (per_fetch.mip_min != mip_min || !SameBytes<sizeof(per_fetch.fetch)>(per_fetch.fetch.data(), fetch)) {
           ++(per_fetch.frame == UINT64_MAX ? fetch_misses_empty_ : fetch_misses_collision_);
         } else if (per_fetch.generation != generation_textures_ || !SlotCurrent(per_fetch)) {
           ++fetch_misses_generation_;
@@ -3879,7 +3929,7 @@ class VulkanDrawsImpl final : public VulkanDraws {
      * every case, collisions included.
      */
     uint64_t key_pass;
-    if (key_pass_fast_ && pass_keys_valid_ && std::memcmp(keys, pass_keys_, sizeof(keys)) == 0) {
+    if (key_pass_fast_ && pass_keys_valid_ && SameBytes<sizeof(keys)>(keys, pass_keys_)) {
       const uint64_t n = ++keys_pass_fast_;
       key_pass = (n <= kKeysPassACheck || (n & 4095) == 0) ? CheckKeyPass(keys, n) : pass_key_;
     } else {
@@ -3992,7 +4042,8 @@ class VulkanDrawsImpl final : public VulkanDraws {
         const VkDeviceSize alignment =
             vertices_base_cero_ && input->bindings.size() == 1 ? VkDeviceSize(input->bindings[0].stride) : 4;
         uint64_t hash_cache = hash_dedupe;
-        if (VertexCache(source.data, source.bytes, source.order, source.address, alignment, hash_cache, offset)) {
+        if (VertexCache(source.data, source.bytes, source.order, source.address, alignment, hash_cache, offset,
+                        source.start, source.available)) {
           offsets_vertices[b] = offset;
           if (dedupe_active_) {
             dedupe_.Annotate(source.address, source.bytes, uint32_t(source.order), offset, hash_dedupe);
@@ -4220,7 +4271,10 @@ class VulkanDrawsImpl final : public VulkanDraws {
     std::memcpy(&shared[68], &threshold_alpha, sizeof(threshold_alpha));
     shared[69] = function_alpha;  // g_AlphaFunction
     std::memcpy(&shared[70], ndc, sizeof(ndc));
-    std::copy(input->remaps.begin(), input->remaps.end(), shared + 74);
+    // Constant-size memcpy, not std::copy: inside the huge Draw GCC kept std::copy out of line, a call plus a memmove
+    // call per draw (run mw2sp_016: these two were ~2.2 M calls a second on the ring).
+    static_assert(sizeof(input->remaps) == 64);
+    std::memcpy(shared + 74, input->remaps.data(), sizeof(input->remaps));
     VkDeviceSize offset_shared;
     /*
      * How many draws really change the shared constants.
@@ -4237,7 +4291,7 @@ class VulkanDrawsImpl final : public VulkanDraws {
     const auto t_shared =
         time_ ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
     uint32_t* const shared_previous = shared_buffers_[shared_buffer_ ^ 1];
-    if (shared_epoch_ == epoch_upload_ && std::memcmp(shared, shared_previous, kSharedBytes) == 0) {
+    if (shared_epoch_ == epoch_upload_ && SameBytes<kSharedBytes>(shared, shared_previous)) {
       offset_shared = shared_offset_;  // the same as the previous draw
     } else {
       ++shared_changed_;
@@ -4348,7 +4402,8 @@ class VulkanDrawsImpl final : public VulkanDraws {
                                       control_z_overlay);
     }
     key.specialization = specialization;
-    std::copy(std::begin(pass_formats_), std::end(pass_formats_), std::begin(key.formats));
+    static_assert(sizeof(key.formats) == sizeof(pass_formats_));
+    std::memcpy(key.formats, pass_formats_, sizeof(pass_formats_));  // not std::copy: see the remaps above
     static constexpr uint32_t kBlend[4] = {
         gr::XE_GPU_REG_RB_BLENDCONTROL0, gr::XE_GPU_REG_RB_BLENDCONTROL1,
         gr::XE_GPU_REG_RB_BLENDCONTROL2, gr::XE_GPU_REG_RB_BLENDCONTROL3};
@@ -4639,7 +4694,7 @@ class VulkanDrawsImpl final : public VulkanDraws {
       const uint64_t push[3] = {upload_address_ + constants_vs_offset_,
                                 upload_address_ + constants_ps_offset_,
                                 upload_address_ + offset_shared};
-      if (!recorded || std::memcmp(push, push_recorded_, sizeof(push)) != 0) {
+      if (!recorded || !SameBytes<sizeof(push)>(push, push_recorded_)) {
         dfn_.vkCmdPushConstants(cmd, layout_pipeline_,
                                 VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0,
                                 sizeof(push), push);
@@ -4671,21 +4726,21 @@ class VulkanDrawsImpl final : public VulkanDraws {
         ubo_bound_ = true;
       }
     }
-    if (!recorded || std::memcmp(&viewport, &viewport_recorded_, sizeof(viewport)) != 0) {
+    if (!recorded || !SameBytes<sizeof(viewport)>(&viewport, &viewport_recorded_)) {
       MW2MP_SUB(3, dfn_.vkCmdSetViewport(cmd, 0, 1, &viewport));
       viewport_recorded_ = viewport;
     }
-    if (!recorded || std::memcmp(&scissor_final, &scissor_recorded_, sizeof(scissor_final)) != 0) {
+    if (!recorded || !SameBytes<sizeof(scissor_final)>(&scissor_final, &scissor_recorded_)) {
       MW2MP_SUB(4, dfn_.vkCmdSetScissor(cmd, 0, 1, &scissor_final));
       scissor_recorded_ = scissor_final;
     }
     if (!recorded ||
-        std::memcmp(blend_constant, blend_recorded_, sizeof(blend_constant)) != 0) {
+        !SameBytes<sizeof(blend_constant)>(blend_constant, blend_recorded_)) {
       MW2MP_SUB(5, dfn_.vkCmdSetBlendConstants(cmd, blend_constant));
       std::memcpy(blend_recorded_, blend_constant, sizeof(blend_constant));
     }
     // Also without bias: the state is dynamic in every pipeline and has to be recorded.
-    if (!recorded || std::memcmp(bias, bias_recorded_, sizeof(bias)) != 0) {
+    if (!recorded || !SameBytes<sizeof(bias)>(bias, bias_recorded_)) {
       MW2MP_SUB(6, dfn_.vkCmdSetDepthBias(cmd, bias[0], 0.0f, bias[1]));
       std::memcpy(bias_recorded_, bias, sizeof(bias));
     }
@@ -6508,12 +6563,15 @@ class VulkanDrawsImpl final : public VulkanDraws {
     // One complete frame was not enough (run 036: hold ended at 8.6 s with 7 pipelines still compiling, then ~120
     // more compiled over 40 s with 2,000-5,000 draws skipped per 10 s): the end needs an empty compile queue and
     // 30 complete frames in a row (~0.5 s; the camera moves at spawn and meets new pipelines).
-    complete_frames_ = incomplete || !compile_pending_.empty() ? 0 : complete_frames_ + 1;
+    // The level's list still compiling (StartMapWarm) holds too, up to kMapWarmHoldS.
+    const bool warming = MapWarmBusy();
+    complete_frames_ = incomplete || !compile_pending_.empty() || warming ? 0 : complete_frames_ + 1;
     const auto held_for = std::chrono::steady_clock::now() - in_match_since_;
-    if (complete_frames_ < 30 && held_for < std::chrono::seconds(hold_s)) {
+    const auto limit = std::chrono::seconds(warming ? std::max(hold_s, kMapWarmHoldS) : hold_s);
+    if (complete_frames_ < 30 && held_for < limit) {
       ++held_frames_;
 #if defined(MW2_CAMPAIGN) && MW2_CAMPAIGN
-      WaitCompilesHeld(in_match_since_ + std::chrono::seconds(hold_s));
+      WaitCompilesHeld(in_match_since_ + limit);
 #endif
       return true;
     }
@@ -6532,7 +6590,7 @@ class VulkanDrawsImpl final : public VulkanDraws {
   // a mission's first visit compiled at 613 ms a pipeline, 17 per 10 s with 11,707 draws skipped per 10 s and the
   // game at 15-20 fps (run mw2sp_004, the mission after S.S.D.D.: ~470 new pipelines).
   void WaitCompilesHeld(std::chrono::steady_clock::time_point deadline) {
-    if (compile_pending_.empty()) {
+    if (compile_pending_.empty() && !MapWarmBusy()) {
       return;
     }
     const auto start = std::chrono::steady_clock::now();
@@ -6541,7 +6599,7 @@ class VulkanDrawsImpl final : public VulkanDraws {
       compile_held_ = true;
     }
     compile_cv_.notify_all();
-    while (!compile_pending_.empty() && std::chrono::steady_clock::now() < deadline) {
+    while ((!compile_pending_.empty() || MapWarmBusy()) && std::chrono::steady_clock::now() < deadline) {
       std::this_thread::sleep_for(std::chrono::milliseconds(4));
       CollectCompiledPipelines();
     }
@@ -6557,6 +6615,7 @@ class VulkanDrawsImpl final : public VulkanDraws {
     static const int32_t wait_s = REXCVAR_GET(mw2mp_native_load_wait_s);
     const bool in_match = mw2mp::cheats::InMatch();
     const auto now = std::chrono::steady_clock::now();
+    UpdateMap(in_match);
     if (in_match && !in_match_previous_) {
       in_match_since_ = now;
       hold_open_ = true;  // HoldOutput
@@ -8614,6 +8673,7 @@ class VulkanDrawsImpl final : public VulkanDraws {
                      "byte order and untiling are switched OFF.",
                      t.unit_order, t.order, t.bytes_data);
         tiled_fast_ = 0;
+        order_fast_ = 0;
       } else if (t.warning_orders) {
         REXLOG_INFO("[native] C3: fast byte-order change: {} textures checked against the usual one, all equal.",
                     kLevelsACheck);
@@ -9596,36 +9656,99 @@ class VulkanDrawsImpl final : public VulkanDraws {
 
   // Writer thread. The cache's data if it changed size since the last one written (without new entries
   // it is not rewritten), or always for a test resave; empty otherwise.
-  std::vector<uint8_t> TakeCacheData(bool always) {
+  // The pipeline cache's bytes for a save: one heap block, or on the Switch, when the heap has no block that big,
+  // page-aligned pieces mapped as one range (RexSwitchAllocPieced). Freed when destroyed or replaced.
+  class CacheBytes {
+   public:
+    CacheBytes() = default;
+    CacheBytes(const CacheBytes&) = delete;
+    CacheBytes& operator=(const CacheBytes&) = delete;
+    CacheBytes(CacheBytes&& other) noexcept { *this = std::move(other); }
+    CacheBytes& operator=(CacheBytes&& other) noexcept {
+      if (this != &other) {
+        Free();
+        block_.swap(other.block_);
+        std::swap(view_, other.view_);
+        std::swap(view_bytes_, other.view_bytes_);
+        std::swap(handle_, other.handle_);
+      }
+      return *this;
+    }
+    ~CacheBytes() { Free(); }
+    uint8_t* data() { return view_ ? view_ : block_.data(); }
+    size_t size() const { return view_ ? view_bytes_ : block_.size(); }
+    bool empty() const { return size() == 0; }
+    bool pieced() const { return view_ != nullptr; }
+    // false: no memory
+    bool Allocate(size_t bytes) {
+      Free();
+      try {
+        block_.resize(bytes);
+        return true;
+      } catch (const std::bad_alloc&) {
+      }
+#if REX_PLATFORM_SWITCH
+      view_ = static_cast<uint8_t*>(RexSwitchAllocPieced(bytes, &handle_));
+      view_bytes_ = view_ ? bytes : 0;
+      return view_ != nullptr;
+#else
+      return false;
+#endif
+    }
+    void Shrink(size_t bytes) {
+      if (view_) {
+        view_bytes_ = std::min(view_bytes_, bytes);
+      } else {
+        block_.resize(std::min(block_.size(), bytes));
+      }
+    }
+    void Free() {
+      std::vector<uint8_t>().swap(block_);
+#if REX_PLATFORM_SWITCH
+      RexSwitchFreePieced(handle_);
+#endif
+      handle_ = nullptr;
+      view_ = nullptr;
+      view_bytes_ = 0;
+    }
+
+   private:
+    std::vector<uint8_t> block_;
+    uint8_t* view_ = nullptr;
+    size_t view_bytes_ = 0;
+    void* handle_ = nullptr;
+  };
+
+  CacheBytes TakeCacheData(bool always) {
     size_t bytes = 0;
     if (cache_pipelines_ == VK_NULL_HANDLE || data_cache_(device_, cache_pipelines_, &bytes, nullptr) != VK_SUCCESS ||
         !bytes || (bytes == bytes_cache_saved_ && !always)) {
       return {};
     }
-    std::vector<uint8_t>().swap(written_cache_);  // the old copy goes before the new one is allocated
-    std::vector<uint8_t> data;
-    try {
-      data.resize(bytes);
-    } catch (const std::bad_alloc&) {
+    written_cache_.Free();  // the old copy goes before the new one is allocated
+    CacheBytes data;
+    if (!data.Allocate(bytes)) {
       // Run mw2sp_010: the 192 MB range cache (~1,000 buffers of 64-256 KB) left no 66 MB block, and both saves
       // were skipped. It refills from the SD; the learned pipelines would otherwise be compiled again next run.
       const uint64_t dropped_mb = rex::filesystem::DropRangeCache();
-      try {
-        data.resize(bytes);
-        REXLOG_INFO("[native] C6: pipeline cache's {} KB allocated after emptying the range cache ({} MB)",
-                    bytes >> 10, dropped_mb);
-      } catch (const std::bad_alloc&) {
+      if (!data.Allocate(bytes)) {
         REXLOG_WARN("[native] C6: no memory for the pipeline cache's {} KB (range cache of {} MB emptied too): "
                     "not saved this time",
                     bytes >> 10, dropped_mb);
         return {};
       }
+      REXLOG_INFO("[native] C6: pipeline cache's {} KB allocated after emptying the range cache ({} MB)",
+                  bytes >> 10, dropped_mb);
+    }
+    if (data.pieced()) {
+      REXLOG_INFO("[native] C6: pipeline cache's {} KB in pieces mapped as one range (no single heap block)",
+                  bytes >> 10);
     }
     const VkResult result = data_cache_(device_, cache_pipelines_, &bytes, data.data());
     if ((result != VK_SUCCESS && result != VK_INCOMPLETE) || !bytes) {
       return {};
     }
-    data.resize(bytes);
+    data.Shrink(bytes);
     bytes_cache_saved_ = bytes;
     return data;
   }
@@ -9669,7 +9792,7 @@ class VulkanDrawsImpl final : public VulkanDraws {
         export_list.clear();
       }
       const auto before = std::chrono::steady_clock::now();
-      std::vector<uint8_t> data;
+      CacheBytes data;
       if (want_cache || resave) {
         data = TakeCacheData(resave != 0);
       }
@@ -9708,7 +9831,7 @@ class VulkanDrawsImpl final : public VulkanDraws {
       if (WriteFilePipelines(resave != 1, ms_taken) && (verified || vouch)) {
         mw2mp::native::precompile::Vouch(PathFilePipelines());
       }
-      std::vector<uint8_t>().swap(written_cache_);  // freed until the next write
+      written_cache_.Free();  // freed until the next write
     }
   }
 
@@ -9876,6 +9999,7 @@ class VulkanDrawsImpl final : public VulkanDraws {
     vcache_coherent_ = upload_coherent_;
     vcache_ready_ = true;
     vcache_by_writes_ = REXCVAR_GET(mw2mp_native_vertex_cache_by_writes);
+    vcache_whole_bytes_ = uint32_t(std::clamp(REXCVAR_GET(mw2mp_native_vertex_cache_whole_kb), 0, 4096)) << 10;
     if (vcache_by_writes_) {
       mw2mp::page_writes::Enable(true);  // from now on, including the maps loaded later
     }
@@ -9923,8 +10047,19 @@ class VulkanDrawsImpl final : public VulkanDraws {
   }
 
   bool VertexCache(const uint8_t* data, uint32_t bytes, xenos::Endian order, uint64_t address,
-                   VkDeviceSize alignment, uint64_t& hash, VkDeviceSize& tagged) {
+                   VkDeviceSize alignment, uint64_t& hash, VkDeviceSize& tagged, uint32_t start,
+                   uint32_t available) {
     if (vcache_by_writes_) {
+      // A small buffer goes whole (mw2mp_native_vertex_cache_whole_kb): its draws bind the one copy at their start.
+      // start is vmin * stride, so a stride-aligned copy stays stride-aligned at start.
+      if (available > bytes && available <= vcache_whole_bytes_ && start + bytes <= available) {
+        if (!VertexCacheByWrites(data - start, available, order, address - start, alignment, tagged)) {
+          return false;
+        }
+        tagged += start;
+        ++vcache_whole_hits_;
+        return true;
+      }
       return VertexCacheByWrites(data, bytes, order, address, alignment, tagged);
     }
     const auto t0 = std::chrono::steady_clock::now();
@@ -9945,6 +10080,7 @@ class VulkanDrawsImpl final : public VulkanDraws {
       ++vcache_hits_;
       vcache_bytes_hit_ += bytes;
       tagged = kVertexPoolTag | (e.pool ? kVertexPoolIndex : 0) | e.offset;
+      vpools_[e.pool].frame_read = frame_;
       GuardVertexCache(data, bytes, order, vpools_[e.pool].data + e.offset);
       return true;
     }
@@ -9975,6 +10111,7 @@ class VulkanDrawsImpl final : public VulkanDraws {
     ++vcache_filled_;
     vcache_bytes_filled_ += bytes;
     tagged = kVertexPoolTag | (vpool_ ? kVertexPoolIndex : 0) | at;
+    vpools_[vpool_].frame_read = frame_;
     return true;
   }
 
@@ -10005,9 +10142,17 @@ class VulkanDrawsImpl final : public VulkanDraws {
       ++vcache_hits_;
       vcache_bytes_hit_ += bytes;
       tagged = kVertexPoolTag | (e.pool ? kVertexPoolIndex : 0) | e.offset;
+      vpools_[e.pool].frame_read = frame_;
       return true;
     }
-    if (e.seen_epoch == 0 || !mw2mp::page_writes::Unchanged(physical, bytes, e.seen_epoch)) {
+    // A copy dropped by a pool switch, with no stamp on its pages since: copied again at once, keeping its sum and
+    // hit count (no ChangeSum, no first-hit guards; the 1-in-64 guard goes on). Run mw2sp_013: pools switching every
+    // ~1 s refilled ~1 GB per 10 s and ChangeSum took 17 % of the ring thread.
+    const bool refill = e.copy_epoch != 0 && mw2mp::page_writes::Unchanged(physical, bytes, e.copy_epoch);
+    if (!refill && (e.seen_epoch == 0 || !mw2mp::page_writes::Unchanged(physical, bytes, e.seen_epoch))) {
+      ++(e.seen_epoch == 0 ? vcache_usual_first_ : vcache_usual_written_);  // C6 vertex cache detail
+      vcache_bytes_usual_ += bytes;
+      vcache_distinct_usual_ += MarkCovered(vcache_cover_usual_, physical, bytes);
       e.seen_epoch = epoch;  // new, or written since it was last drawn: copied as usual this time
       e.copy_epoch = 0;
       ++vcache_changed_;
@@ -10028,11 +10173,17 @@ class VulkanDrawsImpl final : public VulkanDraws {
     e.offset = at;
     e.generation = vpool_generation_[vpool_];
     e.copy_epoch = epoch;
-    e.hits = 0;
-    e.sum_pool = ChangeSum(data, size_t(bytes)) | 1;  // what the guard compares with, without waiting for the copy
+    vcache_distinct_filled_ += MarkCovered(vcache_cover_filled_, physical, bytes);
+    if (refill) {
+      ++vcache_refilled_;
+    } else {
+      e.hits = 0;
+      e.sum_pool = ChangeSum(data, size_t(bytes)) | 1;  // what the guard compares with, without waiting for the copy
+    }
     ++vcache_filled_;
     vcache_bytes_filled_ += bytes;
     tagged = kVertexPoolTag | (vpool_ ? kVertexPoolIndex : 0) | at;
+    vpools_[vpool_].frame_read = frame_;
     return true;
   }
 
@@ -10466,6 +10617,7 @@ class VulkanDrawsImpl final : public VulkanDraws {
       ++icache_hits_;
       icache_bytes_hit_ += bytes;
       tagged = kVertexPoolTag | (e.pool ? kVertexPoolIndex : 0) | e.offset;
+      vpools_[e.pool].frame_read = frame_;
       return true;
     }
     if (e.seen_epoch == 0 || !mw2mp::page_writes::Unchanged(physical, bytes, e.seen_epoch)) {
@@ -10498,6 +10650,7 @@ class VulkanDrawsImpl final : public VulkanDraws {
     ++icache_filled_;
     icache_bytes_filled_ += bytes;
     tagged = kVertexPoolTag | (vpool_ ? kVertexPoolIndex : 0) | at;
+    vpools_[vpool_].frame_read = frame_;
     return true;
   }
 
@@ -10573,7 +10726,13 @@ class VulkanDrawsImpl final : public VulkanDraws {
     if (vcache_.empty()) {
       return;
     }
-    __builtin_prefetch(&vcache_tags_[VertexCacheSet(key)]);
+    const size_t set = VertexCacheSet(key);
+    __builtin_prefetch(&vcache_tags_[set]);
+    // The set's 4 entries too (adjacent lines): a hit reads one of them right after the tags, and the 16 MB
+    // table misses the cache as surely as the tags do.
+    for (size_t way = 0; way < 4; ++way) {
+      __builtin_prefetch(&vcache_[set * 4 + way]);
+    }
     __builtin_prefetch(&mw2mp::page_writes::g_stamps[(physical & 0x1FFFFFFFu) >> 12]);
   }
 
@@ -10625,16 +10784,25 @@ class VulkanDrawsImpl final : public VulkanDraws {
         at = start;
         return true;
       }
+      // The full pool keeps its copies: they stay valid and bound until the cache comes back to it. Run mw2sp_020
+      // facing one wall: a switch dropped both pools' copies, so only 96 MB were ever live, the pools switched 22
+      // times a second and refilled 4.7 GB per 10 s (27 MB distinct) at 13 FPS. The other pool is refilled only once
+      // no draw has bound it for kVertexPoolRest submissions: if it is still in use, its copies are retired (not
+      // bound again) so it can rest, and until then new ranges are copied as usual.
       const uint32_t other = vpool_ ^ 1;
-      if (frame_ < vpools_[other].frame_left + kVertexPoolRest) {
+      if (frame_ < vpools_[other].frame_read + kVertexPoolRest) {
+        if (vpools_[other].live) {
+          vpools_[other].live = false;
+          ++vpool_generation_[other];
+        }
         ++vcache_full_;
         return false;
       }
       pool.frame_left = frame_;
-      ++vpool_generation_[vpool_];  // its copies are not bound again
       vpool_ = other;
-      ++vpool_generation_[other];
+      ++vpool_generation_[other];  // its old copies (if it was not retired yet) are not bound again
       vpools_[other].used = 0;
+      vpools_[other].live = true;
       ++vcache_switches_;
     }
     return false;
@@ -10684,11 +10852,11 @@ class VulkanDrawsImpl final : public VulkanDraws {
     }
     vcache_report_ = now;
     MW2MP_REPORT_RING("[native] C6 vertex cache (mw2mp_native_vertex_cache, {}), last 10 s: {} hits ({:.1f} MB not "
-                      "copied), {} new copies in the pools ({:.1f} MB), {} changed or new ranges copied as usual; "
+                      "copied), {} new copies in the pools ({:.1f} MB; {} refills after a switch), {} changed or new ranges copied as usual; "
                       "hashed {:.1f} MB in {:.1f} ms; pool {} at {:.1f} of {} MB, {} switches, {} times full; {} "
                       "entries replaced by newer ranges; {} hits checked against the guest bytes",
                       vcache_active_ ? "on" : (vcache_off_ ? "OFF after a mismatch" : "off"), vcache_hits_,
-                      double(vcache_bytes_hit_) / 1048576.0, vcache_filled_, double(vcache_bytes_filled_) / 1048576.0,
+                      double(vcache_bytes_hit_) / 1048576.0, vcache_filled_, double(vcache_bytes_filled_) / 1048576.0, vcache_refilled_,
                       vcache_changed_, double(vcache_bytes_hashed_) / 1048576.0, double(vcache_ns_hash_) / 1e6, vpool_,
                       double(vpools_[vpool_].used) / 1048576.0, vpools_[vpool_].size >> 20, vcache_switches_,
                       vcache_full_, vcache_evicted_, vcache_checked_);
@@ -10697,9 +10865,24 @@ class VulkanDrawsImpl final : public VulkanDraws {
                         "start), now copied every frame",
                         vcache_unstamped_interval_, vcache_unstamped_);
       vcache_unstamped_interval_ = 0;
+      // Measurement only: why ranges are copied as usual, and how much of what is copied is the same guest bytes
+      // again (sub-ranges of one buffer overlapping; 256-byte granularity, per 10 s).
+      MW2MP_REPORT_RING("[native] C6 vertex cache detail, last 10 s: copied as usual {} first seen + {} written since "
+                        "({:.1f} MB, {:.1f} MB distinct); pool copies {:.1f} MB, {:.1f} MB distinct",
+                        vcache_usual_first_, vcache_usual_written_, double(vcache_bytes_usual_) / 1048576.0,
+                        double(vcache_distinct_usual_) * 256.0 / 1048576.0, double(vcache_bytes_filled_) / 1048576.0,
+                        double(vcache_distinct_filled_) * 256.0 / 1048576.0);
+      MW2MP_REPORT_RING("[native] C6 vertex cache whole buffers (mw2mp_native_vertex_cache_whole_kb = {}), last 10 s: "
+                        "{} binds at their start in a whole-buffer copy",
+                        vcache_whole_bytes_ >> 10, vcache_whole_hits_);
+      vcache_whole_hits_ = 0;
+      vcache_usual_first_ = vcache_usual_written_ = vcache_bytes_usual_ = 0;
+      vcache_distinct_usual_ = vcache_distinct_filled_ = 0;
+      std::fill(vcache_cover_usual_.begin(), vcache_cover_usual_.end(), 0);
+      std::fill(vcache_cover_filled_.begin(), vcache_cover_filled_.end(), 0);
     }
     vcache_hits_ = vcache_bytes_hit_ = vcache_filled_ = vcache_bytes_filled_ = vcache_changed_ = 0;
-    vcache_bytes_hashed_ = vcache_ns_hash_ = vcache_full_ = vcache_evicted_ = 0;
+    vcache_bytes_hashed_ = vcache_ns_hash_ = vcache_full_ = vcache_evicted_ = vcache_refilled_ = vcache_checked_ = 0;
   }
 
   // A small CPU-cached buffer per slot, only for the shared constants. If anything fails, it continues as
@@ -12418,6 +12601,7 @@ class VulkanDrawsImpl final : public VulkanDraws {
                        tf.unit_order, uint32_t(order), data.size());
           data.swap(check_tiled_);
           tiled_fast_ = 0;
+          order_fast_ = 0;
         } else if (orders_checked_ == kLevelsACheck) {
           REXLOG_INFO("[native] C3: fast byte-order change: {} textures checked against the usual one, all equal.",
                       orders_checked_);
@@ -12765,17 +12949,21 @@ class VulkanDrawsImpl final : public VulkanDraws {
     // The fast untiling (UntileLevel) when the block is 1, 2, 4, 8 or 16 bytes.
     if (tiled_fast_ < 0) {
       tiled_fast_ = REXCVAR_GET(mw2mp_native_fast_tiling) ? 1 : 0;
+      order_fast_ = tiled_fast_;
       REXLOG_INFO("[native] C3: fast untiling (mw2mp_native_fast_tiling) = {}",
                   tiled_fast_ ? "YES, checking the first levels against the usual one" : "no");
     }
     if (tiled_fast_ && tf.bytes == (1u << log2)) {
-      switch (log2) {
-        case 0: UntileLevel<0>(source, pitch_blocks, ox, oy, bx, by, bx_host, target); break;
-        case 1: UntileLevel<1>(source, pitch_blocks, ox, oy, bx, by, bx_host, target); break;
-        case 2: UntileLevel<2>(source, pitch_blocks, ox, oy, bx, by, bx_host, target); break;
-        case 3: UntileLevel<3>(source, pitch_blocks, ox, oy, bx, by, bx_host, target); break;
-        default: UntileLevel<4>(source, pitch_blocks, ox, oy, bx, by, bx_host, target); break;
-      }
+      const auto untile_fast = [&](uint8_t* out) {
+        switch (log2) {
+          case 0: UntileLevel<0>(source, pitch_blocks, ox, oy, bx, by, bx_host, out); break;
+          case 1: UntileLevel<1>(source, pitch_blocks, ox, oy, bx, by, bx_host, out); break;
+          case 2: UntileLevel<2>(source, pitch_blocks, ox, oy, bx, by, bx_host, out); break;
+          case 3: UntileLevel<3>(source, pitch_blocks, ox, oy, bx, by, bx_host, out); break;
+          default: UntileLevel<4>(source, pitch_blocks, ox, oy, bx, by, bx_host, out); break;
+        }
+      };
+      untile_fast(target);
       /*
        * Guard: the first kLevelsACheck levels are repeated on the usual path and compared byte by byte.
        * If one differs, the usual result is kept, a warning is logged and the fast path is off for the rest
@@ -12791,10 +12979,27 @@ class VulkanDrawsImpl final : public VulkanDraws {
                       target + size_t(y) * bx_host * tf.bytes, size_t(bx) * tf.bytes);
         }
         ReadTiledLevelUsual(source, pitch_blocks, log2, tf.bytes, ox, oy, bx, by, bx_host, target);
-        bool equal = true;
-        for (uint32_t y = 0; y < by && equal; ++y) {
-          equal = std::memcmp(check_tiled_.data() + size_t(y) * bx_host * tf.bytes,
-                                target + size_t(y) * bx_host * tf.bytes, size_t(bx) * tf.bytes) == 0;
+        const auto same = [&] {
+          for (uint32_t y = 0; y < by; ++y) {
+            if (std::memcmp(check_tiled_.data() + size_t(y) * bx_host * tf.bytes,
+                            target + size_t(y) * bx_host * tf.bytes, size_t(bx) * tf.bytes) != 0) {
+              return false;
+            }
+          }
+          return true;
+        };
+        bool equal = same();
+        if (!equal) {
+          // Both read live guest memory: a game write between the two reads looks like a mismatch (run mw2sp_019:
+          // a 64x64 1-byte texture switched fast untiling off, and with it the 3D page updates). Read both again.
+          untile_fast(check_tiled_.data());
+          ReadTiledLevelUsual(source, pitch_blocks, log2, tf.bytes, ox, oy, bx, by, bx_host, target);
+          equal = same();
+          if (equal) {
+            REXLOG_WARN("[native] C3: fast untiling differed once ({}x{} blocks of {} bytes, pitch {}), equal when read "
+                        "again: the texture was being written. The fast one stays.",
+                        bx, by, tf.bytes, pitch_blocks);
+          }
         }
         if (!equal) {
           REXLOG_ERROR("[native] C3: the fast untiling does NOT match ({}x{} blocks of {} bytes, pitch {}, from {},{}). "
@@ -12867,7 +13072,7 @@ class VulkanDrawsImpl final : public VulkanDraws {
         texture.in_flight || texture.hash_job || texture.needs_upload || blocks_x > blocks_x_host ||
         blocks_y > blocks_y_host ||
         (order != xenos::Endian::kNone &&
-         !(tiled_fast_ > 0 && (tf.unit_order == 2 || tf.unit_order == 4)))) {
+         !(order_fast_ > 0 && (tf.unit_order == 2 || tf.unit_order == 4)))) {
       return false;
     }
     const auto start = std::chrono::steady_clock::now();
@@ -14447,6 +14652,49 @@ class VulkanDrawsImpl final : public VulkanDraws {
       dfn_.vkDestroyShaderModule(device_, shader_module, nullptr);  // another Warmer handed it first
     }
   }
+  /*
+   * Ring, when a level starts loading (StartMapWarm): the shader modules of the levels before go. The driver keeps a
+   * copy of each module's SPIR-V (vk_common_CreateShaderModule; 41 KB on average in mw2sp's pack), and these maps
+   * only grew: every shader of every level visited, plus everything the start's prewarm handed over (3,789 pipelines
+   * in run mw2sp_022, which ran out of heap at its fourth level). A module only serves to create a pipeline; the
+   * level's own come back from its map list's warm (HandModule) and any other is read again off the ring
+   * (SpirvOf, ~4 ms). Skipped while a compile is queued or running: its job holds modules.
+   */
+  void FlushModules() {
+    if (!compile_pending_.empty()) {
+      REXLOG_INFO("[native] C6 shader modules kept this time ({} pipelines still compiling)",
+                  compile_pending_.size());
+      return;
+    }
+    size_t n = 0;
+    uint64_t bytes = 0;
+    const auto drop = [&](auto& modules) {
+      for (auto& [input, shader_module] : modules) {
+        if (shader_module != VK_NULL_HANDLE) {
+          dfn_.vkDestroyShaderModule(device_, shader_module, nullptr);
+          ++n;
+          bytes += uint64_t(input->shader->spirv_words) * 4;
+        }
+      }
+      modules.clear();
+    };
+    drop(modules_);
+    drop(modules_only_alpha_);
+    drop(modules_z_early_);
+    size_t handed = 0;
+    {
+      std::lock_guard<std::mutex> lock(handed_mutex_);
+      for (auto& [key, shader_module] : handed_modules_) {
+        dfn_.vkDestroyShaderModule(device_, shader_module, nullptr);
+      }
+      handed = handed_modules_.size();
+      handed_modules_.clear();
+    }
+    REXLOG_INFO("[native] C6 shader modules of the levels before freed: {} of the ring's (~{} MB of SPIR-V), {} "
+                "handed by a warm and never used",
+                n, bytes >> 20, handed);
+  }
+
   VkShaderModule TakeHandedModule(uint64_t key) {
     std::lock_guard<std::mutex> lock(handed_mutex_);
     const auto it = handed_modules_.find(key);
@@ -15412,17 +15660,21 @@ class VulkanDrawsImpl final : public VulkanDraws {
      * bucket count + two pointer hops (bucket and node, ~96 B) = 2-3 cache misses, all to end up comparing
      * the same 80 bytes this compares. Here there is just one memcmp on memory that is already hot.
      */
-    if (last_key_valid_ && std::memcmp(&last_key_, &key, sizeof(key)) == 0) {
+    if (last_key_valid_ && SameBytes<sizeof(key)>(&last_key_, &key)) {
       return last_pipeline_;
     }
     const uint64_t hash = XXH3_64bits(&key, sizeof(key));
     // The direct-mapped cache (mw2mp_native_direct_pipelines) before the map.
     PipelineCell& cell = cells_pipeline_[hash & (kCellsPipeline - 1)];
     if (pipelines_direct_ && cell.pipeline != VK_NULL_HANDLE &&
-        std::memcmp(&cell.key, &key, sizeof(key)) == 0) {
+        SameBytes<sizeof(key)>(&cell.key, &key)) {
       const uint64_t n = ++pipelines_direct_hits_;
       if (!(n <= kPipelinesACheck || (n & 4095) == 0) ||
           CheckCellPipeline(hash, key, cell.pipeline, n)) {
+        if (map_record_ && cell.mission != map_mission_) {  // first use in this level
+          cell.mission = map_mission_;
+          map_seen_.insert(hash);
+        }
         last_key_ = key;
         last_pipeline_ = cell.pipeline;
         last_key_valid_ = true;
@@ -15435,12 +15687,16 @@ class VulkanDrawsImpl final : public VulkanDraws {
     }
     if (const auto it = pipelines_.find(hash); it != pipelines_.end()) {
       if (std::memcmp(&it->second.first, &key, sizeof(key)) == 0) {
+        if (map_record_) {
+          map_seen_.insert(hash);
+        }
         last_key_ = key;
         last_pipeline_ = it->second.second;
         last_key_valid_ = true;
         if (pipelines_direct_) {  // the slot keeps the map's pair
           cell.key = key;
           cell.pipeline = it->second.second;
+          cell.mission = map_mission_;
         }
         return it->second.second;
       }
@@ -15497,6 +15753,12 @@ class VulkanDrawsImpl final : public VulkanDraws {
       created = all ? VK_PIPELINE_COMPILE_REQUIRED
                     : CreatePipelineVulkan(key, input, vs, ps, pass_rp_, true, pipeline, n_colors,
                                            VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT);
+      mw2mp::waits::g_ns_pipelines_ring.fetch_add(
+          uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() -
+                                                                        start_creation)
+                       .count()),
+          std::memory_order_relaxed);
+      mw2mp::waits::g_pipelines_ring.fetch_add(1, std::memory_order_relaxed);
       if (created == VK_PIPELINE_COMPILE_REQUIRED) {
         QueueCompile(hash, key, input, vs, ps, p);
         ++draws_waiting_pipeline_;
@@ -15744,6 +16006,185 @@ class VulkanDrawsImpl final : public VulkanDraws {
                 added, lists, folder.string(), known, not_lists);
   }
 
+  // --- Per-level lists (mw2mp_native_record_map_lists) ---------------------------------------------------------
+  static constexpr int32_t kMapWarmHoldS = 600;  // the load hold waits this long at most for a level's list
+
+  static std::filesystem::path PathMapList(const std::string& map) {
+    return rex::filesystem::GetExecutableFolder() / "pipelines" / (map + ".bin");
+  }
+
+  // A list in the prewarm list's format; false (records empty) if missing or not a list.
+  static bool ReadMapList(const std::filesystem::path& path, std::vector<PipelineRecord>& records) {
+    records.clear();
+    std::vector<uint8_t> data;
+    ReadFileWhole(path, data);
+    uint32_t header[4] = {};
+    if (data.size() < kHeaderList) {
+      return false;
+    }
+    std::memcpy(header, data.data(), sizeof(header));
+    if (header[0] != kMagicListPipelines || header[1] != kVersionListPipelines ||
+        header[2] != sizeof(PipelineRecord) ||
+        data.size() != kHeaderList + size_t(header[3]) * sizeof(PipelineRecord)) {
+      return false;
+    }
+    records.resize(header[3]);
+    std::memcpy(records.data(), data.data() + kHeaderList, size_t(header[3]) * sizeof(PipelineRecord));
+    std::erase_if(records, [](const PipelineRecord& r) {
+      return r.n_attributes > PipelineRecord::kMaxAttributes || r.n_bindings > PipelineRecord::kMaxBindings;
+    });
+    return true;
+  }
+
+  // End of a frame (UpdateLoadWindow): a new level plays its list back and starts a new recording; going back to the
+  // menu writes the recording.
+  void UpdateMap(bool in_match) {
+    static const bool record = REXCVAR_GET(mw2mp_native_record_map_lists);
+    map_record_ = record;
+    std::string map = mw2mp::gfx_preset::MapName();
+    if (map.empty() || map == map_) {
+      if (record && !in_match && in_match_previous_) {
+        WriteMapList();
+      }
+      return;
+    }
+    if (record) {
+      WriteMapList();
+      map_seen_.clear();
+      ++map_mission_;
+      last_key_valid_ = false;  // the next draw goes through the cells, which see the new stamp
+    }
+    map_ = std::move(map);
+    StartMapWarm();
+  }
+
+  // Ring: this level's pipelines added to its file, merged with what the file has. A few hundred KB, written while
+  // a level loads or in the menu.
+  void WriteMapList() {
+    if (map_.empty() || map_seen_.empty()) {
+      return;
+    }
+    const std::filesystem::path path = PathMapList(map_);
+    std::vector<PipelineRecord> records;
+    ReadMapList(path, records);
+    std::unordered_set<uint64_t> have;
+    for (const PipelineRecord& r : records) {
+      have.insert(XXH3_64bits(&r.key, sizeof(r.key)));
+    }
+    const size_t before = records.size();
+    for (const uint64_t hash : map_seen_) {
+      const auto it = index_list_.find(hash);
+      if (it == index_list_.end() || !have.insert(hash).second) {
+        continue;  // no record (failed, shader missing) or already in the file
+      }
+      const size_t j = it->second;
+      if (j < list_file_.size()) {
+        records.push_back(list_file_[j]);
+      } else if (j - list_file_.size() < list_session_.size()) {
+        records.push_back(list_session_[j - list_file_.size()]);
+      }
+    }
+    if (records.size() == before) {
+      return;
+    }
+    std::error_code error;
+    std::filesystem::create_directories(path.parent_path(), error);
+    std::filesystem::path temporary = path;
+    temporary += ".tmp";
+    bool ok = false;
+    if (std::FILE* f = std::fopen(temporary.string().c_str(), "wb")) {
+      const uint32_t header[4] = {kMagicListPipelines, kVersionListPipelines, uint32_t(sizeof(PipelineRecord)),
+                                  uint32_t(records.size())};
+      ok = std::fwrite(header, sizeof(header), 1, f) == 1 &&
+           std::fwrite(records.data(), sizeof(PipelineRecord), records.size(), f) == records.size();
+      ok = std::fclose(f) == 0 && ok;
+    }
+    if (ok) {
+      std::filesystem::remove(path, error);
+      std::filesystem::rename(temporary, path, error);
+      ok = !error;
+    }
+    REXLOG_INFO("[native] map list {}: {} pipelines ({} new of {} drawn){}", path.string(), records.size(),
+                records.size() - before, map_seen_.size(), ok ? "" : ": could not write it");
+  }
+
+  bool MapWarmBusy() const {
+    return map_warm_running_.load(std::memory_order_acquire) != 0;
+  }
+
+  void StopMapWarm() {
+    map_warm_stop_.store(true, std::memory_order_relaxed);
+    for (std::thread& t : map_warm_threads_) {
+      t.join();  // at most, as long as the pipeline being compiled takes
+    }
+    map_warm_threads_.clear();
+  }
+
+  // Ring, when a level starts loading: its listed pipelines compiled into the driver's cache on every core (as the
+  // precompile does), so the ring finds them there; the load hold waits for them (MapWarmBusy).
+  void StartMapWarm() {
+    StopMapWarm();
+    FlushModules();  // after StopMapWarm: no warm thread hands one meanwhile
+    const NativeShaders* library = LibraryActive();
+    if (!ReadMapList(PathMapList(map_), map_warm_records_) || map_warm_records_.empty() || !library ||
+        !library->loaded() || layout_pipeline_ == VK_NULL_HANDLE || cache_pipelines_ == VK_NULL_HANDLE) {
+      REXLOG_INFO("[native] map list {}: {}", map_, map_warm_records_.empty() ? "none" : "no library yet, not used");
+      return;
+    }
+    if (prewarm_eds_ != eds_mode_) {
+      prewarm_eds_ = eds_mode_;  // Warm skips records of another mode; unset when no prewarm list was read
+    }
+#if REX_PLATFORM_SWITCH
+    const uint32_t threads = uint32_t(std::clamp(mw2mp::CoresInUse(), 1, 3));
+#else
+    const uint32_t threads = 2;
+#endif
+    map_warm_stop_.store(false, std::memory_order_relaxed);
+    map_warm_next_.store(0, std::memory_order_relaxed);
+    map_warm_compiled_.store(0, std::memory_order_relaxed);
+    map_warm_running_.store(threads, std::memory_order_release);
+    const auto start = std::chrono::steady_clock::now();
+    const auto work = [this, library, start, name = map_](uint32_t index) {
+      rex::thread::set_current_thread_name("BO2 map pipelines");
+#if REX_PLATFORM_SWITCH
+      RexSwitchSetCurrentThreadPriorityOk(0x2E);  // as the precompile: below the UI thread and the ring
+      RexSwitchSetCurrentThreadCore(int(index % 3));
+#else
+      (void)index;
+#endif
+      {
+        Warmer warmer(*this, *library);
+        const size_t n = map_warm_records_.size();
+        for (size_t i; !map_warm_stop_.load(std::memory_order_relaxed) &&
+                       (i = map_warm_next_.fetch_add(1, std::memory_order_relaxed)) < n;) {
+          uint64_t ns = 0;
+          bool compiled = false;
+          if (warmer.Warm(map_warm_records_[i], ns, true, compiled) == kListPrewarm && compiled) {
+            map_warm_compiled_.fetch_add(1, std::memory_order_relaxed);
+          }
+        }
+      }
+      if (map_warm_running_.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+        REXLOG_INFO("[native] map list {}: {} pipelines walked in {:.1f} s, {} compiled{}", name,
+                    map_warm_records_.size(),
+                    std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count(),
+                    map_warm_compiled_.load(std::memory_order_relaxed),
+                    map_warm_stop_.load(std::memory_order_relaxed) ? " (stopped)" : "");
+      }
+    };
+    for (uint32_t t = 0; t < threads; ++t) {
+      try {
+        map_warm_threads_.emplace_back(work, t);
+      } catch (const std::system_error& error) {
+        REXLOG_WARN("[native] map list: thread {} not created ({})", t, error.what());
+        map_warm_running_.fetch_sub(threads - t, std::memory_order_acq_rel);
+        break;
+      }
+    }
+    REXLOG_INFO("[native] map list {}: {} pipelines on {} threads", map_, map_warm_records_.size(),
+                map_warm_threads_.size());
+  }
+
   // Ring only (SaveCachePipelines): the file's list without the records the thread found missing their
   // shaders, followed by this run's new ones. Above kMaxRegistersList the oldest are dropped.
   std::vector<uint8_t> SerializeListPipelines() const {
@@ -15777,6 +16218,9 @@ class VulkanDrawsImpl final : public VulkanDraws {
   void AnnotatePipelineCreated(const PipelineKey& key, const VertexInput& input, const ShaderInput* vs,
                                const ShaderInput* ps, VkPipeline pipeline, uint64_t ns) {
     const uint64_t hash = XXH3_64bits(&key, sizeof(key));
+    if (map_record_) {
+      map_seen_.insert(hash);
+    }
     if (const auto it = index_list_.find(hash); it != index_list_.end()) {
       const size_t j = it->second;
       if (j < list_file_.size() && j < prewarm_until_.load(std::memory_order_acquire) &&
@@ -15796,9 +16240,8 @@ class VulkanDrawsImpl final : public VulkanDraws {
     ns_ring_new_ += ns;
     if (pipeline == VK_NULL_HANDLE || !vs || !vs->shader || (key.ps && (!ps || !ps->shader)) ||
         input.attributes.size() > PipelineRecord::kMaxAttributes ||
-        input.bindings.size() > PipelineRecord::kMaxBindings ||
-        list_file_.size() + list_session_.size() >= kMaxRegistersList) {
-      return;
+        input.bindings.size() > PipelineRecord::kMaxBindings) {
+      return;  // past kMaxRegistersList too: the per-level lists need every record (the save keeps the newest)
     }
     PipelineRecord r;
     r.key = key;
@@ -15813,7 +16256,7 @@ class VulkanDrawsImpl final : public VulkanDraws {
     for (uint32_t k = 0; k < r.n_bindings; ++k) {
       r.strides[k] = input.bindings[k].stride;
     }
-    index_list_.emplace(hash, SIZE_MAX);  // from this run: not recorded again
+    index_list_.emplace(hash, list_file_.size() + list_session_.size());  // from this run: not recorded again
     list_session_.push_back(r);
     ++list_no_save_;
     ++ring_a_list_;
@@ -16279,6 +16722,7 @@ class VulkanDrawsImpl final : public VulkanDraws {
     if (prewarm_helper_.joinable()) {
       prewarm_helper_.join();
     }
+    StopMapWarm();
     StopCompiles();
     StopSpirvReads();
   }
@@ -16457,11 +16901,13 @@ class VulkanDrawsImpl final : public VulkanDraws {
 #if REX_PLATFORM_SWITCH
     RexSwitchSetCurrentThreadPriorityOk(0x3B);  // the guest threads' priority: it shares their cores
 #endif
+    static const bool help_in_match = REXCVAR_GET(mw2mp_native_compile_help_in_match);
     std::unique_lock<std::mutex> lock(compile_mutex_);
     for (;;) {
       compile_cv_.wait(lock, [this, helper] {
         return compile_stop_ ||
-               (helper ? compile_queue_.size() >= 2 && (compile_held_ || !mw2mp::cheats::InMatch())
+               (helper ? compile_queue_.size() >= 2 &&
+                             (compile_held_ || help_in_match || !mw2mp::cheats::InMatch())
                        : !compile_queue_.empty());
       });
       if (compile_stop_) {
@@ -16657,6 +17103,7 @@ class VulkanDrawsImpl final : public VulkanDraws {
   uint64_t levels_seen_ = 0;
   uint64_t orders_seen_ = 0;
   int tiled_fast_ = -1;
+  int order_fast_ = -1;  // the fast byte order alone (UpdateVolume): an untiling mismatch leaves it on
   uint32_t levels_checked_ = 0;
   uint32_t orders_checked_ = 0;
   std::vector<uint8_t> check_tiled_;
@@ -16862,8 +17309,9 @@ class VulkanDrawsImpl final : public VulkanDraws {
   struct PipelineCell {
     PipelineKey key{};
     VkPipeline pipeline = VK_NULL_HANDLE;  // VK_NULL_HANDLE = empty cell
+    uint32_t mission = 0;  // map_mission_ when last seen (mw2mp_native_record_map_lists)
   };
-  static constexpr size_t kCellsPipeline = 256;  // power of 2; 256 x 88 bytes = 22 KB contiguous
+  static constexpr size_t kCellsPipeline = 256;  // power of 2; 256 x 96 bytes = 24 KB contiguous
   std::array<PipelineCell, kCellsPipeline> cells_pipeline_{};
   bool pipelines_direct_ = true;           // the cvar, once per frame
   bool pipelines_direct_off_ = false;  // the guard saw a difference
@@ -17572,6 +18020,8 @@ class VulkanDrawsImpl final : public VulkanDraws {
     VkDeviceSize size_real = 0;
     VkDeviceSize used = 0;
     uint64_t frame_left = 0;  // when the cache last stopped filling it (frame_)
+    uint64_t frame_read = 0;  // when a draw last bound one of its copies (frame_): it is refilled 8 later at the soonest
+    bool live = true;         // its copies may be bound (false once retired so it can rest)
     VkDeviceSize dirty_lo = ~VkDeviceSize(0), dirty_hi = 0;  // written in this submission
   };
   struct alignas(64) VertexCacheTags {
@@ -17602,6 +18052,8 @@ class VulkanDrawsImpl final : public VulkanDraws {
   std::vector<uint8_t> vcache_scratch_;
   bool vcache_ready_ = false, vcache_active_ = false, vcache_off_ = false, vcache_coherent_ = false;
   bool vcache_by_writes_ = false;  // mw2mp_native_vertex_cache_by_writes
+  uint32_t vcache_whole_bytes_ = 0;  // mw2mp_native_vertex_cache_whole_kb in bytes
+  uint64_t vcache_whole_hits_ = 0;    // binds of a whole-buffer copy (10 s)
   // mw2mp_native_texture_by_writes (TextureUnwritten): -1 = not read yet; this slot's arm; the 10 s counters.
   int32_t tex_by_writes_ = -1;
   bool tex_by_writes_ab_ = false, tex_by_writes_active_ = false;
@@ -17628,10 +18080,34 @@ class VulkanDrawsImpl final : public VulkanDraws {
   bool vcache_sum_ab_ = false;  // mw2mp_native_vertex_cache_sum_ab
   uint64_t vcache_hits_ = 0, vcache_bytes_hit_ = 0, vcache_filled_ = 0, vcache_bytes_filled_ = 0;
   uint64_t vcache_changed_ = 0, vcache_bytes_hashed_ = 0, vcache_ns_hash_ = 0, vcache_full_ = 0;
-  uint64_t vcache_switches_ = 0, vcache_guard_seen_ = 0, vcache_checked_ = 0, vcache_evicted_ = 0;
+  uint64_t vcache_switches_ = 0, vcache_guard_seen_ = 0, vcache_checked_ = 0, vcache_evicted_ = 0, vcache_refilled_ = 0;
+  // C6 vertex cache detail (measurement): 256-byte blocks of guest physical memory covered in the last 10 s.
+  uint64_t vcache_usual_first_ = 0, vcache_usual_written_ = 0, vcache_bytes_usual_ = 0;
+  uint64_t vcache_distinct_usual_ = 0, vcache_distinct_filled_ = 0;
+  std::vector<uint64_t> vcache_cover_usual_, vcache_cover_filled_;  // 256 KB each once used
+  static uint64_t MarkCovered(std::vector<uint64_t>& bits, uint32_t physical, uint32_t bytes) {
+    constexpr size_t kBlocks = (size_t(1) << 29) / 256;
+    if (bits.empty()) {
+      bits.assign(kBlocks / 64, 0);
+    }
+    if (bytes == 0) {
+      return 0;
+    }
+    uint64_t added = 0;
+    const size_t last = std::min(size_t(physical + uint64_t(bytes) - 1) >> 8, kBlocks - 1);
+    for (size_t b = physical >> 8; b <= last; ++b) {
+      uint64_t& word = bits[b >> 6];
+      const uint64_t mask = uint64_t(1) << (b & 63);
+      added += (word & mask) == 0;
+      word |= mask;
+    }
+    return added;
+  }
   std::chrono::steady_clock::time_point vcache_report_{};
-  // The check frames of the vertex dedupe (hashes, see the binding loop) and their guard.
-  static constexpr uint64_t kDedupeChecks = 20000;
+  // The check frames of the vertex dedupe (hashes, see the binding loop) and their guard. A check frame hashes every
+  // vertex range it draws (tens of MB): with 20,000 the first ~10 s of a mission ran at 70 ms a frame (run mw2sp_019,
+  // 20,294 checks by 08:36:02, 0 different in every run so far), and 1 frame in 512 paid it again.
+  static constexpr uint64_t kDedupeChecks = 2000;
   bool dedupe_hash_frame_ = false;
   uint64_t dedupe_hits_frame_start_ = 0;
   uint64_t dedupe_checked_ = 0;     // reuses made in check frames
@@ -17652,7 +18128,7 @@ class VulkanDrawsImpl final : public VulkanDraws {
                      dedupe_checked_);
       }
     }
-    dedupe_hash_frame_ = dedupe_keep_flush_ && (dedupe_checked_ < kDedupeChecks || (frame_ & 511) == 0);
+    dedupe_hash_frame_ = dedupe_keep_flush_ && (dedupe_checked_ < kDedupeChecks || (frame_ & 2047) == 0);
     dedupe_hits_frame_start_ = dedupe_.hits();
   }
   // 16-bit index ranges (DedupeIndices, mw2mp_native_dedupe_indices).
@@ -17926,7 +18402,7 @@ class VulkanDrawsImpl final : public VulkanDraws {
   // The single pipelines file. The last written version of each part (or the one read at start-up): owned
   // by the writer thread once it is running, and by Init before that. list_read_ goes from
   // LoadCachePipelines to LoadListPipelines.
-  std::vector<uint8_t> written_cache_;
+  CacheBytes written_cache_;
   std::vector<uint8_t> written_list_;
   std::vector<uint8_t> list_read_;
   bool files_old_ = false;  // the two older files were read: deleted when the new one is written
@@ -17937,8 +18413,20 @@ class VulkanDrawsImpl final : public VulkanDraws {
   // prewarm_until_ > i. Anything not atomic and not marked otherwise belongs to the ring only.
   std::vector<PipelineRecord> list_file_;         // the list read at start-up (walked by the thread)
   std::vector<uint8_t> state_list_;                   // kList* of each record of list_file_
-  std::unordered_map<uint64_t, size_t> index_list_;   // XXH3 of the key -> index (SIZE_MAX: from this run)
+  std::unordered_map<uint64_t, size_t> index_list_;   // XXH3 of the key -> index in list_file_ then list_session_
   std::vector<PipelineRecord> list_session_;          // this run's new ones
+  // Per-level lists (UpdateMap). Ring only, but for the warm threads' atomics and map_warm_records_ (read-only while
+  // they run).
+  std::string map_;                        // the level whose list is played back / recorded
+  bool map_record_ = false;                // mw2mp_native_record_map_lists
+  uint32_t map_mission_ = 1;               // per level; the cells' stamp (0 = never seen)
+  std::unordered_set<uint64_t> map_seen_;  // XXH3 of the keys this level drew
+  std::vector<PipelineRecord> map_warm_records_;
+  std::vector<std::thread> map_warm_threads_;
+  std::atomic<size_t> map_warm_next_{0};
+  std::atomic<uint32_t> map_warm_running_{0};
+  std::atomic<uint32_t> map_warm_compiled_{0};
+  std::atomic<bool> map_warm_stop_{false};
   uint32_t list_no_save_ = 0;
   std::vector<uint8_t> writer_list_;                 // with writer_mutex_
   std::thread prewarm_thread_;

@@ -42,6 +42,7 @@ fi
 cmake -S "$APP" -B "$OUT" -G Ninja "-DCMAKE_MAKE_PROGRAM=$(command -v ninja)" \
   -DCMAKE_BUILD_TYPE=Release "-DCMAKE_CXX_FLAGS_RELEASE=$RELEASE" \
   "-DMW2SP_PGO=${MW2_PGO:-}" "-DMW2SP_PGO_DIR=$PGO_DIR" \
+  "-DMW2SP_MEMCPY_CALLERS=$([ "${MW2_MEMCPY_CALLERS:-0}" = "1" ] && echo ON || echo OFF)" \
   "-DMW2SP_GUEST_MEMORY_PLAIN=$([ "${MW2_GUEST_MEMORY_PLAIN:-1}" = "1" ] && echo ON || echo OFF)" \
   "-DCMAKE_TOOLCHAIN_FILE=$ROOT/tools/switch/cmake/switch-devkitA64.cmake" \
   "-DREXSDK_DIR=$ROOT/sdk" \

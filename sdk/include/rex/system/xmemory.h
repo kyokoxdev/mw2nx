@@ -626,4 +626,8 @@ class Memory {
       physical_memory_invalidation_callbacks_;
 };
 
+// Called after a file read lands in physical memory (XFile::ReadInternal) with the physical address and byte count.
+// Games stream textures and vertices straight from files; a renderer that tracks guest writes sets this. Null = off.
+extern void (*g_physical_read_hook)(uint32_t physical, uint32_t bytes);
+
 }  // namespace rex::memory

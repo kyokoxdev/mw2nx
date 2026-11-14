@@ -179,7 +179,8 @@ MW2 lives in `mw2mp/` (multiplayer, `default_mp.xex`) and later `mw2sp/`.
   - [ ] Texture write stamps: hooks on MW2's VMX copy routines and plain-store writers mark changed pages, so the
     texture shortcuts (re-hash/re-upload skipped for unchanged pages) can come on.
   - [ ] GPU skinning: bo2's port (stubbed off in `mw2mp_native_stubs.cpp`).
-  - [ ] D3D-level hooks: the ring thread is the busiest (75-100 %, run 029). bo2's D3D marker hands the renderer
+  - [-] D3D-level hooks: DROPPED (2026-11-12): bo2's full Direct3D-level renderer gained about +2 % at best and was
+    not adopted (bo2 `docs/technical.md`, "Tried and not adopted"). Was: the ring thread is the busiest (75-100 %, run 029). bo2's D3D marker hands the renderer
     what the game's D3D calls set instead of decoding it back out of PM4. Needs MW2's D3D functions mapped (device
     state setters near `0x82169A00`/`0x82169DE0`, constants `0x82174868`, flush `0x821752D0`; the campaign's
     `0x8211AFC0`, `0x82122E60`, `0x821238C8` by instruction shape). Biggest job, biggest lever on the renderer.

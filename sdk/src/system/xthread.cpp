@@ -13,6 +13,9 @@
 #include <atomic>
 #include <chrono>
 #include <cstring>
+#include <mutex>
+#include <string>
+#include <vector>
 
 #include <fmt/format.h>
 
@@ -37,6 +40,7 @@
 #include <rex/system/xthread.h>
 #include <rex/thread.h>
 #include <rex/vec128.h>
+#include <rex/filesystem/devices/host_path_file.h>  // ShedRangeCache, when a host stack does not fit
 
 #if REX_PLATFORM_SWITCH
 #include <string_view>
@@ -67,8 +71,317 @@ REXCVAR_DEFINE_INT32(guest_thread_host_stack_mb, 16, "Kernel",
                      "up to hundreds of MB")
     .range(1, 64)
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_BOOL(guest_thread_stack_watermark, true, "Kernel",
+                    "Switch: each guest thread fills its unused host stack with a pattern at start and the log says, "
+                    "once a minute, how deep each one has gone ([stack]). Measures what guest_thread_host_stack_mb "
+                    "really needs");
 
 namespace rex::system {
+
+REXCVAR_DEFINE_BOOL(guest_wait_probe, true, "Kernel",
+                    "Each guest thread keeps its last kernel waits (start, end, guest callers); on a renderer [hitch] "
+                    "the log says what every game thread waited on during that frame ([waits] line)");
+
+namespace {
+// One slot per guest thread, for the session (a thread that exits keeps its numbers): the host stack watermark
+// (guest_thread_stack_watermark) and the waits (guest_wait_probe). Written by the thread itself; read by the reports
+// without a lock on the fields (diagnostics: a torn read shows one odd number, never a crash).
+struct WaitRecord {
+  uint64_t start_ns = 0, end_ns = 0;
+  uint32_t ret[3] = {};  // guest return addresses: lr, then two frames up the back chain
+  uint32_t owner = 0;    // critical section: the guest thread object holding it
+  uint8_t kind = 0;      // WaitKind
+};
+// 64: threads that poll with 1 ms waits (Main, Backend, Workers) filled 16 in ~16 ms, so a 60-80 ms frame showed only
+// its end (mw2sp_025). 256 slots x 64 x 40 B = ~650 KB.
+constexpr uint32_t kWaitRecords = 64;
+struct ThreadSlot {
+  std::atomic<XThread*> thread{nullptr};  // nullptr once it exited
+  uint32_t guest_object = 0;
+  std::string name;  // under g_slots_mutex
+  uintptr_t stack_base = 0;
+  size_t stack_size = 0;
+  uint32_t guest_stack = 0;
+  size_t stack_used = 0;
+  WaitRecord waits[kWaitRecords];
+  std::atomic<uint32_t> waits_head{0};       // records written
+  std::atomic<uint64_t> waiting_since{0};    // ns, 0 = not in a wait
+  WaitRecord current;                        // the wait in progress
+};
+constexpr uint32_t kSlots = 256;
+ThreadSlot g_slots[kSlots];
+std::atomic<uint32_t> g_slots_used{0};
+std::mutex g_slots_mutex;
+thread_local ThreadSlot* t_slot = nullptr;
+
+uint64_t NowNs() {
+  return uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                      std::chrono::steady_clock::now().time_since_epoch())
+                      .count());
+}
+
+ThreadSlot* SlotOf(uint32_t guest_object) {
+  const uint32_t n = std::min(g_slots_used.load(std::memory_order_acquire), kSlots);
+  for (uint32_t i = 0; i < n; ++i) {
+    if (g_slots[i].guest_object == guest_object) {
+      return &g_slots[i];
+    }
+  }
+  return nullptr;
+}
+
+void RegisterSlot(XThread* thread, uint32_t guest_stack) {
+  const uint32_t i = g_slots_used.fetch_add(1, std::memory_order_acq_rel);
+  if (i >= kSlots) {
+    return;
+  }
+  ThreadSlot& slot = g_slots[i];
+  slot.guest_object = thread->guest_object();
+  slot.guest_stack = guest_stack;
+#if REX_PLATFORM_SWITCH
+  if (REXCVAR_GET(guest_thread_stack_watermark)) {
+    RexSwitchStackPrepare(&slot.stack_base, &slot.stack_size);
+  }
+#endif
+  slot.thread.store(thread, std::memory_order_release);
+  t_slot = &slot;
+}
+
+size_t StackUsed(const ThreadSlot& slot) {
+#if REX_PLATFORM_SWITCH
+  return RexSwitchStackUsed(slot.stack_base, slot.stack_size);
+#else
+  (void)slot;
+  return 0;
+#endif
+}
+
+// On the thread itself, or from another one (Terminate): the slot is found by its thread.
+void UnregisterSlot(XThread* thread, std::string name) {
+  std::lock_guard lock(g_slots_mutex);
+  ThreadSlot* slot = nullptr;
+  const uint32_t n = std::min(g_slots_used.load(std::memory_order_acquire), kSlots);
+  for (uint32_t i = 0; i < n && !slot; ++i) {
+    if (g_slots[i].thread.load(std::memory_order_acquire) == thread) {
+      slot = &g_slots[i];
+    }
+  }
+  if (!slot) {
+    return;
+  }
+  slot->stack_used = std::max(slot->stack_used, StackUsed(*slot));
+  slot->stack_base = 0;  // the stack goes with the thread
+  if (!name.empty()) {
+    slot->name = std::move(name);
+  }
+  slot->thread.store(nullptr, std::memory_order_release);
+  if (t_slot == slot) {
+    t_slot = nullptr;
+  }
+}
+
+// Names, refreshed from the live threads (they are named after they start). With g_slots_mutex.
+void RefreshNames(uint32_t n) {
+  for (uint32_t i = 0; i < n; ++i) {
+    if (XThread* t = g_slots[i].thread.load(std::memory_order_acquire)) {
+      g_slots[i].name = t->thread_name_copy();
+    }
+  }
+}
+
+const char* KindName(uint8_t kind) {
+  switch (kind) {
+    case 1: return "any of several";
+    case 2: return "signal and wait";
+    case 3: return "sleep";
+    case 4: return "critical section";
+    default: return "object";
+  }
+}
+}  // namespace
+
+WaitProbe::WaitProbe(WaitKind kind, uint32_t owner) {
+  ThreadSlot* slot = t_slot;
+  if (!slot || !REXCVAR_GET(guest_wait_probe) || slot->waiting_since.load(std::memory_order_relaxed)) {
+    return;  // not a probed thread, off, or inside an outer probe (a critical section's wait)
+  }
+  active_ = true;
+  WaitRecord& c = slot->current;
+  c = WaitRecord{};
+  c.kind = uint8_t(kind);
+  c.owner = owner;
+  if (XThread* thread = slot->thread.load(std::memory_order_relaxed)) {
+    // The guest callers: lr, then the saved lr of two frames up the back chain (stw r12,-8(r1) in each prologue).
+    auto* ctx = thread->thread_state()->context();
+    auto* memory = thread->memory();
+    c.ret[0] = uint32_t(ctx->lr);
+    // Only inside this thread's stack: the outermost back chain points at stack_base, the no-access guard page.
+    const uint32_t lo = thread->stack_limit(), hi = thread->stack_base();
+    uint32_t sp = ctx->r1.u32;
+    for (int up = 1; up < 3; ++up) {
+      if (sp < lo || sp + 4 > hi) {
+        break;
+      }
+      const uint32_t back = rex::memory::load_and_swap<uint32_t>(memory->TranslateVirtual<uint8_t*>(sp));
+      if (back <= sp || back >= hi || back < lo + 8) {
+        break;
+      }
+      c.ret[up] = rex::memory::load_and_swap<uint32_t>(memory->TranslateVirtual<uint8_t*>(back - 8));
+      sp = back;
+    }
+  }
+  c.start_ns = NowNs();
+  slot->waiting_since.store(c.start_ns, std::memory_order_release);
+}
+
+WaitProbe::~WaitProbe() {
+  if (!active_) {
+    return;
+  }
+  ThreadSlot* slot = t_slot;
+  if (!slot) {
+    return;
+  }
+  const uint64_t end = NowNs();
+  slot->waiting_since.store(0, std::memory_order_release);
+  if (end - slot->current.start_ns < 500000) {
+    return;  // under 0.5 ms: only the waits that can matter to a frame are kept
+  }
+  const uint32_t head = slot->waits_head.load(std::memory_order_relaxed);
+  WaitRecord& r = slot->waits[head % kWaitRecords];
+  r = slot->current;
+  r.end_ns = end;
+  slot->waits_head.store(head + 1, std::memory_order_release);
+}
+
+void LogGuestWaits(double window_ms) {
+  if (!REXCVAR_GET(guest_wait_probe) || window_ms <= 0) {
+    return;
+  }
+  const uint64_t now = NowNs();
+  const uint64_t from = now - uint64_t(window_ms * 1e6);
+  struct Row {
+    std::string name;
+    double waited_ms = 0, longest_ms = 0;
+    uint32_t count = 0;
+    WaitRecord longest;
+    bool in_progress = false;
+    double cut_ms = 0;  // the oldest kept wait starts this far into the window: earlier waits were overwritten
+  };
+  std::vector<Row> rows;
+  std::vector<std::pair<uint32_t, std::string>> owners;  // guest object -> name, for the critical sections
+  {
+    std::lock_guard lock(g_slots_mutex);
+    const uint32_t n = std::min(g_slots_used.load(std::memory_order_acquire), kSlots);
+    RefreshNames(n);
+    for (uint32_t i = 0; i < n; ++i) {
+      ThreadSlot& slot = g_slots[i];
+      owners.emplace_back(slot.guest_object, slot.name);
+      if (!slot.thread.load(std::memory_order_acquire)) {
+        continue;
+      }
+      Row row;
+      row.name = slot.name;
+      const auto take = [&](const WaitRecord& w, uint64_t end, bool now_waiting) {
+        const uint64_t a = std::max(w.start_ns, from), b = std::min(end, now);
+        if (b <= a) {
+          return;
+        }
+        const double ms = double(b - a) / 1e6;
+        row.waited_ms += ms;
+        ++row.count;
+        if (ms > row.longest_ms) {
+          row.longest_ms = ms;
+          row.longest = w;
+          row.in_progress = now_waiting;
+        }
+      };
+      const uint32_t head = slot.waits_head.load(std::memory_order_acquire);
+      if (head > kWaitRecords) {
+        const uint64_t oldest = slot.waits[(head - kWaitRecords) % kWaitRecords].start_ns;
+        if (oldest > from) {
+          row.cut_ms = double(oldest - from) / 1e6;
+        }
+      }
+      for (uint32_t k = head > kWaitRecords ? head - kWaitRecords : 0; k < head; ++k) {
+        const WaitRecord& w = slot.waits[k % kWaitRecords];
+        take(w, w.end_ns, false);
+      }
+      if (const uint64_t since = slot.waiting_since.load(std::memory_order_acquire); since) {
+        WaitRecord w = slot.current;
+        w.start_ns = since;
+        take(w, now, true);
+      }
+      rows.push_back(std::move(row));
+    }
+  }
+  // Most active first: the thread that did not wait is the one the frame waited for.
+  std::sort(rows.begin(), rows.end(), [](const Row& a, const Row& b) { return a.waited_ms < b.waited_ms; });
+  std::string text;
+  for (const Row& row : rows) {
+    text += fmt::format("{}{}: waited {:.1f} ms", text.empty() ? "" : " | ", row.name, row.waited_ms);
+    if (row.cut_ms > 0) {
+      text += fmt::format(" (only the last {:.1f} ms kept)", window_ms - row.cut_ms);
+    }
+    if (row.count) {
+      text += fmt::format(" in {}, longest {:.1f} ms {}{} at {:08X}<{:08X}<{:08X}", row.count, row.longest_ms,
+                          KindName(row.longest.kind), row.in_progress ? " (still waiting)" : "",
+                          row.longest.ret[0], row.longest.ret[1], row.longest.ret[2]);
+      if (row.longest.owner) {
+        const auto it = std::find_if(owners.begin(), owners.end(),
+                                     [&](const auto& o) { return o.first == row.longest.owner; });
+        text += fmt::format(" held by {}", it != owners.end() ? it->second : fmt::format("{:08X}", row.longest.owner));
+      }
+    }
+  }
+  REXSYS_INFO("[waits] last {:.1f} ms, guest threads: {}", window_ms, text);
+}
+
+void LogHostStacks() {
+#if REX_PLATFORM_SWITCH
+  static auto last = std::chrono::steady_clock::now();
+  const auto now = std::chrono::steady_clock::now();
+  if (now - last < std::chrono::seconds(60) || !REXCVAR_GET(guest_thread_stack_watermark)) {
+    return;
+  }
+  last = now;
+  struct Row {
+    std::string name;
+    size_t used = 0, size = 0;
+    uint32_t guest_stack = 0;
+    bool live = false;
+  };
+  std::vector<Row> rows;
+  size_t live = 0;
+  uint64_t reserved = 0;
+  {
+    std::lock_guard lock(g_slots_mutex);
+    const uint32_t n = std::min(g_slots_used.load(std::memory_order_acquire), kSlots);
+    RefreshNames(n);
+    for (uint32_t i = 0; i < n; ++i) {
+      ThreadSlot& slot = g_slots[i];
+      const bool is_live = slot.thread.load(std::memory_order_acquire) != nullptr;
+      if (is_live) {
+        slot.stack_used = std::max(slot.stack_used, StackUsed(slot));
+        ++live;
+        reserved += slot.stack_size;
+      }
+      rows.push_back({slot.name, slot.stack_used, slot.stack_size, slot.guest_stack, is_live});
+    }
+  }
+  if (rows.empty()) {
+    return;
+  }
+  std::sort(rows.begin(), rows.end(), [](const Row& a, const Row& b) { return a.used > b.used; });
+  std::string top;
+  for (size_t i = 0; i < rows.size() && i < 10; ++i) {
+    top += fmt::format("{}{} {} KB (guest stack {} KB){}", i ? "; " : "", rows[i].name, rows[i].used >> 10,
+                       rows[i].guest_stack >> 10, rows[i].live ? "" : " exited");
+  }
+  REXSYS_INFO("[stack] host stacks: {} guest threads live ({} MB reserved, {} MB each), {} seen; deepest: {}", live,
+              reserved >> 20, size_t(REXCVAR_GET(guest_thread_host_stack_mb)), rows.size(), top);
+#endif
+}
 
 const uint32_t XAPC::kSize;
 const uint32_t XAPC::kDummyKernelRoutine;
@@ -529,7 +842,7 @@ X_STATUS XThread::Create() {
   rex::thread::Thread::CreationParameters params;
   params.stack_size = size_t(REXCVAR_GET(guest_thread_host_stack_mb)) * 1_MiB;  // the host stack the code runs on
   params.create_suspended = true;
-  thread_ = rex::thread::Thread::Create(params, [this]() {
+  const std::function<void()> body = [this]() {
     rex::initialize_seh_thread();
 #if REX_PLATFORM_SWITCH
     {
@@ -555,18 +868,30 @@ X_STATUS XThread::Create() {
     PROFILE_THREAD_CREATED();
 
     // Execute user code.
+    RegisterSlot(this, creation_params_.stack_size);
     current_xthread_tls_ = this;
     running_ = true;
     Execute();
     running_ = false;
     current_xthread_tls_ = nullptr;
+    UnregisterSlot(this, thread_name_copy());
 
     PROFILE_THREAD_EXITED();
     PROFILE_THREAD_EXIT();
 
     // Release the self-reference to the thread.
     ReleaseHandle();
-  });
+  };
+  thread_ = rex::thread::Thread::Create(params, body);
+  if (!thread_) {
+    // Run mw2sp_022: at a level load the host stack could not be taken from the heap (C0000017). The range cache
+    // gives its memory back and the thread is tried once more before the game is told.
+    if (const uint64_t freed = rex::filesystem::ShedRangeCache(true); freed) {
+      REXSYS_WARN("CreateThread: no memory for the host stack; {} MB of the range cache released, trying again",
+                  freed);
+      thread_ = rex::thread::Thread::Create(params, body);
+    }
+  }
 
   if (!thread_) {
     // TODO(benvanik): translate error?
@@ -645,6 +970,7 @@ X_STATUS XThread::Exit(int exit_code) {
   // NOTE: unless PlatformExit fails, expect it to never return!
   current_xthread_tls_ = nullptr;
   PROFILE_THREAD_EXIT();
+  UnregisterSlot(this, thread_name_copy());
 
   running_ = false;
   ReleaseHandle();
@@ -665,6 +991,7 @@ X_STATUS XThread::Terminate(int exit_code) {
   // TODO(tomc): do we need thread notifications (related to processor thread management)?
 
   running_ = false;
+  UnregisterSlot(this, thread_name_copy());
   if (XThread::IsInThread(this)) {
     // Same lifetime rule as Exit(): don't allow ReleaseHandle() to destroy
     // the thread object before Thread::Exit() reaches pthread_exit().
@@ -1188,6 +1515,7 @@ X_STATUS XThread::Delay(uint32_t processor_mode, uint32_t alertable, uint64_t in
   }
   timeout_ms = chrono::Clock::ScaleGuestDurationMillis(timeout_ms);
   CheckTitleTermination();
+  WaitProbe probe(WaitKind::kSleep);
   if (alertable) {
     const bool reported = timeout_ms > 0 && DelayReported(thread_name_);
     const auto before = std::chrono::steady_clock::now();

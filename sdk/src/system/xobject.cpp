@@ -239,6 +239,7 @@ X_STATUS XObject::Wait(uint32_t wait_reason, uint32_t processor_mode, uint32_t a
                                 : std::chrono::milliseconds::max();
 
   XThread::CheckTitleTermination();
+  WaitProbe probe(WaitKind::kObject);
   auto result = rex::thread::Wait(wait_handle, alertable ? true : false, timeout_ms);
   XThread::CheckTitleTermination();
   switch (result) {
@@ -269,6 +270,7 @@ X_STATUS XObject::SignalAndWait(XObject* signal_object, XObject* wait_object, ui
                                       TimeoutTicksToMs(*opt_timeout)))
                                 : std::chrono::milliseconds::max();
 
+  WaitProbe probe(WaitKind::kSignalAndWait);
   auto result =
       rex::thread::SignalAndWait(signal_object->GetWaitHandle(), wait_object->GetWaitHandle(),
                                  alertable ? true : false, timeout_ms);
@@ -312,6 +314,7 @@ X_STATUS XObject::WaitMultiple(uint32_t count, XObject** objects, uint32_t wait_
                                 : std::chrono::milliseconds::max();
 
   XThread::CheckTitleTermination();
+  WaitProbe probe(WaitKind::kAny);
   if (wait_type) {
     auto result =
         rex::thread::WaitAny(wait_handles, count, alertable ? true : false, timeout_ms);
