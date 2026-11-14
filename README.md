@@ -4,7 +4,9 @@ Call of Duty: Modern Warfare 2 (Xbox 360) on the Nintendo Switch, by static reco
 executable is recompiled ahead of time to C++ with ReXGlue, built natively for the Switch's ARM cores, and drawn with
 Vulkan through Mesa's NVK driver. Nothing is emulated at run time.
 
-**Status:** early bring-up, no playable build yet. Plan and progress: [docs/MW2.md](docs/MW2.md).
+**Status:** in development, not released. Multiplayer and the campaign both run on hardware (the campaign has
+been played through to Gulag); performance, memory headroom and load hitches are the open work, and installable
+packaging comes last. Plan and progress: [docs/MW2.md](docs/MW2.md).
 
 ## What you need
 

@@ -165,17 +165,20 @@ MW2 lives in `mw2mp/` (multiplayer, `default_mp.xex`) and later `mw2sp/`.
   - [~] PGO: `MW2_PGO=generate` training build (`out/switch-pgo`, 46.5 MB) dumps gcov at the end of the
     `mw2mp_benchmark` window to `sdmc:/switch/mw2mp/pgo`; `MW2_PGO=use MW2_LTO=1` is the final build. Train only after
     the codegen-level steps below: a profile goes stale whenever the generated code changes.
-  - [ ] Direct calls (`tools/direct_calls.py`, not yet run for MW2). Every `sub_X` is a weak alias of `__imp__sub_X`
+  - [x] Direct calls (`tools/direct_calls.py`, run from `codegen_mw2mp.sh` / `codegen_mw2sp.sh`, `--check` in both
+    `build_switch.sh`). Every `sub_X` is a weak alias of `__imp__sub_X`
     so a hook can replace it, and GCC never inlines through a weak alias, not even with LTO: the 54k direct calls in
     the generated code are all opaque today. The tool rewrites calls to unhooked functions to `__imp__sub_X`. mw2mp
     has no live hooks (the three BO2 shader hooks are dead), so nearly every call qualifies. Add to
     `tools/codegen_mw2mp.sh` and `tools/codegen_mw2sp.sh`, rebuild, measure.
   - [ ] Locals (`tools/localize.py`): more guest registers as C++ locals in the hottest functions, from a list made
     from profiles (bo2's `app/locals.txt`). Needs the profiles from the next step.
-  - [ ] Profiles on hardware (`pc_profiler`, `tools/profile_sym.py`, `tools/pc_profile_report.py`): stack samples of
-    every game thread in a match, symbolised to `sub_X`. Drives the next three steps.
-  - [ ] Native hot paths, as bo2 (culling, entity scan, sound mixer, LZX decoder, CPU skinning, limiter): MW2's
-    equivalents from the profile, replaced with `[rexcrt]` or `REX_HOOK_RAW` as memcpy/memset are.
+  - [~] Profiles on hardware (`pc_profiler`, `tools/profile_sym.py`, `tools/pc_profile_report.py`): stack samples of
+    every game thread in a match, symbolised to `sub_X`. Drives the next three steps. Campaign runs take them (run mw2sp_025's profile
+    found the Mesa fossilize-cache stalls); a match profile for multiplayer is still to do.
+  - [~] Native hot paths, as bo2 (culling, entity scan, sound mixer, LZX decoder, CPU skinning, limiter): MW2's
+    equivalents from the profile, replaced with `[rexcrt]` or `REX_HOOK_RAW` as memcpy/memset are. Done: CPU
+    skinning (NEON rewrites of the four kernels, `mw2mp_native_skin.cpp`).
   - [ ] Texture write stamps: hooks on MW2's VMX copy routines and plain-store writers mark changed pages, so the
     texture shortcuts (re-hash/re-upload skipped for unchanged pages) can come on.
   - [ ] GPU skinning: bo2's port (stubbed off in `mw2mp_native_stubs.cpp`).
@@ -186,7 +189,8 @@ MW2 lives in `mw2mp/` (multiplayer, `default_mp.xex`) and later `mw2sp/`.
     `0x8211AFC0`, `0x82122E60`, `0x821238C8` by instruction shape). Biggest job, biggest lever on the renderer.
 - [~] 6 Campaign (`mw2sp/`, TU6 `default.xex`): same program as mw2mp (native renderer, native CRT, app, settings),
   `sdmc:/switch/mw2sp/mw2sp.nro` + `mw2sp_shaders.*` in their own folder (hbmenu shows one NRO per folder), using
-  `sdmc:/switch/mw2mp`'s game/, update/, user/ and `mw2sp.toml`; not yet run on hardware
+  `sdmc:/switch/mw2mp`'s game/, update/, user/ and `mw2sp.toml`; runs on hardware (run mw2sp_025 played through
+  oilrig to the start of Gulag); open: load/checkpoint hitches, heap headroom (OOM at the Gulag load in run 022)
   - `default.xex` comes off the same disc as `default_mp.xex`; `tools/install/tu6_setup.py` now copies both xex and
     requires `default.xexp` in the update, `tools/stage_sd_mw2mp.py` stages `mw2sp.nro` too. `xexdump work/load_tu6
     default.xex work/dump_tu6` applies `default.xexp` (0.0.0.10 -> 0.0.6.10): base 0x82000000, entry 0x82370940,
