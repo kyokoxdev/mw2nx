@@ -9,14 +9,14 @@ OUT="$APP/out/switch"
 # MW2_PGO (profile-guided optimization, mw2sp/CMakeLists.txt; development only), as mw2mp/build_switch.sh:
 #   generate  training build in out/switch-pgo. Run it with mw2mp_benchmark = true in mw2sp.toml, in a level, leave the
 #             controller alone; at the end of the window it writes sdmc:/switch/mw2sp/pgo. Copy that folder to
-#             MW2_PGO_DIR (default data/pgo_sp), then put the normal NRO back.
+#             MW2_PGO_DIR (default data/pgo-sp), then put the normal NRO back.
 #   use       normal build in out/switch with that profile (retrain after codegen or flag changes).
 case "${MW2_PGO:-}" in
   generate) OUT="$APP/out/switch-pgo" ;;
   use|"") ;;
   *) echo "MW2_PGO must be generate or use" >&2; exit 1 ;;
 esac
-PGO_DIR="${MW2_PGO_DIR:-$(bash "$ROOT/tools/data_dir.sh")/pgo_sp}"
+PGO_DIR="${MW2_PGO_DIR:-$(bash "$ROOT/tools/data_dir.sh")/pgo-sp}"
 if [ "${MW2_PGO:-}" = "use" ] && [ -z "$(find "$PGO_DIR" -name '*.gcda' -print -quit 2>/dev/null)" ]; then
   echo "MW2_PGO=use: no .gcda files in $PGO_DIR" >&2; exit 1
 fi

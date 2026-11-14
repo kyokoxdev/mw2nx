@@ -52,7 +52,7 @@
 #endif
 
 #if defined(MW2_CAMPAIGN) && MW2_CAMPAIGN
-#define MW2MP_PRESET_DEFAULT "low"  // run mw2sp_007: very_low's texture mip floor and model detail looked worse
+#define MW2MP_PRESET_DEFAULT "very_low"
 #else
 #define MW2MP_PRESET_DEFAULT "high"
 #endif

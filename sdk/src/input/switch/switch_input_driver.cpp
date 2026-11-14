@@ -10,6 +10,8 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <tuple>
@@ -30,6 +32,26 @@
 REXCVAR_DEFINE_BOOL(input_xbox_layout, false, "Input",
                     "Face buttons by position, as on an Xbox pad (the bottom button, B, acts as A). "
                     "false = by letter: A accepts and B goes back");
+
+// Gyro aiming: turning the controller (in handheld, the console) moves the camera. It is added to the
+// right stick, so the game's own look sensitivity, inversion and aim assist apply on top. Numbers are
+// lists, as in the graphics settings, so the menu can change them with a controller.
+REXCVAR_DEFINE_BOOL(input_gyro, false, "Controls",
+                    "Gyro aiming: turning the controller (in handheld, the console) moves the camera");
+REXCVAR_DEFINE_STRING(input_gyro_mode, "always", "Controls",
+                      "When gyro aiming works: always, or only while aiming down the sights (ZL held)")
+    .allowed({"always", "aiming"});
+REXCVAR_DEFINE_STRING(input_gyro_sensitivity_x, "1.00", "Controls", "Gyro aiming: left-right speed")
+    .allowed({"0.25", "0.50", "0.75", "1.00", "1.25", "1.50", "2.00", "2.50", "3.00", "4.00"});
+REXCVAR_DEFINE_STRING(input_gyro_sensitivity_y, "1.00", "Controls", "Gyro aiming: up-down speed")
+    .allowed({"0.25", "0.50", "0.75", "1.00", "1.25", "1.50", "2.00", "2.50", "3.00", "4.00"});
+REXCVAR_DEFINE_BOOL(input_gyro_invert_x, false, "Controls", "Gyro aiming: swap left and right");
+REXCVAR_DEFINE_BOOL(input_gyro_invert_y, false, "Controls", "Gyro aiming: swap up and down");
+// The game ignores small stick movements (its dead zone): gyro motion starts just past it, or slow
+// turns would do nothing. Too low: small turns do nothing. Too high: the camera never stops drifting.
+REXCVAR_DEFINE_STRING(input_gyro_deadzone, "0.20", "Controls",
+                      "Gyro aiming: where on the stick small turns start (the game's dead zone)")
+    .allowed({"0.00", "0.10", "0.15", "0.20", "0.25", "0.30"});
 
 namespace rex::ui {
 // rex/ui/overlay/debug_overlay.h (not included here because it pulls in ImGui).
@@ -138,6 +160,107 @@ int16_t ClampStickAxis(s32 value) {
   return static_cast<int16_t>(std::clamp<s32>(value, INT16_MIN, INT16_MAX));
 }
 
+// Gyro aiming (input_gyro), per pad.
+struct Gyro {
+  uint32_t style = 0;  // controller layout the sensor was started for; 0: none yet
+  bool started = false;
+  HidSixAxisSensorHandle handle{};
+  float up[3] = {};  // smoothed accelerometer, which way is up in the controller's axes
+};
+
+// Turn rate (HID: rotations per second) to stick deflection at sensitivity 1.00: half a turn per
+// second is a full stick.
+constexpr float kGyroStickPerRotation = 2.0f;
+// Below this (about 1.4 degrees per second) it is sensor noise or a shaky hand: no movement.
+constexpr float kGyroNoise = 0.004f;
+
+/*
+ * The turn rate as right-stick deflection, -1..1 (x right, y up as XInput), or 0 and 0. Yaw is the
+ * turn about the up axis from the accelerometer, so it works with any grip: a Pro Controller held
+ * flat and the console held upright both turn about their own "up". Pitch is the turn about the
+ * controller's left-right axis (x), which runs the same way in both.
+ */
+void ReadGyro(Gyro& gyro, HidNpadIdType npad_id, uint32_t attached, uint64_t held, float& out_x,
+              float& out_y) {
+  out_x = out_y = 0.0f;
+  if (!REXCVAR_GET(input_gyro)) {
+    return;
+  }
+  // In handheld the console's sensor; a pair of Joy-Cons uses the right one (the aiming hand).
+  uint32_t style = 0;
+  int count = 1;
+  int index = 0;
+  if (npad_id == HidNpadIdType_Handheld) {
+    style = HidNpadStyleTag_NpadHandheld;
+  } else if (attached & HidNpadStyleTag_NpadFullKey) {
+    style = HidNpadStyleTag_NpadFullKey;
+  } else if (attached & HidNpadStyleTag_NpadJoyDual) {
+    style = HidNpadStyleTag_NpadJoyDual;
+    count = 2;
+    index = 1;
+  } else if (attached & HidNpadStyleTag_NpadJoyRight) {
+    style = HidNpadStyleTag_NpadJoyRight;
+  } else if (attached & HidNpadStyleTag_NpadJoyLeft) {
+    style = HidNpadStyleTag_NpadJoyLeft;
+  } else {
+    return;
+  }
+  if (gyro.style != style) {
+    // Once per layout, failed or not: starting is an IPC request, not something to retry every poll.
+    gyro = Gyro{};
+    gyro.style = style;
+    HidSixAxisSensorHandle handles[2]{};
+    gyro.started =
+        R_SUCCEEDED(hidGetSixAxisSensorHandles(handles, count, npad_id,
+                                               static_cast<HidNpadStyleTag>(style))) &&
+        R_SUCCEEDED(hidStartSixAxisSensor(handles[index]));
+    gyro.handle = handles[index];
+    REXLOG_INFO("[input] gyro: controller {} layout 0x{:X}: {}", uint32_t(npad_id), style,
+                gyro.started ? "sensor started" : "no sensor");
+  }
+  if (!gyro.started) {
+    return;
+  }
+  HidSixAxisSensorState state{};
+  if (!hidGetSixAxisSensorStates(gyro.handle, &state, 1)) {
+    return;
+  }
+  // Smoothed even while not aiming ("aiming" mode), so it is settled the moment ZL goes down.
+  const float accel[3] = {state.acceleration.x, state.acceleration.y, state.acceleration.z};
+  const bool first = gyro.up[0] == 0.0f && gyro.up[1] == 0.0f && gyro.up[2] == 0.0f;
+  for (int i = 0; i < 3; ++i) {
+    gyro.up[i] = first ? accel[i] : gyro.up[i] + (accel[i] - gyro.up[i]) * 0.1f;
+  }
+  if (REXCVAR_GET(input_gyro_mode) == "aiming" && !(held & HidNpadButton_ZL)) {
+    return;
+  }
+  const float up_length =
+      std::sqrt(gyro.up[0] * gyro.up[0] + gyro.up[1] * gyro.up[1] + gyro.up[2] * gyro.up[2]);
+  if (up_length < 0.5f) {
+    return;  // falling or shaken hard: no idea which way is up
+  }
+  const HidVector& w = state.angular_velocity;
+  // Turning right is clockwise seen from above: negative about the up axis.
+  float yaw = -(w.x * gyro.up[0] + w.y * gyro.up[1] + w.z * gyro.up[2]) / up_length;
+  float pitch = w.x;
+  yaw = std::fabs(yaw) < kGyroNoise ? 0.0f : yaw;
+  pitch = std::fabs(pitch) < kGyroNoise ? 0.0f : pitch;
+  const float sensitivity_x = float(std::atof(REXCVAR_GET(input_gyro_sensitivity_x).c_str()));
+  const float sensitivity_y = float(std::atof(REXCVAR_GET(input_gyro_sensitivity_y).c_str()));
+  out_x = yaw * kGyroStickPerRotation * sensitivity_x * (REXCVAR_GET(input_gyro_invert_x) ? -1.0f : 1.0f);
+  out_y = pitch * kGyroStickPerRotation * sensitivity_y * (REXCVAR_GET(input_gyro_invert_y) ? -1.0f : 1.0f);
+}
+
+// Gyro deflection moved past the game's dead zone (input_gyro_deadzone), in stick units.
+s32 GyroToStick(float deflection) {
+  if (deflection == 0.0f) {
+    return 0;
+  }
+  const float dead_zone = float(std::atof(REXCVAR_GET(input_gyro_deadzone).c_str()));
+  const float magnitude = dead_zone + (1.0f - dead_zone) * std::min(std::fabs(deflection), 1.0f);
+  return s32(std::lround(std::copysign(magnitude, deflection) * 32767.0f));
+}
+
 // Check if the analog inputs exceed their thresholds to become a button press
 // and build the bitfield.
 uint64_t AnalogToKeyfield(const X_INPUT_GAMEPAD& gamepad) {
@@ -219,6 +342,8 @@ struct SwitchInputDriver::Slot {
   bool vibration_sent = false;
   uint16_t vibration_left = 0;
   uint16_t vibration_right = 0;
+
+  Gyro gyro;
 };
 
 SwitchInputDriver::SwitchInputDriver(rex::ui::Window* window, size_t window_z_order)
@@ -284,6 +409,7 @@ void SwitchInputDriver::Poll(size_t index) {
       slot.key_buttons = 0;
       slot.repeat_state = RepeatState::kIdle;
       slot.vibration_count = 0;
+      slot.gyro = Gyro{};
     } else {
       slot.id = DeviceId::kInvalid;
     }
@@ -317,8 +443,11 @@ void SwitchInputDriver::Poll(size_t index) {
   const HidAnalogStickState right = padGetStickPos(&slot.pad, 1);
   gamepad.thumb_lx = ClampStickAxis(left.x);
   gamepad.thumb_ly = ClampStickAxis(left.y);
-  gamepad.thumb_rx = ClampStickAxis(right.x);
-  gamepad.thumb_ry = ClampStickAxis(right.y);
+  float gyro_x = 0.0f;
+  float gyro_y = 0.0f;
+  ReadGyro(slot.gyro, slot.npad_id, padGetStyleSet(&slot.pad), held, gyro_x, gyro_y);
+  gamepad.thumb_rx = ClampStickAxis(right.x + GyroToStick(gyro_x));
+  gamepad.thumb_ry = ClampStickAxis(right.y + GyroToStick(gyro_y));
   /*
    * With the debug overlay open, L+R and the right stick move it (debug_overlay.cpp,
    * on the UI thread). While L and R are held, the game sees neither those two

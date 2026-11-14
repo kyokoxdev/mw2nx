@@ -115,7 +115,7 @@ void AnnotateFrame() {
     mkdir("/switch/" MW2_APP_NAME "/pgo", 0777);
     __gcov_dump();
     REXLOG_INFO("[pgo] profile written to sdmc:/switch/" MW2_APP_NAME "/pgo: copy that folder to the PC (mw2mp: "
-                "data/pgo, mw2sp: data/pgo_sp)");
+                "data/pgo, mw2sp: data/pgo-sp)");
 #endif
   }
 }

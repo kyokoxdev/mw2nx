@@ -65,10 +65,13 @@ REXCVAR_DEFINE_INT32(switch_audio_core_mask, 0, "Kernel",
                      "0). 0 = their mask is not touched. Audio preempts every other thread, so this keeps it off a "
                      "core that another critical thread needs (the game's GPU command thread, for one)");
 #endif
-REXCVAR_DEFINE_INT32(guest_thread_host_stack_mb, 16, "Kernel",
+// Run mw2sp_029: at 16 MB the third level load could not find 16 MB in one piece in the heap, CreateThread failed
+// (C0000017) and the load waited forever. The watermark said 24 KB deepest on every thread over 33 min of campaign
+// (24 KB is its floor: it starts filling 16 KB below the thread's first frame), so 1 MB leaves 40x headroom.
+REXCVAR_DEFINE_INT32(guest_thread_host_stack_mb, 1, "Kernel",
                      "MB of host stack for each guest thread (the recompiled code runs on it). On the Switch it is "
-                     "taken from the heap in full when the thread starts, so with a few dozen guest threads it adds "
-                     "up to hundreds of MB")
+                     "taken from the heap in full, in one piece, when the thread starts, so with a few dozen guest "
+                     "threads it adds up and a fragmented heap may not have a piece that big")
     .range(1, 64)
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 REXCVAR_DEFINE_BOOL(guest_thread_stack_watermark, true, "Kernel",
@@ -840,7 +843,9 @@ X_STATUS XThread::Create() {
   RetainHandle();
 
   rex::thread::Thread::CreationParameters params;
-  params.stack_size = size_t(REXCVAR_GET(guest_thread_host_stack_mb)) * 1_MiB;  // the host stack the code runs on
+  // The host stack the code runs on. Host threads (GPU ring and vblank, XMA, audio) run driver code and are made once
+  // at boot on a clean heap, so they keep 16 MB; guest threads come and go at level loads (guest_thread_host_stack_mb).
+  params.stack_size = (guest_thread_ ? size_t(REXCVAR_GET(guest_thread_host_stack_mb)) : 16) * 1_MiB;
   params.create_suspended = true;
   const std::function<void()> body = [this]() {
     rex::initialize_seh_thread();

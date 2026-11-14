@@ -235,7 +235,7 @@ MW2 lives in `mw2mp/` (multiplayer, `default_mp.xex`) and later `mw2sp/`.
     `0x8393DAB0`, 72-byte dvar_t, count at `MW2_DVAR_COUNT` `0x83938A90`) and written in place, held every frame below
     high; texture detail through the renderer's mip floor. Multiplayer names no pool yet (no-op there).
     `mw2mp_preset_test_s` steps through them for an A/B in one run.
-  - LTO and PGO for mw2sp (`MW2_LTO=1`, `MW2_PGO=generate|use`, profile in `data/pgo_sp`, written to
+  - LTO and PGO for mw2sp (`MW2_LTO=1`, `MW2_PGO=generate|use`, profile in `data/pgo-sp`, written to
     `sdmc:/switch/mw2sp/pgo` at the end of the `mw2mp_benchmark` window). Native rewrites wait for a profile of the
     LTO build with its ELF (`debug/elf/`); candidates from mp run 040: the VMX bounds/plane culling loop (mp
     `sub_8240DDA0`, sp `sub_823D1598`, 3.5 % on Main+Backend) and the worker-command dispatcher's polling (mp

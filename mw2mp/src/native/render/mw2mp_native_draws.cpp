@@ -3388,6 +3388,10 @@ class VulkanDrawsImpl final : public VulkanDraws {
         (shadows_bias_constant_ != 0 || shadows_bias_pending_ != 0)) {
       bias[0] = float(shadows_bias_constant_) * 1000.0f;
       bias[1] = float(shadows_bias_pending_) * 0.1f;
+    } else if (target_shadows && type >= 4 && bias[1] > 0.0f) {
+      // The campaign sets its own shadow-caster bias (slope 1, constant 256) but still needs ours on top,
+      // or spot shadows acne (oilrig intro, mw2sp_028). Decals use negative bias and are left alone.
+      bias[1] += float(shadows_bias_pending_) * 0.1f;
     }
     const bool with_bias = bias[0] != 0.0f || bias[1] != 0.0f;
     if (with_bias && warnings_bias_ < 8 &&
