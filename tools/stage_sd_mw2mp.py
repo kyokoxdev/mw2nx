@@ -7,6 +7,7 @@
   <out>/switch/<p>/pipelines/    <p>/pipelines/*.bin, the per-level pipeline lists, if the repo has them
   <out>/switch/mw2mp/game/       the disc's files ($SystemUpdate left out) + the update's .xexp
   <out>/switch/mw2mp/update/     the rest of title update 6 (patch_mp.ff, dlc1_ui_mp.ff, dlc2_ui_mp.ff)
+  <out>/switch/mw2mp/mods/       the script mods shipped with the port (mw2mp/mods: Bot Warfare)
 
 Copy <out>/switch to the root of the SD card. The TU6 files come from work/load_tu6 (tools/install/tu6_setup.py).
 Disc files already there with the right size are kept, so a second run only refreshes the NRO and the update.
@@ -82,6 +83,10 @@ def main():
                 print(f"{lists} -> {os.path.join(to, 'pipelines')}")
         else:
             print(f"no {nro} yet (its build_switch.sh): run this again after the build")
+    # Script mods shipped with the port (Bot Warfare, mw2mp/mods/*/CREDITS.md): no game data.
+    mods = os.path.join(ROOT, "mw2mp", "mods")
+    shutil.copytree(mods, os.path.join(dst, "mods"), dirs_exist_ok=True)
+    print(f"{mods} -> {os.path.join(dst, 'mods')}")
     print(f"done: copy {os.path.join(a.out, 'switch')} to the root of the SD card")
 
 

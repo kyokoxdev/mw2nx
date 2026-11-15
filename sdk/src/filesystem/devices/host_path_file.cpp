@@ -564,7 +564,7 @@ void SaveRange(uint32_t id, uint64_t offset_bytes, uint32_t requested, const uin
 }
 }  // namespace
 
-uint64_t ShedRangeCache(bool wait) {
+uint64_t ShedRangeCache(bool wait, bool halve) {
   std::vector<RangeEntry> old;
   {
     std::unique_lock lock(g_ranges_mutex, std::defer_lock);
@@ -578,11 +578,13 @@ uint64_t ShedRangeCache(bool wait) {
     }
     old.swap(g_ranges);
     g_ranges_bytes = 0;
-    if (g_ranges_shift.fetch_add(1, std::memory_order_relaxed) + 1 > 3) {
+    if (halve && g_ranges_shift.fetch_add(1, std::memory_order_relaxed) + 1 > 3) {
       g_ranges_no_memory = true;  // an eighth of the cap was still too much: off
     }
   }
-  g_ranges_sheds.fetch_add(1, std::memory_order_relaxed);
+  if (halve) {
+    g_ranges_sheds.fetch_add(1, std::memory_order_relaxed);
+  }
   g_range_entries.store(0, std::memory_order_relaxed);
   g_range_bytes_live.store(0, std::memory_order_relaxed);
   uint64_t bytes = 0;
@@ -600,8 +602,10 @@ uint64_t RangeCapMb() {
 namespace {
 // operator new, out of memory: the range cache gives its memory back and the allocation is retried; with nothing
 // left to give, bad_alloc as before. Malloc callers (the driver, libnx) do not come here: the heap floor covers them.
+// The cap stays: run mw2sp_033 had 550 MB free when the pipeline cache save's 108 MB block failed (fragmentation), and
+// halving there cut the cap 192 -> 24 MB for the rest of the session. The heap floor still halves on a low heap.
 void ShedForNew() {
-  if (ShedRangeCache(false) == 0) {
+  if (ShedRangeCache(false, false) == 0) {
     throw std::bad_alloc();
   }
 }

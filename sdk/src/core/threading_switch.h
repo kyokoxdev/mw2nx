@@ -190,6 +190,12 @@ void RexSwitchHeapStats(uint64_t* used, uint64_t* available);
  */
 void* RexSwitchAllocPieced(size_t bytes, void** handle);
 void RexSwitchFreePieced(void* handle);
+/*
+ * The last RexSwitchAllocPieced, for the caller's log: why it returned NULL (the step, its result code, the pieces
+ * taken), or on success what it had to work around (pieces the kernel refused, the boot reservation not used). Empty
+ * when there is nothing to say.
+ */
+const char* RexSwitchPiecedNote(void);
 
 /*
  * Host stack high-water mark (guest_thread_stack_watermark). Prepare, on the thread itself at its start: finds its

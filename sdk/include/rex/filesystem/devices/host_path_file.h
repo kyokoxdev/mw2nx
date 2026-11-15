@@ -82,9 +82,10 @@ RangeStats ReadRangeStats();
 uint64_t DropRangeCache();
 
 // Under memory pressure (the heap floor, an allocation that failed, a thread that could not be created): empties the
-// cache and halves its cap, off after the third time. wait = false only tries the lock (the new handler). Returns the
-// MB released (0: nothing to give).
-uint64_t ShedRangeCache(bool wait);
+// cache and halves its cap, off after the third time. wait = false only tries the lock (the new handler). halve = false
+// keeps the cap (the new handler: a large block failing is fragmentation, not low heap). Returns the MB released (0:
+// nothing to give).
+uint64_t ShedRangeCache(bool wait, bool halve = true);
 // The cap in MB as it is now (0 = off).
 uint64_t RangeCapMb();
 

@@ -9684,7 +9684,7 @@ class VulkanDrawsImpl final : public VulkanDraws {
     bool empty() const { return size() == 0; }
     bool pieced() const { return view_ != nullptr; }
     // false: no memory
-    bool Allocate(size_t bytes) {
+    bool Allocate(size_t bytes, bool allow_pieced) {
       Free();
       try {
         block_.resize(bytes);
@@ -9692,6 +9692,9 @@ class VulkanDrawsImpl final : public VulkanDraws {
       } catch (const std::bad_alloc&) {
       }
 #if REX_PLATFORM_SWITCH
+      if (!allow_pieced) {
+        return false;
+      }
       view_ = static_cast<uint8_t*>(RexSwitchAllocPieced(bytes, &handle_));
       view_bytes_ = view_ ? bytes : 0;
       return view_ != nullptr;
@@ -9731,22 +9734,49 @@ class VulkanDrawsImpl final : public VulkanDraws {
     }
     written_cache_.Free();  // the old copy goes before the new one is allocated
     CacheBytes data;
-    if (!data.Allocate(bytes)) {
+    if (!data.Allocate(bytes, false)) {
       // Run mw2sp_010: the 192 MB range cache (~1,000 buffers of 64-256 KB) left no 66 MB block, and both saves
       // were skipped. It refills from the SD; the learned pipelines would otherwise be compiled again next run.
+      // Emptied before the pieced path too, so the pieces come out of its buffers rather than the large blocks
+      // a level load needs (run mw2sp_035).
       const uint64_t dropped_mb = rex::filesystem::DropRangeCache();
-      if (!data.Allocate(bytes)) {
+      if (!data.Allocate(bytes, true)) {
+        uint64_t heap_used = 0, heap_left = 0;
+#if REX_PLATFORM_SWITCH
+        RexSwitchHeapStats(&heap_used, &heap_left);
+        const char* why = RexSwitchPiecedNote();
+#else
+        const char* why = "";
+#endif
         REXLOG_WARN("[native] C6: no memory for the pipeline cache's {} KB (range cache of {} MB emptied too): "
-                    "not saved this time",
-                    bytes >> 10, dropped_mb);
+                    "not saved this time; heap {} MB left; in pieces: {}",
+                    bytes >> 10, dropped_mb, heap_left >> 20, why);
         return {};
       }
       REXLOG_INFO("[native] C6: pipeline cache's {} KB allocated after emptying the range cache ({} MB)",
                   bytes >> 10, dropped_mb);
     }
     if (data.pieced()) {
-      REXLOG_INFO("[native] C6: pipeline cache's {} KB in pieces mapped as one range (no single heap block)",
-                  bytes >> 10);
+#if REX_PLATFORM_SWITCH
+      const char* note = RexSwitchPiecedNote();
+      // The save is optional, the game is not. Runs mw2sp_029/033/034/035 all crashed 0.5-75 s after a pieced save
+      // at a level change: the pieces had taken every large block. Without a texture pool block's worth (32 MB) left
+      // whole, skip this save; the pipelines are compiled again (the next level start tries the save again).
+      if (void* probe = malloc(size_t(32) << 20)) {
+        free(probe);
+      } else {
+        uint64_t heap_used = 0, heap_left = 0;
+        RexSwitchHeapStats(&heap_used, &heap_left);
+        REXLOG_WARN("[native] C6: pipeline cache's {} KB not saved this time: in pieces it would leave no 32 MB "
+                    "block for the game (heap {} MB left; {})",
+                    bytes >> 10, heap_left >> 20, note);
+        return {};
+      }
+#else
+      const char* note = "";
+#endif
+      REXLOG_INFO("[native] C6: pipeline cache's {} KB in pieces mapped as one range (no single heap block){}{}",
+                  bytes >> 10, *note ? "; " : "", note);
     }
     const VkResult result = data_cache_(device_, cache_pipelines_, &bytes, data.data());
     if ((result != VK_SUCCESS && result != VK_INCOMPLETE) || !bytes) {
@@ -12591,9 +12621,14 @@ class VulkanDrawsImpl final : public VulkanDraws {
       // The first 200, then 1 in 64. Checking every texture, this guard never got to switch itself off (there
       // were only 1,024 textures) and cost 2.1 ms per MB on every new texture.
       ++orders_seen_;
-      const bool check = orders_seen_ <= kLevelsACheck || orders_seen_ % kCheckOneOfEvery == 0;
+      bool check = orders_seen_ <= kLevelsACheck || orders_seen_ % kCheckOneOfEvery == 0;
       if (check) {
-        check_tiled_ = data;
+        try {  // a guard only: skipped without memory (run mw2sp_033, bad_alloc in the untiling guard)
+          check_tiled_ = data;
+        } catch (const std::bad_alloc&) {
+          std::vector<uint8_t>().swap(check_tiled_);
+          check = false;
+        }
       }
       ChangeOrderBytes(data.data(), data.size(), tf.unit_order, uint32_t(order));
       if (check) {
@@ -12975,9 +13010,19 @@ class VulkanDrawsImpl final : public VulkanDraws {
        */
       // The first 200, then 1 in 64 (checking every level, the guard cost 4.2 ms per MB).
       ++levels_seen_;
-      if (levels_seen_ <= kLevelsACheck || levels_seen_ % kCheckOneOfEvery == 0) {
+      // Run mw2sp_033 ended here: bad_alloc growing this buffer on the ring thread during a level load. The check is
+      // only a guard, so without memory it is skipped (the fast result stays), like a failed staging allocation.
+      const auto room_check = [&] {
+        try {
+          check_tiled_.assign(size_t(by) * bx_host * tf.bytes, 0);
+          return true;
+        } catch (const std::bad_alloc&) {
+          std::vector<uint8_t>().swap(check_tiled_);
+          return false;
+        }
+      };
+      if ((levels_seen_ <= kLevelsACheck || levels_seen_ % kCheckOneOfEvery == 0) && room_check()) {
         ++levels_checked_;
-        check_tiled_.assign(size_t(by) * bx_host * tf.bytes, 0);
         for (uint32_t y = 0; y < by; ++y) {
           std::memcpy(check_tiled_.data() + size_t(y) * bx_host * tf.bytes,
                       target + size_t(y) * bx_host * tf.bytes, size_t(bx) * tf.bytes);

@@ -165,7 +165,20 @@ void SwitchWindowedAppContext::ProcessQuitRequest() {
 }
 
 int SwitchWindowedAppContext::RunMainMessageLoop() {
+  // Console sleep sends this process no applet message: every thread is frozen and goes on after the wake with the
+  // system tick hours ahead (run mw2sp_035: 10 h, no focus or resume hook). A gap in this loop, which never waits
+  // more than kWaitTimeoutNs, is the only sign; logged so a later crash or hitch is not blamed on a "maybe sleep".
+  u64 last_tick = armGetSystemTick();
   while (!HasQuitFromUIThread()) {
+    {
+      const u64 now = armGetSystemTick();
+      const u64 gap_ms = armTicksToNs(now - last_tick) / 1'000'000;
+      last_tick = now;
+      if (gap_ms >= 10'000) {
+        REXLOG_INFO("Switch: UI loop did not run for {:.1f} s (console sleep, HOME suspend or a UI thread stall), {}", gap_ms / 1000.0,
+                    FocusStateName(appletGetFocusState()));
+      }
+    }
     s32 index = -1;
     if (impl_->has_display_resolution_event) {
       waitMulti(&index, kWaitTimeoutNs, waiterForUEvent(&impl_->wakeup),

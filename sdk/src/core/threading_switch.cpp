@@ -23,6 +23,7 @@
 #include <errno.h>
 #include <malloc.h>
 #include <sched.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
 
@@ -377,9 +378,37 @@ void RexSwitchHeapStats(uint64_t* used, uint64_t* available) {
 namespace {
 struct Pieced {
   uint8_t* view = nullptr;
+  bool reserved = false;                         // view is the boot reservation (g_reserve)
   std::vector<std::pair<void*, size_t>> pieces;  // heap block, bytes; mapped in order from view
   size_t mapped = 0;                             // pieces mapped so far
 };
+
+// A stretch of the stack region reserved at boot for the pieced view, so a large one never depends on the region
+// still having that much free later (threads map their stacks there). Address space only: no memory behind it. Static
+// constructors run after libnx's virtmemSetup (__libnx_init: virtmemSetup, ..., __libc_init_array). One view at a
+// time uses it; another one, or one larger than it, falls back to virtmemFindStack.
+constexpr size_t kReserveWanted = size_t(256) << 20;
+uint8_t* g_reserve = nullptr;
+size_t g_reserve_bytes = 0;
+bool g_reserve_busy = false;  // under virtmemLock
+
+const bool g_reserve_made = [] {
+  u64 region = 0;
+  if (R_FAILED(svcGetInfo(&region, InfoType_StackRegionSize, CUR_PROCESS_HANDLE, 0))) {
+    return false;
+  }
+  const size_t bytes = std::min(kReserveWanted, size_t(region / 4)) & ~size_t(0xFFF);  // leave most to the threads
+  if (!bytes) {
+    return false;
+  }
+  virtmemLock();
+  if (void* at = virtmemFindStack(bytes, 0x4000); at && virtmemAddReservation(at, bytes)) {
+    g_reserve = static_cast<uint8_t*>(at);
+    g_reserve_bytes = bytes;
+  }
+  virtmemUnlock();
+  return g_reserve != nullptr;
+}();
 
 void UnmapPieced(Pieced* p) {
   size_t at = 0;
@@ -390,12 +419,32 @@ void UnmapPieced(Pieced* p) {
   for (const auto& [block, n] : p->pieces) {
     free(block);  // only once unmapped: the heap's pages are not accessible while mapped elsewhere
   }
+  if (p->reserved) {
+    virtmemLock();
+    g_reserve_busy = false;
+    virtmemUnlock();
+  }
   delete p;
+}
+
+// Run mw2sp_033: 108 MB failed with 674 MB of heap left, and nothing said whether the heap pieces, the free range in
+// the stack region or one svcMapMemory was the step that failed.
+char g_pieced_note[192] = "";
+
+size_t SmallestPiece(const Pieced* p) {
+  size_t smallest = 0;
+  for (const auto& piece : p->pieces) {
+    smallest = smallest ? std::min(smallest, piece.second) : piece.second;
+  }
+  return smallest;
 }
 }  // namespace
 
+const char* RexSwitchPiecedNote(void) { return g_pieced_note; }
+
 void* RexSwitchAllocPieced(size_t bytes, void** handle) {
   *handle = nullptr;
+  g_pieced_note[0] = '\0';
   const size_t total = (bytes + 0xFFF) & ~size_t(0xFFF);
   Pieced* p = new (std::nothrow) Pieced;
   if (!p || !total) {
@@ -403,7 +452,10 @@ void* RexSwitchAllocPieced(size_t bytes, void** handle) {
     return nullptr;
   }
   size_t got = 0;
-  size_t piece = size_t(8) << 20;
+  // 1 MB, not 8: the heap's best fit hands out the smallest chunk that fits, so small pieces use up the fragments and
+  // leave the large blocks to the game. Run mw2sp_035 (and 029, 033, 034): 8 MB pieces took them at a level change,
+  // and the level load (32 MB texture pool blocks, GPU buffers) ran out of memory within a second.
+  size_t piece = size_t(1) << 20;
   try {
     while (got < total) {
       const size_t want = std::min(piece, total - got);  // both multiples of 4 KB
@@ -419,25 +471,68 @@ void* RexSwitchAllocPieced(size_t bytes, void** handle) {
   } catch (const std::bad_alloc&) {
   }
   if (got < total) {
+    snprintf(g_pieced_note, sizeof(g_pieced_note),
+             "heap pieces: %zu KB of %zu KB in %zu pieces (smallest %zu KB), none of 64 KB left", got >> 10,
+             total >> 10, p->pieces.size(), SmallestPiece(p) >> 10);
     UnmapPieced(p);
     return nullptr;
   }
   virtmemLock();
-  p->view = static_cast<uint8_t*>(virtmemFindStack(total, 0x4000));
+  const bool reserve_fits = g_reserve && !g_reserve_busy && total <= g_reserve_bytes;
+  if (reserve_fits) {
+    p->view = g_reserve;
+    p->reserved = true;
+    g_reserve_busy = true;
+  } else {
+    p->view = static_cast<uint8_t*>(virtmemFindStack(total, 0x4000));
+  }
   bool ok = p->view != nullptr;
-  for (size_t at = 0; ok && p->mapped < p->pieces.size(); ++p->mapped) {
-    const auto& [block, n] = p->pieces[p->mapped];
-    ok = R_SUCCEEDED(svcMapMemory(p->view + at, block, n));
-    if (!ok) {
-      break;
+  if (!ok) {
+    snprintf(g_pieced_note, sizeof(g_pieced_note), "no free %zu KB range in the stack region (%zu pieces)",
+             total >> 10, p->pieces.size());
+  }
+  // A heap piece the kernel will not map (a page state svcMapMemory refuses, such as an attribute a freed GPU buffer
+  // may leave behind) is held aside, so the heap cannot hand it back, and a new piece of the same size takes its place.
+  constexpr int kMaxRefused = 32;
+  std::pair<void*, size_t> refused[kMaxRefused];
+  int refused_count = 0;
+  Result first_refusal = 0;
+  for (size_t at = 0; ok && p->mapped < p->pieces.size();) {
+    auto& [block, n] = p->pieces[p->mapped];
+    const Result rc = svcMapMemory(p->view + at, block, n);
+    if (R_SUCCEEDED(rc)) {
+      at += n;
+      ++p->mapped;
+      continue;
     }
-    at += n;
+    void* other = refused_count < kMaxRefused ? aligned_alloc(0x1000, n) : nullptr;
+    if (other) {
+      first_refusal = refused_count ? first_refusal : rc;
+      refused[refused_count++] = {block, n};
+      block = other;
+      continue;
+    }
+    ok = false;
+    snprintf(g_pieced_note, sizeof(g_pieced_note),
+             "svcMapMemory of piece %zu of %zu (%zu KB at %p) failed: 0x%X (module %u, description %u), %d pieces "
+             "replaced before it; smallest piece %zu KB",
+             p->mapped + 1, p->pieces.size(), n >> 10, block, rc, R_MODULE(rc), R_DESCRIPTION(rc), refused_count,
+             SmallestPiece(p) >> 10);
   }
   virtmemUnlock();
+  for (int i = 0; i < refused_count; ++i) {
+    free(refused[i].first);
+  }
   if (!ok) {
     UnmapPieced(p);
     return nullptr;
   }
+  snprintf(g_pieced_note, sizeof(g_pieced_note),
+           "%zu pieces (smallest %zu KB); %d refused by svcMapMemory and replaced (first 0x%X); %s",
+           p->pieces.size(), SmallestPiece(p) >> 10, refused_count, first_refusal,
+           reserve_fits ? "in the boot reservation"
+           : g_reserve  ? "the boot reservation busy or too small: a range found now"
+                        : "no boot reservation: a range found now");
   *handle = p;
   return p->view;
 }

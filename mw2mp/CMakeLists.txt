@@ -15,7 +15,8 @@ include(generated/rexglue.cmake)
 # the PM4 ring the game's own D3D layer writes and draws with Vulkan; mw2mp_renderer=native selects it, xenos stays the
 # reference. BO2-only pieces it calls into are answered "feature off" in src/mw2mp_native_stubs.cpp.
 include(mw2mp_sources.cmake)
-add_executable(mw2mp src/main.cpp ${MW2MP_SOURCES})
+# Script mods (GSC loader, bot functions): multiplayer only, its addresses are TU6 default_mp's.
+add_executable(mw2mp src/main.cpp src/mw2mp_gsc.cpp ${MW2MP_SOURCES})
 rexglue_setup_target(mw2mp GPU_PLUGINS xenos)
 
 # The renderer draws the game image with the SDK presenter's SPIR-V, fingerprints with xxHash, uses the SDK's Switch

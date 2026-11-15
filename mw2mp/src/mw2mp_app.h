@@ -10,7 +10,11 @@
 #include <rex/logging.h>
 #include <rex/rex_app.h>
 
+#include <rex/cvar.h>
+#include <rex/system/kernel_state.h>
+
 #include "mw2mp_switch.h"
+#include "mw2mp_user_name.h"
 #include "native/mw2mp_native_system.h"
 #include "native/render/mw2mp_native_precompile.h"
 #include "native/render/mw2mp_graphics_settings.h"
@@ -29,6 +33,31 @@
 struct SocketInitConfig;
 extern "C" uint32_t socketInitialize(const SocketInitConfig* config);
 #endif
+
+// The gamertag (XamUserGetName, XamUserGetSigninInfo: lobby, scoreboard, killfeed). The SDK names the profile "User".
+REXCVAR_DEFINE_STRING(mw2mp_user_name, "", "MW2",
+                      "The player's name in matches, up to 15 printable ASCII characters. \"\" = the Switch user's "
+                      "nickname (a nickname with no ASCII characters keeps \"User\")")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+
+namespace mw2mp {
+// What the game shows as typed (as bo2-360-nx's bo2zm_name.cpp): printable ASCII without quotes, semicolons and
+// backslashes (console text), % and ^ (format and colour codes), @ (localized string reference); ends trimmed; 15
+// characters (the game reads the name into 16-byte buffers). Characters outside ASCII are dropped.
+inline std::string CleanUserName(std::string_view text) {
+  std::string clean;
+  for (const char c : text) {
+    if (c >= 0x20 && c <= 0x7E && std::string_view("\";\\%^@").find(c) == std::string_view::npos) {
+      clean += c;
+    }
+  }
+  const size_t first = clean.find_first_not_of(' ');
+  if (first == std::string::npos) {
+    return {};
+  }
+  return clean.substr(first, clean.find_last_not_of(' ') - first + 1).substr(0, 15);
+}
+}  // namespace mw2mp
 
 class Mw2mpApp : public rex::ReXApp {
  public:
@@ -66,6 +95,26 @@ class Mw2mpApp : public rex::ReXApp {
   void OnPostInitLogging() override {
     mw2mp::settings::RequestBootClocks();
     mw2mp::ConfigureCores();
+  }
+
+  // The profile's name before the game runs (it reads the gamertag when it signs in). Renaming keeps the profile and
+  // its saves: their folder is named by the XUID, not the name.
+  void OnPostSetup() override {
+    auto* kernel_state = REX_KERNEL_STATE();
+    auto* profile = kernel_state ? kernel_state->user_profile() : nullptr;
+    if (!profile) {
+      return;
+    }
+    const std::string& chosen = REXCVAR_GET(mw2mp_user_name);
+    const std::string raw = chosen.empty() ? mw2mp::SystemUserName() : chosen;
+    const std::string name = mw2mp::CleanUserName(raw);
+    if (name.empty()) {
+      REXLOG_WARN("[name] no usable name in \"{}\" ({}); the profile keeps {}", raw,
+                  chosen.empty() ? "Switch user" : "mw2mp_user_name", profile->name());
+      return;
+    }
+    profile->set_name(name);
+    REXLOG_INFO("[name] {} (from {})", name, chosen.empty() ? "the Switch user" : "mw2mp_user_name");
   }
 
   // The native renderer compiles the pipelines earlier runs used before the game starts (mw2mp_native_precompile.h).
