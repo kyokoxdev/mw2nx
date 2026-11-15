@@ -1,6 +1,6 @@
 # Third-party notices
 
-bo2-zm-nx (Black Ops II Zombies for the Nintendo Switch) is licensed under the GNU General Public License v3.0
+mw2nx (Call of Duty: Modern Warfare 2 for the Nintendo Switch) is licensed under the GNU General Public License v3.0
 (`LICENSE`). That license covers everything this project wrote: `app/`, its changes in `sdk/`, `tools/`, the Mesa patch
 and the documentation. The port is built on the work of the projects and libraries below. Their code keeps its own
 copyright and license notices, exactly as they are, and every one of those licenses is compatible with GPL-3.0.
@@ -11,7 +11,7 @@ copyright and license notices, exactly as they are, and every one of those licen
 |---|---|---|
 | [ReXGlue SDK](https://github.com/rexglue/rexglue-sdk) v0.10.0 (commit `c94f5eb`) by Tom Clay, with portions from [Xenia](https://xenia.jp) (Ben Vanik and the Xenia contributors) | `sdk/`: code generator, Xbox 360 kernel and runtime, GPU command processing. See `sdk/README.md` for which files are the official release and which are changed | BSD-3-Clause (`sdk/LICENSE`) |
 | [XenosRecomp](https://github.com/hedge-dev/XenosRecomp) by hedge-dev and contributors | `tools/xenosrecomp/translator/`: Xenos microcode to HLSL translator | MIT (`tools/xenosrecomp/translator/LICENSE.md`) |
-| [mesa-switch](https://github.com/danfromtico/mesa-switch) by danfromtico (commit `1a8c1a66d6f`), on top of [Mesa](https://mesa3d.org) | The Vulkan driver (NVK) and shader compiler (NAK) for Horizon, linked into the NRO. The official base is fetched by `tools/build_mesa.sh`; this project's changes are `patches/mesa-bo2zm.patch` | MIT (Mesa's licenses per file) |
+| [mesa-switch](https://github.com/danfromtico/mesa-switch) by danfromtico (commit `1a8c1a66d6f`), on top of [Mesa](https://mesa3d.org) | The Vulkan driver (NVK) and shader compiler (NAK) for Horizon, linked into the NRO. The official base is fetched by `tools/build_mesa.sh`; this project's changes are the patch in `patches/` | MIT (Mesa's licenses per file) |
 
 Parts of `app/` and `tools/` are derived from GPL-3.0 code, so GPL-3.0 would apply to them in any case; each such file
 says so in its header. The upstream code in this repository keeps its own license: the ReXGlue SDK with its Xenia
@@ -48,8 +48,8 @@ Libraries used by the SDK, the NRO and the code generator, fetched from the subm
 These files of the SDK's third-party tree are modified; the modified copies are in `sdk/thirdparty`:
 
 - `FFmpeg/libavcodec/fft_template.c` and `FFmpeg/libavcodec/mdct_template.c`: cache of the permutation and cosine tables
-- `FFmpeg/config.h`, plus `FFmpeg/config_switch_aarch64.h`, `FFmpeg/config_bo2zm_wmv3.h` and `FFmpeg/config_bo2zm_vp8.h`
-  (new): the configuration for AArch64 Horizon and for a build limited to the WMV3 and VP8 decoders
+- `FFmpeg/config.h`, plus the new `FFmpeg/config_switch_aarch64.h` and the decoder-specific configuration headers:
+  the configuration for AArch64 Horizon and for a build limited to the WMV3 and VP8 decoders
 - `ffmpeg-overlay/codec_list.c`: registers the WMV3 and VP8 decoders
 - `CMakeLists.txt`: builds the libraries for the Switch
 
@@ -64,6 +64,12 @@ The home screen's credits line (`app/src/ui/credits`, drawn by `tools/make_credi
 | GitHub's mark | The `mark-github` path of [Octicons](https://github.com/primer/octicons) by GitHub | MIT License (Octicons). The mark is GitHub's trademark, used as [GitHub's logo guidelines](https://github.com/logos) allow (pointing to a GitHub profile, unmodified) |
 | Roboto Medium (the text's glyphs) | Google, as Dear ImGui carries it in `misc/fonts` | Apache License 2.0 |
 
+## Script mods shipped with the port
+
+| Mod | Source | Terms |
+|---|---|---|
+| IW4 Bot Warfare 2.4.0 (`mw2mp/mods/bot_warfare/`, unmodified) | [Bot Warfare](https://github.com/ineedbots/iw4_bot_warfare) by INeedGames / INeedBot(s), Xbox 360 port by [CoD Xenon](https://github.com/codxenon/iw4-bot-warfare-xenon) (release `v2.4.0-xenon`, commit `2f5e9fc`). Credits in `mw2mp/mods/bot_warfare/CREDITS.md` | The author's grant in the Bot Warfare README: use, host, modify and merge freely with credit |
+
 ## Build-time tools (not shipped)
 
 The shader library is built on the user's machine from their own game data with the translator above and
@@ -72,5 +78,5 @@ Illinois/NCSA Open Source License, with LLVM's license terms).
 
 ## Trademarks
 
-Call of Duty and Call of Duty: Black Ops II are trademarks of Activision Publishing, Inc. Nintendo Switch is a
+Call of Duty and Modern Warfare are trademarks of Activision Publishing, Inc. Nintendo Switch is a
 trademark of Nintendo. Xbox 360 is a trademark of Microsoft. GitHub and the GitHub mark are trademarks of GitHub, Inc. This project is not affiliated with or endorsed by any of them.
