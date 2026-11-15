@@ -1,4 +1,8 @@
 <p align="center">
+  <img src="docs/logoo.jpg" alt="Call of Duty: Modern Warfare 2 NX" width="100%">
+</p>
+
+<p align="center">
   <b>Call of Duty: Modern Warfare 2 for the Nintendo Switch, recompiled from the Xbox 360.</b><br>
   Multiplayer and Campaign, running as native code.
 </p>
