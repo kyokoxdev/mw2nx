@@ -80,6 +80,29 @@ inline bool Unchanged(uint32_t physical, uint32_t bytes, uint32_t since) {
   return true;
 }
 
+// True when a page of the range was stamped in epoch `since` or later by a write, not by MarkVolatile: what can
+// bring a recheck forward (a volatile page would bring it forward every frame).
+inline bool WrittenSince(uint32_t physical, uint32_t bytes, uint32_t since) {
+  if (bytes == 0) {
+    return false;
+  }
+  const uint32_t first = (physical & 0x1FFFFFFFu) >> 12;
+  const uint32_t last = std::min<uint32_t>(((physical & 0x1FFFFFFFu) + bytes - 1) >> 12, (1u << 17) - 1);
+  for (uint32_t r = first >> 4; r <= last >> 4; ++r) {
+    if (g_regions[r].load(std::memory_order_acquire) < since) {
+      continue;
+    }
+    const uint32_t hi = std::min(last, (r << 4) + 15);
+    for (uint32_t p = std::max(first, r << 4); p <= hi; ++p) {
+      const uint32_t stamp = g_stamps[p].load(std::memory_order_acquire);
+      if (stamp >= since && stamp != UINT32_MAX) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 inline uint32_t Epoch() { return g_epoch.load(std::memory_order_relaxed); }
 void NextEpoch();
 void Enable(bool on);

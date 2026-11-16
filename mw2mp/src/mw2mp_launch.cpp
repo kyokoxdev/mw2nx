@@ -26,10 +26,22 @@ namespace {
 // The programs of the application (tools/make_nsp.py packs them in this order).
 constexpr s32 kProgramCampaign = 0;
 constexpr s32 kProgramMultiplayer = 1;
-// What the other program finds in its user channel: magic, launch data size, launch data.
-constexpr uint32_t kLaunchMagic = 0x4C32574Du;  // "MW2L"
-constexpr size_t kHeaderSize = 8;
+// What the other program finds in its user channel: magic, launch data size, the Switch user (16 bytes), launch data.
+// The user: Horizon does not carry the preselected user over appletExecuteProgram (run mw2mp_001: Multiplayer
+// started from the Campaign had none, 2345-0009, and saved to the SD card instead of the Campaign's save).
+constexpr uint32_t kLaunchMagic = 0x5532574Du;  // "MW2U"
+constexpr size_t kHeaderSize = 24;
 constexpr size_t kRequestMax = 0x1000;  // appletExecuteProgram's limit
+
+// The request this program was started with, read once (the user channel pops once): MountUserSave needs its user
+// before TakeLaunchData hands over its launch data.
+struct LaunchRequest {
+  bool present = false;
+  uint64_t uid[2] = {};
+  std::vector<uint8_t> data;
+};
+LaunchRequest g_request;
+uint64_t g_save_uid[2] = {};  // the user whose save is mounted, passed on to the other program
 
 bool EndsWithNoCase(const char* text, const char* suffix) {
   const size_t n = strlen(text);
@@ -112,6 +124,10 @@ void CommitIfChanged() {
 
 namespace mw2mp {
 
+#if defined(__SWITCH__)
+static const LaunchRequest& Request();
+#endif
+
 std::string MountUserSave(std::string* error) {
 #if defined(__SWITCH__)
   auto fail = [error](const char* what, Result rc) {
@@ -128,12 +144,15 @@ std::string MountUserSave(std::string* error) {
   // One save for both programs: the application's (program 1's id is the application's + 1).
   const u64 application_id = program_id & ~u64(0xF);
 
-  // The user the program was started with (the NACP asks for one at start), else the last one who opened a program
-  // (a restart into the other mode may not carry the preselection).
+  // The user the other program passed (a switch between Campaign and Multiplayer carries no preselection), else the
+  // one this program was started with (the NACP asks for one at start), else the last one who opened a program.
   AccountUid uid{};
+  memcpy(uid.uid, Request().uid, sizeof(uid.uid));
   rc = accountInitialize(AccountServiceType_Application);
   if (R_FAILED(rc)) return fail("account service", rc);
-  if (R_FAILED(accountGetPreselectedUser(&uid)) || !accountUidIsValid(&uid)) {
+  if (accountUidIsValid(&uid)) {
+    accountExit();
+  } else if (R_FAILED(accountGetPreselectedUser(&uid)) || !accountUidIsValid(&uid)) {
     accountExit();
     if (R_SUCCEEDED(accountInitialize(AccountServiceType_System))) {
       if (R_FAILED(accountGetLastOpenedUser(&uid))) uid = {};
@@ -165,6 +184,8 @@ std::string MountUserSave(std::string* error) {
     rc = fsdevMountSaveData(kSaveDevice, application_id, uid);
     if (R_FAILED(rc)) return fail("save data not mounted", rc);
   }
+
+  memcpy(g_save_uid, uid.uid, sizeof(g_save_uid));
 
   // Every write on save: marks a change; libnx's calls stay underneath.
   auto* device = const_cast<devoptab_t*>(GetDeviceOpTab(kSaveDevice));
@@ -208,14 +229,17 @@ bool IsInstalledProgram() {
 #endif
 }
 
-bool TakeLaunchData(std::vector<uint8_t>* out) {
 #if defined(__SWITCH__)
-  if (!IsInstalledProgram()) {
-    return false;
+// Pops and checks the user channel's request on the first call; later calls return the same.
+static const LaunchRequest& Request() {
+  static bool popped = false;
+  if (popped || !IsInstalledProgram()) {
+    return g_request;
   }
+  popped = true;
   AppletStorage storage;
   if (R_FAILED(appletPopLaunchParameter(&storage, AppletLaunchParameterKind_UserChannel))) {
-    return false;  // started from the HOME menu
+    return g_request;  // started from the HOME menu
   }
   static uint8_t request[kRequestMax];
   s64 size = 0;
@@ -225,12 +249,25 @@ bool TakeLaunchData(std::vector<uint8_t>* out) {
   appletStorageClose(&storage);
   uint32_t header[2] = {};
   if (read) {
-    memcpy(header, request, kHeaderSize);
+    memcpy(header, request, sizeof(header));
   }
   if (!read || header[0] != kLaunchMagic || header[1] > size - s64(kHeaderSize)) {
+    return g_request;
+  }
+  g_request.present = true;
+  memcpy(g_request.uid, request + 8, sizeof(g_request.uid));
+  g_request.data.assign(request + kHeaderSize, request + kHeaderSize + header[1]);
+  return g_request;
+}
+#endif
+
+bool TakeLaunchData(std::vector<uint8_t>* out) {
+#if defined(__SWITCH__)
+  const LaunchRequest& request = Request();
+  if (!request.present) {
     return false;
   }
-  out->assign(request + kHeaderSize, request + kHeaderSize + header[1]);
+  *out = request.data;
   return true;
 #else
   (void)out;
@@ -260,7 +297,8 @@ extern "C" int RexSwitchLaunchTitle(const char* guest_path, const uint8_t* launc
   }
   static uint8_t request[kRequestMax];
   const uint32_t header[2] = {kLaunchMagic, uint32_t(launch_data_size)};
-  memcpy(request, header, kHeaderSize);
+  memcpy(request, header, sizeof(header));
+  memcpy(request + 8, g_save_uid, sizeof(g_save_uid));  // zero without a mounted save: the other program looks itself
   if (launch_data_size) {
     memcpy(request + kHeaderSize, launch_data, launch_data_size);
   }

@@ -876,8 +876,16 @@ void ProfilerMain(void*) {
   for (unsigned i = 0; i < kCounterCount; ++i) {
     counters_last[i] = g_counters[i].load(std::memory_order_relaxed);
   }
-  // The file starts over with a header when the report is on; off, last run's file goes, so none is left (the
-  // report may come on later in the run: the header is written then).
+  // The last two runs' reports stay as rex_profile_previous.log and rex_profile_previous2.log: a campaign <->
+  // multiplayer switch relaunches twice (SP -> MP -> SP), and run mw2sp_012's invasion profile was overwritten so.
+  // The file then starts over with a header when the report is on (the report may come on later in the run: the
+  // header is written then).
+  {
+    const std::string dir = RexSwitchLogDir();
+    std::remove((dir + "rex_profile_previous2.log").c_str());
+    std::rename((dir + "rex_profile_previous.log").c_str(), (dir + "rex_profile_previous2.log").c_str());
+    std::rename(ReportPath().c_str(), (dir + "rex_profile_previous.log").c_str());
+  }
   bool header = false;
   const auto write_header = [&] {
     if (FILE* f = std::fopen(ReportPath().c_str(), "w")) {
@@ -890,8 +898,6 @@ void ProfilerMain(void*) {
   };
   if (g_report.load(std::memory_order_relaxed)) {
     write_header();
-  } else {
-    std::remove(ReportPath().c_str());
   }
 
   // The console overlays read from SaltyNX's shared memory. That is already running from second

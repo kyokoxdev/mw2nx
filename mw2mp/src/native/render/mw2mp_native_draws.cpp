@@ -1122,6 +1122,17 @@ REXCVAR_DEFINE_INT32(mw2mp_native_vertex_cache_whole_kb, 256, "BO2",
                      "cached whole (one copy for all its draws' sub-ranges). 0 = per draw range")
     .range(0, 4096)
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+// Run mw2sp_012 (invasion): in heavy scenes 573 MB per 10 s went into the pools with 19.8 MB distinct, ~6 switches and
+// "without room" for 175k index ranges: draws over buffers bigger than whole_kb (merged world surfaces, whose
+// [vmin, vmax] shifts as the view changes) each had their own overlapping copy. Rounded out to chunks of the buffer,
+// those ranges share a copy.
+REXCVAR_DEFINE_INT32(mw2mp_native_vertex_cache_chunk_kb, 64, "BO2",
+                     "Native renderer: with the vertex cache by writes, a draw's range in a buffer bigger than "
+                     "mw2mp_native_vertex_cache_whole_kb is cached rounded out to chunks of about this many KB of the "
+                     "buffer (a multiple of the stride), so ranges that shift inside the same chunks share one copy. "
+                     "0 = the draw's own range")
+    .range(0, 1024)
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 REXCVAR_DEFINE_BOOL(mw2mp_native_vertex_cache_sum, true, "BO2",
                     "Native renderer: the vertex cache checks a range with Fletcher sums of its 16-byte blocks "
                     "(ChangeSum, no multiplies) instead of XXH3 (~2 GB/s on the console). false = XXH3");
@@ -3722,7 +3733,7 @@ class VulkanDrawsImpl final : public VulkanDraws {
       // Valid until cache.valid_until (with the cross-frame cache disabled, only its own frame)
       if ((cache_between_frames_ ? frame_ <= cache.valid_until : cache.frame == frame_) &&
           cache.generation == generation_textures_ && cache.mip_min == mip_min && SlotCurrent(cache) &&
-          SameBytes<sizeof(cache.fetch)>(cache.fetch.data(), fetch)) {
+          SameBytes<sizeof(cache.fetch)>(cache.fetch.data(), fetch) && StampsQuiet(cache)) {
         shared[cache.heap * 16 + sampler.reg_index] = cache.slot;
         shared[48 + sampler.reg_index] = cache.sampler;
         WriteInvSize(shared, sampler.reg_index, cache.width, cache.height);
@@ -3758,7 +3769,7 @@ class VulkanDrawsImpl final : public VulkanDraws {
       uint64_t valid_until = frame_;
       if ((cache_between_frames_ ? frame_ <= per_fetch.valid_until : per_fetch.frame == frame_) &&
           per_fetch.generation == generation_textures_ && per_fetch.mip_min == mip_min && SlotCurrent(per_fetch) &&
-          SameBytes<sizeof(per_fetch.fetch)>(per_fetch.fetch.data(), fetch)) {
+          SameBytes<sizeof(per_fetch.fetch)>(per_fetch.fetch.data(), fetch) && StampsQuiet(per_fetch)) {
         slot_texture = per_fetch.slot;
         heap = per_fetch.heap;
         slot_sampler = per_fetch.sampler;
@@ -3792,6 +3803,7 @@ class VulkanDrawsImpl final : public VulkanDraws {
         per_fetch.valid_until = valid_until;
         per_fetch.width = width_host;
         per_fetch.height = height_host;
+        TakeStamps(per_fetch, valid_until);
         // A depth requested without being sampled is not stored in the caches: the next draw that really
         // samples it has to go through TextureResolved, which is where it is recorded if it was deferred.
         if (composite_no_blur && sampling_point) {
@@ -3817,6 +3829,12 @@ class VulkanDrawsImpl final : public VulkanDraws {
       cache.valid_until = valid_until;
       cache.width = width_host;
       cache.height = height_host;
+      cache.stamp_base = per_fetch.stamp_base;
+      cache.stamp_base_bytes = per_fetch.stamp_base_bytes;
+      cache.stamp_mips = per_fetch.stamp_mips;
+      cache.stamp_mips_bytes = per_fetch.stamp_mips_bytes;
+      cache.stamp_epoch = per_fetch.stamp_epoch;
+      cache.stamp_frame = per_fetch.stamp_frame;
       if (no_cache) {
         cache.frame = 0;  // with valid_until at 0 it is not valid across frames either
       }
@@ -10034,6 +10052,7 @@ class VulkanDrawsImpl final : public VulkanDraws {
     vcache_ready_ = true;
     vcache_by_writes_ = REXCVAR_GET(mw2mp_native_vertex_cache_by_writes);
     vcache_whole_bytes_ = uint32_t(std::clamp(REXCVAR_GET(mw2mp_native_vertex_cache_whole_kb), 0, 4096)) << 10;
+    vcache_chunk_bytes_ = uint32_t(std::clamp(REXCVAR_GET(mw2mp_native_vertex_cache_chunk_kb), 0, 1024)) << 10;
     if (vcache_by_writes_) {
       mw2mp::page_writes::Enable(true);  // from now on, including the maps loaded later
     }
@@ -10093,6 +10112,23 @@ class VulkanDrawsImpl final : public VulkanDraws {
         tagged += start;
         ++vcache_whole_hits_;
         return true;
+      }
+      // A bigger buffer by chunks (mw2mp_native_vertex_cache_chunk_kb): the range rounded out to multiples of the
+      // chunk from the buffer's start, a multiple of alignment, so start - lo keeps the binding's alignment.
+      if (vcache_chunk_bytes_ && available > vcache_whole_bytes_ && start + bytes <= available) {
+        const uint32_t align = uint32_t(std::max<VkDeviceSize>(alignment, 4));
+        const uint32_t chunk = std::max(align, vcache_chunk_bytes_ / align * align);
+        const uint32_t lo = start / chunk * chunk;
+        const uint32_t hi = uint32_t(std::min<uint64_t>(available, (uint64_t(start) + bytes + chunk - 1) / chunk * chunk));
+        const uint32_t before = start - lo;
+        if ((before || hi > start + bytes) && (address - before) + (hi - lo) <= kMemoryPhysical) {
+          if (!VertexCacheByWrites(data - before, hi - lo, order, address - before, alignment, tagged)) {
+            return false;
+          }
+          tagged += before;
+          ++vcache_chunk_hits_;
+          return true;
+        }
       }
       return VertexCacheByWrites(data, bytes, order, address, alignment, tagged);
     }
@@ -10907,9 +10943,11 @@ class VulkanDrawsImpl final : public VulkanDraws {
                         double(vcache_distinct_usual_) * 256.0 / 1048576.0, double(vcache_bytes_filled_) / 1048576.0,
                         double(vcache_distinct_filled_) * 256.0 / 1048576.0);
       MW2MP_REPORT_RING("[native] C6 vertex cache whole buffers (mw2mp_native_vertex_cache_whole_kb = {}), last 10 s: "
-                        "{} binds at their start in a whole-buffer copy",
-                        vcache_whole_bytes_ >> 10, vcache_whole_hits_);
+                        "{} binds at their start in a whole-buffer copy; {} binds inside a chunk copy "
+                        "(mw2mp_native_vertex_cache_chunk_kb = {})",
+                        vcache_whole_bytes_ >> 10, vcache_whole_hits_, vcache_chunk_hits_, vcache_chunk_bytes_ >> 10);
       vcache_whole_hits_ = 0;
+      vcache_chunk_hits_ = 0;
       vcache_usual_first_ = vcache_usual_written_ = vcache_bytes_usual_ = 0;
       vcache_distinct_usual_ = vcache_distinct_filled_ = 0;
       std::fill(vcache_cover_usual_.begin(), vcache_cover_usual_.end(), 0);
@@ -11616,7 +11654,7 @@ class VulkanDrawsImpl final : public VulkanDraws {
    * below interval 8 are guarded.
    */
   static constexpr uint64_t kStampGuardFirst = 4000;
-  static constexpr uint16_t kStampGuardEvery = 16;
+  static constexpr uint16_t kStampGuardEvery = 64;  // was 16 at interval 32: the same guard rate at 8
   static constexpr uint16_t kStampGuardEveryYoung = 4;
 
   bool TextureUnwritten(CachedTexture& texture, uint64_t key, uint64_t& valid_until) {
@@ -11641,9 +11679,36 @@ class VulkanDrawsImpl final : public VulkanDraws {
     ++tex_stamp_skipped_;
     tex_stamp_skipped_young_ += young ? 1 : 0;
     texture.frame = frame_;  // in use (eviction) and checked this frame
-    texture.interval = std::min<uint32_t>(texture.interval * 2, 32);
+    ScheduleUnchanged(texture, key, valid_until);
+    return true;
+  }
+
+  // The next check of a texture found unchanged: the interval doubles up to 32 frames (at 32, 32 to 39 depending on
+  // the texture, so they do not coincide). With mw2mp_native_texture_by_writes it stops at 8: a due recheck with
+  // nothing stamped costs only the stamp lookup (TextureUnwritten). A texture rewritten in place (same address and
+  // shape, new bytes) showed its old image until the check came due, up to 39 frames (run mw2mp_001, MP maps: a
+  // wrong texture, then the right one); a stamped rewrite now brings the check forward (StampedEarly), so the cap
+  // only bounds how long an unstamped writer goes unseen.
+  void ScheduleUnchanged(CachedTexture& texture, uint64_t key, uint64_t& valid_until) {
+    const uint32_t cap = tex_by_writes_active_ ? 8 : 32;
+    texture.interval = std::min<uint32_t>(texture.interval * 2, cap);
     texture.next = frame_ + texture.interval + (texture.interval == 32 ? (key >> 7) & 7 : 0);
     valid_until = texture.next - 1;
+  }
+
+  /*
+   * A texture whose check is not due yet, but whose pages were written (stamped) since its last check: it is checked
+   * now instead of showing its old image until the check comes due (run mw2mp_002, after the cap of 8: MP still
+   * flashed old images briefly; IW4 streams images into place and the file reads stamp). Pages marked volatile do not
+   * count: they would bring the check forward every frame, and the interval already covers them.
+   */
+  bool StampedEarly(const CachedTexture& texture) {
+    if (!tex_by_writes_active_ || texture.check_epoch == 0 || texture.hash_job != 0 ||
+        (!mw2mp::page_writes::WrittenSince(texture.stamp_base, texture.stamp_base_bytes, texture.check_epoch) &&
+         !mw2mp::page_writes::WrittenSince(texture.stamp_mips, texture.stamp_mips_bytes, texture.check_epoch))) {
+      return false;
+    }
+    ++tex_stamp_forward_;
     return true;
   }
 
@@ -11675,12 +11740,13 @@ class VulkanDrawsImpl final : public VulkanDraws {
     if (!first) {
       MW2MP_REPORT_RING("[native] C3 texture rechecks by write stamps, last 10 s: {} skipped (no stamp since the last "
                         "check; {} of them young, interval 2-4), {} checked anyway (the guard), {} checked (a stamp "
-                        "since); {} changed without a stamp ({} since start, {} of them young), their pages now count "
-                        "as always written",
+                        "since), {} brought forward by a stamp before due; {} changed without a stamp ({} since start, "
+                        "{} of them young), their pages now count as always written",
                         tex_stamp_skipped_, tex_stamp_skipped_young_, tex_stamp_guarded_, tex_stamp_written_,
+                        tex_stamp_forward_,
                         tex_unstamped_interval_, tex_unstamped_, tex_unstamped_young_);
     }
-    tex_stamp_skipped_ = tex_stamp_skipped_young_ = tex_stamp_guarded_ = tex_stamp_written_ =
+    tex_stamp_skipped_ = tex_stamp_skipped_young_ = tex_stamp_guarded_ = tex_stamp_written_ = tex_stamp_forward_ =
         tex_unstamped_interval_ = 0;
   }
 
@@ -11800,6 +11866,7 @@ class VulkanDrawsImpl final : public VulkanDraws {
     valid_until = frame_;  // by default, this frame only
     prepare_outcome_ = 0;  // which way it went, for the C6 substages (PrepareOutcome)
     prepare_new_ = false;
+    prepared_texture_ = nullptr;
     if ((f[0] & 0x3) != uint32_t(xenos::FetchConstantType::kTexture)) {
       return;
     }
@@ -12067,6 +12134,7 @@ class VulkanDrawsImpl final : public VulkanDraws {
     }
 
     CachedTexture& texture = textures_[key];
+    prepared_texture_ = &texture;
     uint64_t hash_raw_known = 0;  // the raw hash ReuseByContent already took, if hash_known
     bool hash_known = false;
     auto t_new = std::chrono::steady_clock::time_point{};  // a new texture's parts (C6 substages 31-35)
@@ -12250,7 +12318,7 @@ class VulkanDrawsImpl final : public VulkanDraws {
     }
     // Textures that do not change are checked less and less often (down to every 32 frames); those that
     // change (videos) go back to being checked every frame.
-    if (texture.image.prepared && frame_ < texture.next) {
+    if (texture.image.prepared && frame_ < texture.next && !StampedEarly(texture)) {
       valid_until = texture.next - 1;
       return;
     }
@@ -12377,9 +12445,7 @@ class VulkanDrawsImpl final : public VulkanDraws {
           ++texture.samples_consecutive;
           ++samples_hits_;
           bytes_saved_sample_ += bytes_full - bytes_sample;
-          texture.interval = std::min<uint32_t>(texture.interval * 2, 32);
-          texture.next = frame_ + texture.interval + (texture.interval == 32 ? (key >> 7) & 7 : 0);
-          valid_until = texture.next - 1;
+          ScheduleUnchanged(texture, key, valid_until);
           prepare_outcome_ = 3;
           return;
         }
@@ -12481,10 +12547,7 @@ class VulkanDrawsImpl final : public VulkanDraws {
             texture.sample_valid = true;
           }
           texture.samples_consecutive = 0;
-          texture.interval = std::min<uint32_t>(texture.interval * 2, 32);
-          // At the maximum interval, from 32 to 39 depending on the texture, so they do not coincide.
-          texture.next = frame_ + texture.interval + (texture.interval == 32 ? (key >> 7) & 7 : 0);
-          valid_until = texture.next - 1;
+          ScheduleUnchanged(texture, key, valid_until);
           prepare_outcome_ = 4;
           return;
         }
@@ -12667,9 +12730,7 @@ class VulkanDrawsImpl final : public VulkanDraws {
                      .count()),
         std::memory_order_relaxed);
     if (texture.image.prepared && hash == texture.hash) {
-      texture.interval = std::min<uint32_t>(texture.interval * 2, 32);
-      texture.next = frame_ + texture.interval;
-      valid_until = texture.next - 1;
+      ScheduleUnchanged(texture, 0, valid_until);
       return;
     }
     // Observing phase of the hash thread: what the usual path produces, to compare when collecting.
@@ -18103,10 +18164,13 @@ class VulkanDrawsImpl final : public VulkanDraws {
   bool vcache_by_writes_ = false;  // mw2mp_native_vertex_cache_by_writes
   uint32_t vcache_whole_bytes_ = 0;  // mw2mp_native_vertex_cache_whole_kb in bytes
   uint64_t vcache_whole_hits_ = 0;    // binds of a whole-buffer copy (10 s)
+  uint32_t vcache_chunk_bytes_ = 0;  // mw2mp_native_vertex_cache_chunk_kb in bytes
+  uint64_t vcache_chunk_hits_ = 0;    // binds inside a chunk copy (10 s)
   // mw2mp_native_texture_by_writes (TextureUnwritten): -1 = not read yet; this slot's arm; the 10 s counters.
   int32_t tex_by_writes_ = -1;
   bool tex_by_writes_ab_ = false, tex_by_writes_active_ = false;
   uint64_t tex_stamp_seen_ = 0, tex_stamp_skipped_ = 0, tex_stamp_guarded_ = 0, tex_stamp_written_ = 0;
+  uint64_t tex_stamp_forward_ = 0;  // rechecks brought forward by a stamp (StampedEarly), last 10 s
   uint64_t tex_unstamped_ = 0, tex_unstamped_interval_ = 0;
   // mw2mp_native_texture_by_writes_young: -1 = not read yet; this slot's arm; young skips and misses.
   int32_t tex_young_ = -1;
@@ -18118,6 +18182,7 @@ class VulkanDrawsImpl final : public VulkanDraws {
   // thread, 8 took a cold texture's image; prepare_new_ (shown as 5) when it created the image.
   uint32_t prepare_outcome_ = 0;
   bool prepare_new_ = false;
+  const CachedTexture* prepared_texture_ = nullptr;  // the texture PrepareTexture just looked at (TakeStamps)
   // mw2mp_native_texture_reuse (ReuseByContent): -1 = not read yet; this slot's arm; the 10 s counters.
   int32_t texreuse_ = -1;
   bool texreuse_ab_ = false, texreuse_active_ = false;
@@ -18292,6 +18357,10 @@ class VulkanDrawsImpl final : public VulkanDraws {
     uint64_t valid_until = 0;  // last frame it is valid without going back to PrepareTexture
     uint32_t width = 0;  // host image size, for 1/size
     uint32_t height = 0;
+    // mw2mp_native_texture_by_writes: its texture's stamp ranges and check epoch (0: not tracked), and the last frame
+    // they were found quiet (StampsQuiet).
+    uint32_t stamp_base = 0, stamp_base_bytes = 0, stamp_mips = 0, stamp_mips_bytes = 0;
+    uint32_t stamp_epoch = 0, stamp_frame = 0;
   };
   bool cache_between_frames_ = true;  // mw2mp_native_texture_cache_across_frames
   bool mipmaps_ = true;                 // mw2mp_native_mipmaps
@@ -18410,6 +18479,36 @@ class VulkanDrawsImpl final : public VulkanDraws {
   bool SlotCurrent(const CacheSampler& c) const {
     return c.generation_slot == GenerationSlot(c.heap, c.slot);
   }
+
+  // The sampler caches keep a texture across frames until its check is due; the first use in each frame looks at its
+  // stamps too, so a stamped texture goes back to PrepareTexture (StampedEarly) on the next frame.
+  bool StampsQuiet(CacheSampler& c) {
+    if (c.stamp_epoch == 0 || c.stamp_frame == uint32_t(frame_)) {
+      return true;
+    }
+    if (mw2mp::page_writes::WrittenSince(c.stamp_base, c.stamp_base_bytes, c.stamp_epoch) ||
+        mw2mp::page_writes::WrittenSince(c.stamp_mips, c.stamp_mips_bytes, c.stamp_epoch)) {
+      return false;
+    }
+    c.stamp_frame = uint32_t(frame_);
+    return true;
+  }
+
+  // What StampsQuiet needs, from the texture PrepareTexture just looked at, when the entry outlives this frame.
+  void TakeStamps(CacheSampler& c, uint64_t valid_until) {
+    const CachedTexture* t = prepared_texture_;
+    if (!tex_by_writes_active_ || !t || valid_until <= frame_ || t->check_epoch == 0) {
+      c.stamp_epoch = 0;
+      return;
+    }
+    c.stamp_base = t->stamp_base;
+    c.stamp_base_bytes = t->stamp_base_bytes;
+    c.stamp_mips = t->stamp_mips;
+    c.stamp_mips_bytes = t->stamp_mips_bytes;
+    c.stamp_epoch = t->check_epoch;
+    c.stamp_frame = uint32_t(frame_);
+  }
+
   // On-disk pipeline cache (LoadCachePipelines and SaveCachePipelines).
   using FnCreatePipelineCache = VkResult(VKAPI_PTR*)(VkDevice, const VkPipelineCacheCreateInfo*,
                                                      const VkAllocationCallbacks*,

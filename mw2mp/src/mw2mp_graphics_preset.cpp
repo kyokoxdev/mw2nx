@@ -72,6 +72,14 @@ REXCVAR_DEFINE_DOUBLE(mw2mp_model_detail, 0.0, "Graphics",
                       "model the game draws is never hidden by it, only simplified. Applied at once")
     .range(0.0, 8.0);
 
+// The calibration knob for the small-prop cull (ChooseModelVersion below; campaign, very_low only).
+REXCVAR_DEFINE_DOUBLE(mw2mp_model_cull_reach, 64.0, "Graphics",
+                      "Campaign, very_low preset: static props smaller than this many units (middle to farthest "
+                      "corner) are hidden once their distance times the model detail factor passes their simplest "
+                      "version's distance, as PC MW2 does with r_lodScaleRigid. Characters, weapons, vehicles and "
+                      "effects are never hidden. 0: off. Applied at once")
+    .range(0.0, 1024.0);
+
 // Scene resolution. The game's video setup (campaign sub_8238E5D0, multiplayer sub_823C3DD0; r3 = the video config,
 // the IW vidConfig) reads XGetVideoMode and writes the 3D scene size at +8/+12 (1024x600 with HD output, 896x576 SD),
 // the display size at +16/+20 (1280x720) and the MSAA samples at +24 (2). Every scene target, viewport and the final
@@ -221,6 +229,7 @@ std::atomic<float> g_model_factor{1.0f};
 std::atomic<uint32_t> g_model_picks{0};    // the hook's calls since the last report
 std::atomic<uint32_t> g_model_simpler{0};  // of those, a simpler version than the game's
 std::atomic<uint32_t> g_model_held{0};     // of those, held back from the simplest (it has more surfaces)
+std::atomic<uint32_t> g_model_culled{0};   // of those, small static props hidden (mw2mp_model_cull_reach)
 
 std::atomic<int> g_level{-1};  // from mw2mp_preset (change callback); -1 until Apply reads it
 std::atomic<int> g_applied{0};  // the level in effect (TextureMipsMinus)
@@ -407,10 +416,11 @@ void Apply() {
     const uint32_t picks = g_model_picks.exchange(0, std::memory_order_relaxed);
     if (picks) {
       REXLOG_INFO("[preset] model detail x{:.2f}, last 10 s: {} version picks, {} simpler than the game's ({} held "
-                  "back from the simplest)",
+                  "back from the simplest), {} small static props hidden",
                   g_model_factor.load(std::memory_order_relaxed), picks,
                   g_model_simpler.exchange(0, std::memory_order_relaxed),
-                  g_model_held.exchange(0, std::memory_order_relaxed));
+                  g_model_held.exchange(0, std::memory_order_relaxed),
+                  g_model_culled.exchange(0, std::memory_order_relaxed));
     }
   }
 #endif
@@ -504,7 +514,8 @@ REX_HOOK_RAW(sub_823C3DD0) {
 // getters beside it: sub_82300AD0 (numsurfs, u16 at +68), sub_82300BD8 (dist at +64), sub_82300BF0 (contents +236,
 // so radius +244 and bounds +248, midpoint then half size).
 //
-// Never hides a model the game draws (the factor alone would drop it past its last version: it keeps its simplest),
+// Never hides a model the game draws (the factor alone would drop it past its last version: it keeps its simplest;
+// the one exception is the small-prop cull, mw2mp_model_cull_reach, for static props at very_low only),
 // never picks better than the game, and as BO2: a long model (reaching 256 units or more) is measured from its nearest
 // possible point, and a model the factor pushes past its versions keeps the second simplest when the simplest has fewer
 // surfaces (BO2: far windows lost their glass in the simplest version).
@@ -522,9 +533,30 @@ float ModelReach(const uint8_t* model) {
   return reach < 1e6f ? reach : 0.0f;  // a nonsense value: measured from the origin, as the game does
 }
 
+// The small-prop cull. Run mw2sp_012 (invasion): the ring thread at 100 % with 12-13.6k draws a frame (~51 triangles
+// each), ~2,000 model picks a frame, already at very_low. The campaign's static model loops call XModelGetLodForDist
+// from these return addresses: sub_823B3998 (the camera's), sub_823B3E20, sub_823B40E0 and sub_823B4350 (the same
+// loop over the 44-byte static model instances of the world, gfxWorld +88, after their own cull distance). The other
+// callers (DObj models: characters, weapons, vehicles; scene models; brush models) are never culled. Multiplayer: none.
+#if defined(MW2_CAMPAIGN) && MW2_CAMPAIGN
+constexpr uint32_t kStaticModelCallers[] = {0x823B3BDC, 0x823B3FA8, 0x823B4220, 0x823B4588};
+#else
+constexpr uint32_t kStaticModelCallers[] = {0};
+#endif
+bool FromStaticModels(uint64_t lr) {
+  for (const uint32_t caller : kStaticModelCallers) {
+    if (caller && lr == caller) {
+      return true;
+    }
+  }
+  return false;
+}
+
 void ChooseModelVersion(PPCContext& ctx, uint8_t* base, void (*game_pick)(PPCContext&, uint8_t*)) {
   const uint32_t model_address = ctx.r3.u32;
   const float ramp = float(ctx.f1.f64);
+  const float plain = float(ctx.f2.f64);
+  const bool static_model = FromStaticModels(ctx.lr);
   game_pick(ctx, base);
   const float factor = mw2mp::gfx_preset::g_model_factor.load(std::memory_order_relaxed);
   const int game = ctx.r3.s32;
@@ -534,13 +566,22 @@ void ChooseModelVersion(PPCContext& ctx, uint8_t* base, void (*game_pick)(PPCCon
   mw2mp::gfx_preset::g_model_picks.fetch_add(1, std::memory_order_relaxed);
   const uint8_t* const model = base + model_address;
   const int lods = int8_t(model[225]);
+  const auto limit = [model](int i) { return ModelFloat(model + 64 + 40 * i); };
+  const float reach = ModelReach(model);
+  // A small static prop past its simplest version's distance (the game's own cull test, on the plain distance) once
+  // scaled by the factor: hidden, as the game hides it past that distance unscaled.
+  if (static_model && lods >= 1 && mw2mp::gfx_preset::g_applied.load(std::memory_order_relaxed) == 3 &&
+      reach < float(REXCVAR_GET(mw2mp_model_cull_reach)) && limit(lods - 1) > 0.0f &&
+      plain * factor >= limit(lods - 1)) {
+    mw2mp::gfx_preset::g_model_culled.fetch_add(1, std::memory_order_relaxed);
+    ctx.r3.s64 = -1;
+    return;
+  }
   if (game >= lods - 1) {
     return;  // already its simplest
   }
-  const auto limit = [model](int i) { return ModelFloat(model + 64 + 40 * i); };
   const auto surfaces = [model](int i) { return rex::memory::load_and_swap<uint16_t>(model + 64 + 40 * i + 4); };
   constexpr float kReachLong = 256.0f;
-  const float reach = ModelReach(model);
   const float scaled = (reach >= kReachLong ? std::max(ramp - reach, 0.0f) : ramp) * factor;
   int chosen = game;
   while (chosen < lods && !(scaled < limit(chosen))) {

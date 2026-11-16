@@ -5396,6 +5396,15 @@ class NativeRenderSystem final : public rex::system::IGraphicsSystem {
         swaps_.load(), vblanks_.load(), packets_.load(), interrupts_.load(),
         indirect_.load(), writes_memory_.load(), waits_exhausted_.load(), draws_.load(),
         copies_.load());
+    // A stall: no Swap since the previous report, after the game had drawn. The guest threads' last waits say what
+    // each one is doing; a thread polling with short sleeps never reaches the 10 s long-wait line (run mw2sp_011: the
+    // campaign started from MP stopped drawing 6 s into invasion, its main thread only in short sleeps).
+    if (const uint64_t swaps = swaps_.load(); !force && swaps && swaps == swaps_last_report_) {
+      REXLOG_WARN("[native] stall: no Swap in the last {} s (swaps={})", REXCVAR_GET(mw2mp_native_diag_report_s), swaps);
+      rex::system::LogGuestWaits(1000.0);
+    } else {
+      swaps_last_report_ = swaps;
+    }
     // Ring thread cost since the previous report. "ring" includes the
     // WAIT_REG_MEM waits and the wait for the GPU when presenting.
     const double seconds = std::chrono::duration<double>(now - last_time_report_).count();
@@ -6575,6 +6584,7 @@ class NativeRenderSystem final : public rex::system::IGraphicsSystem {
   double scale_marks_ns_ = 0.0;
   Clock::time_point last_time_report_{};
   Clock::time_point last_report_{};
+  uint64_t swaps_last_report_ = 0;  // Report: Swaps at the previous report (stall detection)
   // Trace of one frame (mw2mp_native_diag_frame_s).
   Clock::time_point start_system_{};
   bool tracing_ = false;

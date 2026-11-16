@@ -38,8 +38,12 @@ void MarkVolatile(uint32_t physical, uint32_t bytes) {
   if (bytes == 0) {
     return;
   }
-  const uint32_t first = (physical & 0x1FFFFFFFu) >> 12;
-  const uint32_t last = std::min<uint32_t>(((physical & 0x1FFFFFFFu) + bytes - 1) >> 12, (1u << 17) - 1);
+  // The whole 64 KB regions, not only the range's pages: a writer that does not stamp fills a buffer, and its other
+  // ranges were each drawn stale until the sampled guard caught them too (run mw2mp_001: 28 misses in ~10 regions,
+  // e.g. 1D6B1C00, 1D6B2000, 1D6B3180, 1D6B4380, minutes apart).
+  // ponytail: region granularity guessed from one run; if misses keep landing in fresh regions, find and stamp the writer.
+  const uint32_t first = ((physical & 0x1FFFFFFFu) >> 12) & ~15u;
+  const uint32_t last = std::min<uint32_t>((((physical & 0x1FFFFFFFu) + bytes - 1) >> 12) | 15u, (1u << 17) - 1);
   for (uint32_t p = first; p <= last; ++p) {
     g_stamps[p].store(UINT32_MAX, std::memory_order_release);
   }

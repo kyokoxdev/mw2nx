@@ -7,6 +7,7 @@
 #include <malloc.h>
 #include <string.h>
 #include <switch.h>
+#include <rex/logging.h>
 
 #include <map>
 #include <set>
@@ -119,7 +120,77 @@ State& S() {
     return s;
 }
 
-Handle Proc() { return envGetOwnProcessHandle(); }
+/*
+ * A real handle to our own process. hbloader passes one to an NRO; an installed NSO gets none, and
+ * envGetOwnProcessHandle() is then INVALID_HANDLE: every svcMapProcess* call failed with 0xE401 and the
+ * first guest write crashed. The pseudo-handle CUR_PROCESS_HANDLE is not accepted by those calls, but
+ * copying it over IPC yields a real one: send it on a session to ourselves and take it off the server end.
+ *
+ * hbloader's sequence: a helper thread receives on the server end while this thread sends synchronously. Not
+ * an asynchronous send: that needs a kernel event, and svcSendAsyncRequestWithUserBuffer failed with
+ * LimitReached (0x10801, run mw2sp_005). threadCreate takes virtmemLock, so this must first run outside it:
+ * RexGmInit calls Proc() before any commit. The receive gives up after 2 s and closes the server either way,
+ * which always ends this thread's request. Every step is logged.
+ */
+struct HandleBox {
+    Handle server = INVALID_HANDLE;
+    Handle out = INVALID_HANDLE;
+    Result rc = 0;
+};
+
+void ReceiveProcessHandle(void* arg) {
+    HandleBox* box = static_cast<HandleBox*>(arg);
+    void* tls = armGetTls();
+    hipcMakeRequestInline(tls);
+    s32 index = 0;
+    box->rc = svcReplyAndReceive(&index, &box->server, 1, INVALID_HANDLE, 2000000000ull);
+    if (R_SUCCEEDED(box->rc)) {
+        const HipcParsedRequest r = hipcParseRequest(tls);
+        if (r.meta.num_copy_handles >= 1) box->out = r.data.copy_handles[0];
+    }
+    svcCloseHandle(box->server);
+}
+
+Handle FetchProcessHandle() {
+    if (envGetOwnProcessHandle() != INVALID_HANDLE) return envGetOwnProcessHandle();
+    HandleBox box;
+    Handle client = INVALID_HANDLE;
+    const char* step = "svcCreateSession";
+    Result rc = svcCreateSession(&box.server, &client, 0, 0);
+    Thread t;
+    if (R_SUCCEEDED(rc)) {
+        step = "threadCreate";
+        rc = threadCreate(&t, ReceiveProcessHandle, &box, nullptr, 0x4000, 0x20, -2);
+        if (R_SUCCEEDED(rc)) {
+            step = "threadStart";
+            rc = threadStart(&t);
+            if (R_FAILED(rc)) threadClose(&t);
+        }
+        if (R_FAILED(rc)) svcCloseHandle(box.server);
+    }
+    if (R_SUCCEEDED(rc)) {
+        REXLOG_INFO("[memory] installed program: fetching a handle to our own process over IPC");
+        hipcMakeRequestInline(armGetTls(), .num_copy_handles = 1).copy_handles[0] = CUR_PROCESS_HANDLE;
+        const Result send = svcSendSyncRequest(client);  // never answered: ends with an error when the server closes
+        threadWaitForExit(&t);
+        threadClose(&t);
+        step = "svcReplyAndReceive";
+        rc = box.rc;
+        REXLOG_INFO("[memory] request ended 0x{:X}, receive 0x{:X}", send, box.rc);
+    }
+    if (client != INVALID_HANDLE) svcCloseHandle(client);
+    if (box.out == INVALID_HANDLE) {
+        REXLOG_ERROR("[memory] no handle to our own process ({} 0x{:X}): guest memory cannot be committed", step, rc);
+    } else {
+        REXLOG_INFO("[memory] own process handle 0x{:X} (installed program: copied over IPC)", box.out);
+    }
+    return box.out;
+}
+
+Handle Proc() {
+    static const Handle h = FetchProcessHandle();
+    return h;
+}
 
 bool Intersect(size_t a, size_t al, size_t b, size_t bl, size_t* lo, size_t* hi) {
     const size_t l = a > b ? a : b;
@@ -358,6 +429,12 @@ uint8_t* RexGmInit(size_t size) {
     s.base = static_cast<uint8_t*>(virtmemFindAslr(size, kBlockSize));
     if (s.base) s.reservation = virtmemAddReservation(s.base, size);
     virtmemUnlock();
+    /*
+     * The process handle now, outside virtmemLock: on an installed program fetching it creates a thread, and
+     * threadCreate takes virtmemLock for the stack. The commit path calls Proc() under that lock (it is not
+     * recursive), which hung the first call there (runs mw2sp_004 and mw2sp_006, black screen).
+     */
+    Proc();
 
     if (!s.base || !s.reservation) {
         s.base = nullptr;

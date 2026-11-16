@@ -161,7 +161,15 @@ class Mw2mpApp : public rex::ReXApp {
     auto& loader_data = xam->loader_data();
     loader_data.launch_data = data;
     loader_data.launch_data_present = true;
-    REXLOG_INFO("[launch] {} bytes of launch data from the other program", data.size());
+    // Its content too: the sender's own log line is lost when its process ends. Printable bytes, then the first 64 in hex.
+    std::string text;
+    for (uint8_t c : data) {
+      if (c >= 0x20 && c < 0x7F) text.push_back(char(c));
+      else if (!text.empty() && text.back() != ' ') text.push_back(' ');
+    }
+    std::string hex;
+    for (size_t i = 0; i < std::min<size_t>(data.size(), 64); ++i) hex += fmt::format("{:02X}", data[i]);
+    REXLOG_INFO("[launch] {} bytes of launch data from the other program: '{}' ({}...)", data.size(), text, hex);
   }
 
   // The native renderer compiles the pipelines earlier runs used before the game starts (mw2mp_native_precompile.h).
