@@ -1,0 +1,170 @@
+diff --git a/cnmt.c b/cnmt.c
+index a217ce1..76f08af 100644
+--- a/cnmt.c
++++ b/cnmt.c
+@@ -19,6 +19,10 @@ void cnmt_create(cnmt_ctx_t *cnmt_ctx, filepath_t *cnmt_filepath, hbp_settings_t
+         cnmt_ctx->cnmt_header.content_entry_count += 0x1;
+     if (settings->legalinfo_romfs_dir.valid == VALIDITY_VALID)
+         cnmt_ctx->cnmt_header.content_entry_count += 0x1;
++    if (settings->extra_program_nca.valid == VALIDITY_VALID)
++        cnmt_ctx->cnmt_header.content_entry_count += 0x1;
++    if (settings->extra_control_nca.valid == VALIDITY_VALID)
++        cnmt_ctx->cnmt_header.content_entry_count += 0x1;
+     cnmt_ext_header.patch_title_id = cnmt_ctx->cnmt_header.title_id + 0x800;
+ 
+     // Set content record types
+@@ -51,6 +55,10 @@ void cnmt_create(cnmt_ctx_t *cnmt_ctx, filepath_t *cnmt_filepath, hbp_settings_t
+         fwrite(&cnmt_ctx->cnmt_content_records[3], sizeof(cnmt_content_record_t), 1, cnmt_file);
+     if (settings->legalinfo_romfs_dir.valid == VALIDITY_VALID)
+         fwrite(&cnmt_ctx->cnmt_content_records[4], sizeof(cnmt_content_record_t), 1, cnmt_file);    
++    if (settings->extra_program_nca.valid == VALIDITY_VALID)
++        fwrite(&cnmt_ctx->cnmt_content_records[5], sizeof(cnmt_content_record_t), 1, cnmt_file);
++    if (settings->extra_control_nca.valid == VALIDITY_VALID)
++        fwrite(&cnmt_ctx->cnmt_content_records[6], sizeof(cnmt_content_record_t), 1, cnmt_file);
+     fwrite(digest, 1, 0x20, cnmt_file);
+ 
+     fclose(cnmt_file);
+diff --git a/cnmt.h b/cnmt.h
+index 2dcf5ee..c235574 100644
+--- a/cnmt.h
++++ b/cnmt.h
+@@ -37,7 +37,7 @@ typedef struct {
+ 
+ typedef struct {
+     cnmt_header_t cnmt_header;
+-    cnmt_content_record_t cnmt_content_records[5];
++    cnmt_content_record_t cnmt_content_records[7]; /* [5], [6]: mw2nx extra program and its control */
+ } cnmt_ctx_t;
+ 
+ void cnmt_create(cnmt_ctx_t *cnmt_ctx, filepath_t *cnmt_filepath, hbp_settings_t *settings);
+diff --git a/main.c b/main.c
+index 80c6795..cbbad90 100644
+--- a/main.c
++++ b/main.c
+@@ -40,6 +40,9 @@ static void usage(void)
+             "--sdkversion             Set SDK version in hex, default SDK version is 000C1100\n"
+             "--plaintext              Skip encrypting sections and set section header block crypto type to plaintext\n"
+             "--keepncadir             Keep NCA directory\n"
++"--extraprogram           Add this program NCA (from a run with titleid+1) as program index 1\n"
++"--extracontrol           Add this control NCA (from the same run) as program index 1's control\n"
++"--nacptitleid            Title ID written into the NACP's presence group, save owner, etc. (default: titleid)\n"
+             "--nosignncasig2          Skip patching acid public key in npdm and signing nca header with acid public key\n"
+             "Overriding options:\n"
+             "--titleid                Use specified titleid for creating ncas and patch titleid in npdm and nacp\n"
+@@ -133,6 +136,9 @@ int main(int argc, char **argv)
+                 {"nosignncasig2", 0, NULL, 20},
+                 {"legalinfodir", 1, NULL, 21},
+                 {"backupdir", 1, NULL, 22},
++                {"extraprogram", 1, NULL, 23},
++                {"extracontrol", 1, NULL, 24},
++                {"nacptitleid", 1, NULL, 25},
+                 {NULL, 0, NULL, 0},
+             };
+ 
+@@ -235,6 +241,17 @@ int main(int argc, char **argv)
+         case 20:
+             settings.nosignncasig2 = 1;
+             break;
++        case 24:
++            filepath_init(&settings.extra_control_nca);
++            filepath_set(&settings.extra_control_nca, optarg);
++            break;
++        case 25:
++            settings.nacp_title_id = strtoull(optarg, NULL, 16);
++            break;
++        case 23:
++            filepath_init(&settings.extra_program_nca);
++            filepath_set(&settings.extra_program_nca, optarg);
++            break;
+         case 21:
+             filepath_init(&settings.legalinfo_romfs_dir);
+             filepath_set(&settings.legalinfo_romfs_dir, optarg);
+@@ -371,6 +388,51 @@ int main(int argc, char **argv)
+         nca_create_manual_legalinfo(&settings, &cnmt_ctx);
+         printf("\n");
+     }
++    // mw2nx: the second program, as content record 5 (Program, id offset 1), in the NSP with the others
++    if (settings.extra_program_nca.valid == VALIDITY_VALID)
++    {
++        printf("===> Adding program index 1: %s\n", settings.extra_program_nca.char_path);
++        FILE *extra = os_fopen(settings.extra_program_nca.os_path, OS_MODE_READ);
++        if (extra == NULL)
++        {
++            fprintf(stderr, "Failed to open %s!\n", settings.extra_program_nca.char_path);
++            return EXIT_FAILURE;
++        }
++        nca_calculate_hash(extra, &cnmt_ctx, 5);
++        fclose(extra);
++        cnmt_ctx.cnmt_content_records[5].type = 0x1;      // Program
++        cnmt_ctx.cnmt_content_records[5].id_offset = 0x1; // program index 1
++        char extra_name[33];
++        hexBinaryString(cnmt_ctx.cnmt_content_records[5].ncaid, 16, extra_name, 33);
++        filepath_t extra_dest;
++        filepath_init(&extra_dest);
++        filepath_copy(&extra_dest, &settings.nca_dir);
++        filepath_append(&extra_dest, "%s.nca", extra_name);
++        filepath_copy_file(&settings.extra_program_nca, &extra_dest);
++        printf("\n");
++    }
++    if (settings.extra_control_nca.valid == VALIDITY_VALID)
++    {
++        printf("===> Adding program index 1's control: %s\n", settings.extra_control_nca.char_path);
++        FILE *extra = os_fopen(settings.extra_control_nca.os_path, OS_MODE_READ);
++        if (extra == NULL)
++        {
++            fprintf(stderr, "Failed to open %s!\n", settings.extra_control_nca.char_path);
++            return EXIT_FAILURE;
++        }
++        nca_calculate_hash(extra, &cnmt_ctx, 6);
++        fclose(extra);
++        cnmt_ctx.cnmt_content_records[6].type = 0x3;      // Control
++        cnmt_ctx.cnmt_content_records[6].id_offset = 0x1; // program index 1
++        char extra_name[33];
++        hexBinaryString(cnmt_ctx.cnmt_content_records[6].ncaid, 16, extra_name, 33);
++        filepath_t extra_dest;
++        filepath_init(&extra_dest);
++        filepath_copy(&extra_dest, &settings.nca_dir);
++        filepath_append(&extra_dest, "%s.nca", extra_name);
++        filepath_copy_file(&settings.extra_control_nca, &extra_dest);
++        printf("\n");
++    }
+     nca_create_meta(&settings, &cnmt_ctx);
+     printf("\n");
+ 
+diff --git a/nacp.c b/nacp.c
+index 61b59e8..e632fc6 100644
+--- a/nacp.c
++++ b/nacp.c
+@@ -90,12 +90,14 @@ void nacp_process(hbp_settings_t *settings)
+ 
+     if (settings->title_id != 0)
+     {
++        /* mw2nx: a second program's NACP keeps the application's IDs (one save, one presence group) */
++        uint64_t nacp_title_id = settings->nacp_title_id ? settings->nacp_title_id : settings->title_id;
+         printf("Setting TitleIDs\n");
+-        nacp.PresenceGroupId = settings->title_id;
+-        nacp.SaveDataOwnerId = settings->title_id;
+-        nacp.AddOnContentBaseId = settings->title_id + 0x1000;
++        nacp.PresenceGroupId = nacp_title_id;
++        nacp.SaveDataOwnerId = nacp_title_id;
++        nacp.AddOnContentBaseId = nacp_title_id + 0x1000;
+         for (int x = 0; x < 8; x++)
+-            nacp.LocalCommunicationId[x] = settings->title_id;
++            nacp.LocalCommunicationId[x] = nacp_title_id;
+     }
+ 
+     // Backup and re-write NACP
+diff --git a/settings.h b/settings.h
+index 8a1d03a..a8f7e27 100644
+--- a/settings.h
++++ b/settings.h
+@@ -64,6 +64,9 @@ typedef struct
+     filepath_t control_romfs_dir;
+     filepath_t htmldoc_romfs_dir;
+     filepath_t legalinfo_romfs_dir;
++    filepath_t extra_program_nca; /* mw2nx: a second program (index 1), built by an earlier run */
++    filepath_t extra_control_nca; /* mw2nx: its control (index 1) */
++    uint64_t nacp_title_id;       /* mw2nx: the title ID written into the NACP, when not title_id */
+     uint8_t noromfs;
+     uint8_t nologo;
+     uint8_t plaintext;

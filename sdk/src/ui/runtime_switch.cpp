@@ -71,9 +71,11 @@ u32 __nx_applet_type = AppletType_Application;
 
 /*
  * The heap size libnx asks for when nothing hands the program a heap. Started
- * by hbloader (the Homebrew Menu or a forwarder), which is how this port runs,
- * libnx takes the heap hbloader already set up, all the memory but about 2 MB,
- * and ignores this value.
+ * by hbloader (the Homebrew Menu or a forwarder), libnx takes the heap hbloader
+ * already set up, all the memory but about 2 MB, and ignores this value. An
+ * installed program (the NSP's ExeFS main) has no loader: 0 makes libnx do what
+ * hbloader does, all the memory but 2 MB. A fixed 1,024 MB there would be a
+ * third of what the game has under hbloader.
  *
  * That is why the profiler reads 3,185 of 3,189 MB: InfoType_UsedMemorySize
  * counts that whole heap from the start. It was the same with 1,536 as with
@@ -90,7 +92,7 @@ u32 __nx_applet_type = AppletType_Application;
  * at 506 MB), the host thread stacks (16 MB each) and Mesa, GPU memory included.
  * How much of it the GPU uses shows in Vulkan's memory budget.
  */
-size_t __nx_heap_size = 1024ull * 1024 * 1024;  /* see below */
+size_t __nx_heap_size = 0;  /* see above and below */
 
 /*
  * The exception handler stack is no longer declared here.

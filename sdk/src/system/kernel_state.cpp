@@ -115,7 +115,12 @@ KernelState::KernelState(Runtime* emulator)
   if (user_profiles_[1]) user_profiles_[1]->set_name(REXCVAR_GET(offline_user_name_1));
 
   auto user_data_root = emulator_->user_data_root();
-  if (!user_data_root.empty()) {
+  // A device path ("save:/", a Switch save data mount) is already complete; libstdc++ does not know devices and would
+  // put the current directory in front.
+  const std::string user_root_text = user_data_root.string();
+  const bool device_path = user_root_text.find(':') != std::string::npos &&
+                           user_root_text.find(':') < user_root_text.find('/');
+  if (!user_data_root.empty() && !device_path) {
     user_data_root = std::filesystem::absolute(user_data_root);
   }
   content_manager_ = std::make_unique<xam::ContentManager>(this, user_data_root);

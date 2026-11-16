@@ -56,3 +56,7 @@ __pycache__/
 # This machine's data folder (tools/data_dir.sh) and the default one
 /bo2_data.txt
 /data/
+
+# Console keys and release icons: local only, never committed
+*.keys
+/docs/images/

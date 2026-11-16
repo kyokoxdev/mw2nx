@@ -12,8 +12,11 @@
 
 #include <rex/cvar.h>
 #include <rex/system/kernel_state.h>
+#include <rex/kernel/xam/module.h>
 
 #include "mw2mp_switch.h"
+#include "mw2mp_first_start.h"
+#include "mw2mp_launch.h"
 #include "mw2mp_user_name.h"
 #include "native/mw2mp_native_system.h"
 #include "native/render/mw2mp_native_precompile.h"
@@ -101,6 +104,14 @@ class Mw2mpApp : public rex::ReXApp {
   // its saves: their folder is named by the XUID, not the name.
   void OnPostSetup() override {
     auto* kernel_state = REX_KERNEL_STATE();
+    RestoreLaunchData(kernel_state);
+    if (mw2mp::IsInstalledProgram()) {
+      if (save_error_.empty()) {
+        REXLOG_INFO("[save] saves in the console's save data (save:/)");
+      } else {
+        REXLOG_ERROR("[save] no save data: {}; saves go to user/ on the SD card", save_error_);
+      }
+    }
     auto* profile = kernel_state ? kernel_state->user_profile() : nullptr;
     if (!profile) {
       return;
@@ -117,12 +128,52 @@ class Mw2mpApp : public rex::ReXApp {
     REXLOG_INFO("[name] {} (from {})", name, chosen.empty() ? "the Switch user" : "mw2mp_user_name");
   }
 
+  // The installed program waits on a screen listing the missing files until the player has copied them, instead of
+  // failing on an empty game/ (mw2mp_first_start.h).
+  std::optional<rex::PathConfig> OnFinalizePaths(const rex::PathConfig& defaults,
+                                                 std::function<void(rex::PathConfig)> resume) override {
+    if (!mw2mp::IsInstalledProgram()) {
+      return defaults;
+    }
+    const auto folder = rex::filesystem::GetExecutableFolder();
+    const auto missing = mw2mp::MissingFiles(folder);
+    if (missing.empty()) {
+      return defaults;
+    }
+    REXLOG_WARN("[setup] {} file(s) missing, first {}; showing the setup screen", missing.size(), missing.front());
+    mw2mp::ShowMissingFiles(imgui_drawer(), folder, [this, defaults, resume] {
+      // Out of the screen's draw: the runtime starts on the next turn of the UI loop.
+      app_context().CallInUIThreadDeferred([defaults, resume] { resume(defaults); });
+    });
+    return std::nullopt;
+  }
+
+  // As on the 360, the launch data the other executable set survives the switch (mw2mp_launch.cpp).
+  static void RestoreLaunchData(rex::system::KernelState* kernel_state) {
+    std::vector<uint8_t> data;
+    if (!kernel_state || !mw2mp::TakeLaunchData(&data) || data.empty()) {
+      return;
+    }
+    auto xam = kernel_state->GetKernelModule<rex::kernel::xam::XamModule>("xam.xex");
+    if (!xam) {
+      return;
+    }
+    auto& loader_data = xam->loader_data();
+    loader_data.launch_data = data;
+    loader_data.launch_data_present = true;
+    REXLOG_INFO("[launch] {} bytes of launch data from the other program", data.size());
+  }
+
   // The native renderer compiles the pipelines earlier runs used before the game starts (mw2mp_native_precompile.h).
   bool OnHoldModuleLaunch(std::function<void()> start) override {
     return mw2mp::native::precompile::Hold(std::move(start), imgui_drawer());
   }
 
-  // Folders next to the NRO (hbmenu passes no command line):
+  // The installed program (the NSP): its folder is sdmc:/atmosphere/contents/<application id>/ (GetExecutableFolder),
+  // with game/, update/, settings, logs and shader libraries; the saves are the console's save data (mw2mp_launch.h),
+  // and /switch is never read.
+  //
+  // An NRO from the Homebrew Menu, folders next to it (hbmenu passes no command line):
   //   sdmc:/switch/mw2mp/mw2mp.nro
   //   sdmc:/switch/mw2mp/game/     the disc's files + default_mp.xexp (TU6)
   //   sdmc:/switch/mw2mp/update/   the rest of the TU6 package (patch_mp.ff, dlc1_ui_mp.ff, dlc2_ui_mp.ff)
@@ -130,10 +181,14 @@ class Mw2mpApp : public rex::ReXApp {
   void OnConfigurePaths(rex::PathConfig& paths) override {
     std::error_code ec;
     auto dir = rex::filesystem::GetExecutableFolder();
+    const bool installed = mw2mp::IsInstalledProgram();
+    if (installed) {
+      mw2mp::PrepareInstallFolder(dir);  // the first start makes the folder, with game/ and update/
+    }
     // Emulators may run the NRO from a temporary copy, and mw2sp runs from sdmc:/switch/mw2sp with no game/ of its
     // own: fall back to mw2mp's folder. Rooted "/switch/..." (newlib's default device is the SD), not "sdmc:/...":
     // libstdc++ treats "sdmc:/..." as relative and std::filesystem::absolute (Runtime::SetupVfs) prepends the cwd.
-    if (!std::filesystem::is_directory(dir / "game", ec) &&
+    if (!installed && !std::filesystem::is_directory(dir / "game", ec) &&
         std::filesystem::is_directory("/switch/mw2mp/game", ec)) {
       dir = "/switch/mw2mp";
       paths.config_path = dir / MW2_APP_NAME ".toml";
@@ -149,5 +204,20 @@ class Mw2mpApp : public rex::ReXApp {
     }
     paths.user_data_root = dir / "user";
     paths.cache_root = dir / "user" / "cache";
+    if (installed) {
+      // Profile, saves, console id and achievements in the save data; the caches stay on the SD card (rebuilt when
+      // lost, and too large for a save). Without the save (no user, no space), user/ on the SD card as an NRO.
+      std::string error;
+      const std::string save = mw2mp::MountUserSave(&error);
+      if (!save.empty()) {
+        paths.user_data_root = save;
+      } else {
+        save_error_ = error;
+      }
+      paths.cache_root = dir / "cache";
+    }
   }
+
+ private:
+  std::string save_error_;  // logged once logging is up (OnPostSetup)
 };

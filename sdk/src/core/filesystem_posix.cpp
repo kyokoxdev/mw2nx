@@ -74,6 +74,9 @@ namespace filesystem {
 // headers, but they are libnx.a symbols. C linkage: the namespace does not matter.
 extern "C" int __system_argc;
 extern "C" char** __system_argv;
+// libnx's svcGetInfo and envIsNso, declared here because switch.h's typedefs collide with rex's.
+extern "C" uint32_t svcGetInfo(uint64_t* out, uint32_t id0, uint32_t handle, uint64_t id1);
+extern "C" bool envIsNso(void);
 #endif
 
 std::filesystem::path GetExecutablePath() {
@@ -111,6 +114,21 @@ std::filesystem::path GetExecutablePath() {
   // in Runtime::SetupVfs, with nothing in the log.
   // "/switch/..." does have a root, and newlib resolves it on the default device,
   // which is the SD. It is only stripped if that form can be queried.
+  // An installed program (the NSP's ExeFS main, an NSO) has no argv and no folder on the SD card. Its files live in
+  // the application's own Atmosphere folder, /atmosphere/contents/<application id>/ (rooted, as below): game/,
+  // update/, shader libraries, settings, logs. One folder for all the application's programs: program n's id is the
+  // application's + n.
+  if (envIsNso()) {
+    uint64_t program_id = 0;
+    constexpr uint32_t kInfoTypeProgramId = 18;
+    constexpr uint32_t kCurrentProcess = 0xFFFF8001;
+    if (svcGetInfo(&program_id, kInfoTypeProgramId, kCurrentProcess, 0) == 0 && program_id) {
+      char path[64];
+      snprintf(path, sizeof(path), "/atmosphere/contents/%016llX/main", (unsigned long long)(program_id & ~0xFull));
+      return std::filesystem::path(path);
+    }
+    return {};
+  }
   if (__system_argc > 0 && __system_argv && __system_argv[0] && __system_argv[0][0]) {
     std::string path = __system_argv[0];
     constexpr std::string_view kSdmc = "sdmc:/";

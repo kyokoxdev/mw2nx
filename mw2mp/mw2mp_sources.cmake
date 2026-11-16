@@ -4,6 +4,10 @@ set(MW2MP_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/src/mw2mp_native_stubs.cpp
     ${CMAKE_CURRENT_LIST_DIR}/src/mw2mp_benchmark.cpp
     ${CMAKE_CURRENT_LIST_DIR}/src/mw2mp_user_name.cpp
+    # Campaign <-> Multiplayer in the installed program (XamLoaderLaunchTitle restarts into the other NRO)
+    ${CMAKE_CURRENT_LIST_DIR}/src/mw2mp_launch.cpp
+    # The installed program's first start: its SD card folder and the missing files screen
+    ${CMAKE_CURRENT_LIST_DIR}/src/mw2mp_first_start.cpp
     ${CMAKE_CURRENT_LIST_DIR}/src/mw2mp_graphics_preset.cpp
     # The game's bounds-tree frustum cull in native code, checked against the game's own
     ${CMAKE_CURRENT_LIST_DIR}/src/mw2mp_native_cull.cpp

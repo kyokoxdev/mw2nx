@@ -43,10 +43,25 @@ const char* RexSwitchLogDir(void) {
 }
 
 static void RexSwitchInitLogDir(void) {
-    if (__system_argc < 1 || !__system_argv || !__system_argv[0]) {
+    char installed[64];
+    const char* nro = NULL;
+    if (envIsNso()) {
+        /* an installed program: its application's folder (rex/filesystem GetExecutablePath, the same rule) */
+        u64 program_id = 0;
+        if (R_FAILED(svcGetInfo(&program_id, InfoType_ProgramId, CUR_PROCESS_HANDLE, 0)) || !program_id) {
+            return;
+        }
+        snprintf(installed, sizeof(installed), "sdmc:/atmosphere/contents/%016llX/main",
+                 (unsigned long long)(program_id & ~0xFull));
+        char folder[64];
+        snprintf(folder, sizeof(folder), "sdmc:/atmosphere/contents/%016llX", (unsigned long long)(program_id & ~0xFull));
+        mkdir(folder, 0777);
+        nro = installed;
+    } else if (__system_argc >= 1 && __system_argv && __system_argv[0]) {
+        nro = __system_argv[0];
+    } else {
         return;
     }
-    const char* nro = __system_argv[0];
     const char* slash = strrchr(nro, '/');
     if (!slash) {
         return;

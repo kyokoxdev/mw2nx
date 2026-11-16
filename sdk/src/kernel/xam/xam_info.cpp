@@ -28,6 +28,13 @@
 #include <fmt/format.h>
 #include <fmt/xchar.h>
 
+#if defined(__SWITCH__)
+// Defined by the app when it can start another executable (XamLoaderLaunchTitle). 1: started (the process ends soon);
+// 0: not handled; negative: the Horizon result that failed, negated.
+extern "C" int RexSwitchLaunchTitle(const char* guest_path, const uint8_t* launch_data, size_t launch_data_size)
+    __attribute__((weak));
+#endif
+
 namespace rex {
 namespace kernel {
 namespace xam {
@@ -293,6 +300,21 @@ void XamLoaderLaunchTitle_entry(mapped_string raw_name_ptr, u32 flags) {
   }
   REXKRNL_INFO("XamLoaderLaunchTitle('{}', flags {:08X}): ending the title; launch data ({} bytes): {}",
                loader_data.launch_path, uint32_t(flags), loader_data.launch_data.size(), data);
+
+#if defined(__SWITCH__)
+  // The app may start the other executable itself (mw2nx restarts the program into it, mw2mp/src/mw2mp_launch.cpp).
+  // Optional: weak, so an app without it keeps ending the title as below.
+  if (raw_name_ptr && RexSwitchLaunchTitle) {
+    const int rc = RexSwitchLaunchTitle(loader_data.launch_path.c_str(), loader_data.launch_data.data(),
+                                        loader_data.launch_data_present ? loader_data.launch_data.size() : 0);
+    if (rc > 0) {
+      REXKRNL_INFO("XamLoaderLaunchTitle: the program restarts into '{}'", loader_data.launch_path);
+    } else if (rc < 0) {
+      REXKRNL_ERROR("XamLoaderLaunchTitle: restart into '{}' failed ({:08X})", loader_data.launch_path,
+                    uint32_t(-rc));
+    }
+  }
+#endif
 
   // This function does not return.
   REX_KERNEL_STATE()->TerminateTitle();

@@ -34,6 +34,8 @@
 #include <rex/system/kernel_state.h>
 #include <rex/system/xmemory.h>
 
+#include "mw2mp_launch.h"
+
 REXCVAR_DEFINE_STRING(mw2mp_mod, "bot_warfare", "MW2",
                       "Script mod: the folder name under mods/ beside the NRO (sdmc:/switch/mw2mp/mods/<name>), whose "
                       "GSC scripts replace or add to the game's. Bot Warfare ships in mods/ (mw2mp/mods). \"\" = none")
@@ -153,7 +155,8 @@ const std::filesystem::path& ModDir() {
     }
     std::error_code ec;
     auto root = rex::filesystem::GetExecutableFolder();
-    if (!std::filesystem::is_directory(root / "game", ec)) root = "/switch/mw2mp";
+    // The installed program never reads /switch (its folder is the executable folder, mw2mp_launch.h).
+    if (!mw2mp::IsInstalledProgram() && !std::filesystem::is_directory(root / "game", ec)) root = "/switch/mw2mp";
     auto path = root / "mods" / name;
     if (!std::filesystem::is_directory(path, ec)) {
       REXLOG_ERROR("[gsc] mod \"{}\": no folder {}", name, path.string());
