@@ -4,7 +4,7 @@
 
 <p align="center">
   <b>Call of Duty: Modern Warfare 2 for the Nintendo Switch, recompiled from the Xbox 360.</b><br>
-  Multiplayer and Campaign in one installable game, running as native code.
+  The full game on Switch: Campaign, Special Ops and Multiplayer, compiled to run natively.
 </p>
 
 <p align="center">
@@ -22,9 +22,6 @@
 mw2nx is a static recompilation of Modern Warfare 2 (Xbox 360, version 1.0.557 with Title Update 6). The game's
 PowerPC code is translated ahead of time into C++ and compiled for the Switch's ARM cores, so nothing is emulated while
 you play, and a Vulkan renderer of its own draws the game through Mesa's NVK driver.
-
-Version 1.0.0 is an installable NSP: one game on the HOME menu that holds both the Campaign and Multiplayer and
-switches between them from the game's own menus.
 
 > [!IMPORTANT]
 > **No game data is included, and none ever will be.** You need your own Xbox 360 disc of Modern Warfare 2 as an ISO.
@@ -45,8 +42,9 @@ switches between them from the game's own menus.
 |---|---|
 | **Campaign** | The whole single-player game, played through on hardware |
 | **Multiplayer** | Private matches and System Link, with bots from the bundled Bot Warfare mod |
+| **Special Ops** | The co-op and solo missions from the game's own menu |
 
-Both live in one application. The Campaign menu's Multiplayer entry (and Multiplayer's way back) starts the other
+All modes live in one application. The Campaign menu's Multiplayer entry (and Multiplayer's way back) starts the other
 program, as the Xbox 360's executables did.
 
 ### Graphics and performance
