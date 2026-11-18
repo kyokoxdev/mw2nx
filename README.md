@@ -4,12 +4,12 @@
 
 <p align="center">
   <b>Call of Duty: Modern Warfare 2 for the Nintendo Switch, recompiled from the Xbox 360.</b><br>
-  Multiplayer and Campaign, running as native code.
+  Multiplayer and Campaign in one installable game, running as native code.
 </p>
 
 <p align="center">
   <img src="https://img.shields.io/badge/Nintendo%20Switch-E60012?style=for-the-badge&logo=nintendoswitch&logoColor=white" alt="Nintendo Switch">
-  <img src="https://img.shields.io/badge/status-in%20development-orange?style=for-the-badge" alt="Status: in development">
+  <img src="https://img.shields.io/badge/release-1.0.0-brightgreen?style=for-the-badge" alt="Release: 1.0.0">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-GPL--3.0-blue?style=for-the-badge" alt="License: GPL-3.0"></a>
 </p>
 
@@ -23,20 +23,19 @@ mw2nx is a static recompilation of Modern Warfare 2 (Xbox 360, version 1.0.557 w
 PowerPC code is translated ahead of time into C++ and compiled for the Switch's ARM cores, so nothing is emulated while
 you play, and a Vulkan renderer of its own draws the game through Mesa's NVK driver.
 
+Version 1.0.0 is an installable NSP: one game on the HOME menu that holds both the Campaign and Multiplayer and
+switches between them from the game's own menus.
+
 > [!IMPORTANT]
 > **No game data is included, and none ever will be.** You need your own Xbox 360 disc of Modern Warfare 2 as an ISO.
 > Every step that reads your files writes into folders the repository ignores; what it produces is yours alone and must
 > not be shared.
 
-> [!NOTE]
-> **In development, not released.** Multiplayer and the Campaign both run on hardware (the Campaign has been played
-> through to Gulag). Performance, memory headroom and load hitches are the open work, and installable packaging comes
-> last. Progress and plan: [docs/MW2.md](docs/MW2.md).
-
 ## Contents
 
-[Features](#features) · [Installing](#installing) · [Script mods](#script-mods) · [How it works](#how-it-works) ·
-[Warnings](#warnings) · [Credits](#credits) · [License](#license) · [Technical documentation](#technical-documentation)
+[Features](#features) · [Installing](#installing) · [Playing](#playing) · [Script mods](#script-mods) ·
+[How it works](#how-it-works) · [Warnings](#warnings) · [Credits](#credits) · [License](#license) ·
+[Technical documentation](#technical-documentation)
 
 ## Features
 
@@ -44,18 +43,24 @@ you play, and a Vulkan renderer of its own draws the game through Mesa's NVK dri
 
 | Mode | What you get |
 |---|---|
+| **Campaign** | The whole single-player game, played through on hardware |
 | **Multiplayer** | Private matches and System Link, with bots from the bundled Bot Warfare mod |
-| **Campaign** | Its own program (`mw2sp.nro`) that shares the game files with Multiplayer; played through to Gulag |
+
+Both live in one application. The Campaign menu's Multiplayer entry (and Multiplayer's way back) starts the other
+program, as the Xbox 360's executables did.
 
 ### Graphics and performance
 
 - **Presets** `high`, `medium`, `low` and `very_low` (the default), which set the game's own quality settings, a draw
-  distance and the detail of distant models. Each can be overridden in the settings file.
-- **Native code**: about 19,800 game functions compiled to ARM64 with `-O3`, direct calls between them, and hot game
-  code (memory copies, culling) replaced by hand-written native code.
-- **Pipeline cache**: each level compiles its Vulkan pipelines the first time it is played and starts warm after that.
-- **Adaptive frame pacing** in the Campaign, and FXAA on by default there.
-- **Optional fourth CPU core**, from a forwarder with four cores enabled (see [Warnings](#warnings)).
+  distance, the detail of distant models and, on `very_low`, the hiding of small far-away props. Each can be overridden
+  in the settings file.
+- **Native code**: about 19,800 game functions compiled to ARM64 with LTO and PGO, direct calls between them, and hot
+  game code (memory copies, culling, the Campaign's job-queue scan) replaced by hand-written native code.
+- **Pipeline cache**: each level compiles its Vulkan pipelines the first time it is played and starts warm after that;
+  lists for the Campaign's levels ship with the port.
+- **Scene resolution** 75 % in the Campaign and 70 % in Multiplayer by default, scaled to 1280x720; `mw2mp_scene_scale`
+  changes it. FXAA is on by default in the Campaign.
+- **All four CPU cores**, because the installed game is an application with the console's full memory.
 
 ### Mods
 
@@ -70,45 +75,60 @@ Settings and their file: [docs/features.md](docs/features.md).
 
 - Your Xbox 360 disc of Modern Warfare 2, version 1.0.557 (USA/Europe), as an ISO.
 - **Title Update 6.** The setup tool downloads it after it has checked your ISO.
-- A Switch that runs homebrew (custom firmware such as Atmosphère).
-- A Linux or WSL2 PC to build on. There is no prebuilt release yet.
+- A Switch that runs homebrew (custom firmware such as Atmosphère) and a way to install an NSP.
+- A Linux or WSL2 PC. The NSP holds no game data, so the files and the shader libraries are made from your own disc on
+  this PC. Building them takes the tools in [docs/building.md](docs/building.md).
 
-Steps, from the repository root (every tool and build option: [docs/building.md](docs/building.md)):
+Steps, from the repository root:
 
-1. Put your ISO in `iso/` and run `python tools/install/tu6_setup.py`. It checks the disc, fetches Title Update 6 and
-   fills `work/load_tu6/`.
-2. Build the code generator with `tools/build_host_linux.sh`, then generate the game's C++ with
-   `tools/codegen_mw2mp.sh` and `tools/codegen_mw2sp.sh`.
-3. Build the Switch programs with `mw2mp/build_switch.sh` and `mw2sp/build_switch.sh`.
-4. Run `python tools/stage_sd_mw2mp.py`: it lays out the finished folders from your ISO and Title Update 6.
-5. Build the shader libraries from your own disc with `tools/mw2shaders/build_mw2mp_shaders.sh <work folder>`
-   (`MW2_SP=1` for the Campaign's); they land next to the NROs in the staged folders.
-6. Copy the staged `switch` folder to the root of the SD card and start `mw2mp` from the Homebrew Menu opened through a game
-   (hold R while starting one), so it gets the console's full memory.
+1. **Install the NSP** (`mw2nx-1.0.0-[01F2D6C0A9E40000].nsp` from the release) on the console.
+2. **Set up the game files.** Put your ISO in `iso/` and run `python tools/install/tu6_setup.py`. It checks the disc,
+   fetches Title Update 6 and fills `work/load_tu6/`.
+3. **Stage the SD card.** `python tools/stage_sd_mw2mp.py` extracts your disc and the update into a `switch/mw2mp/`
+   folder.
+4. **Build the shader libraries** from your own disc with `tools/mw2shaders/build_mw2mp_shaders.sh <work folder>`
+   (`MW2_SP=1` for the Campaign's). They are derived from the game and never shared.
+5. **Copy to the console.** Put the contents of the staged `switch/mw2mp/` folder (`game/`, `update/`, `mods/`,
+   `pipelines/`) and both shader libraries into the game's own folder on the SD card:
+   `sdmc:/atmosphere/contents/01F2D6C0A9E40000/`.
+6. Start **Call of Duty: Modern Warfare 2** from the HOME menu. On its first start the game makes that folder and, while
+   files are missing, lists what to copy where; it checks again every few seconds and starts once everything is there.
 
-The finished folders on the SD card:
+The game's folder on the SD card:
 
 ```text
-sdmc:/switch/mw2mp/
-├── mw2mp.nro                  Multiplayer
-├── mw2mp.toml                 its settings (optional, you write it)
-├── mw2mp_shaders.spvpack      Multiplayer shaders, and its index
-├── mw2mp_shaders.spvidx
-├── game/                      your disc files
-├── update/                    Title Update 6
-└── mods/bot_warfare/          the bundled script mod
-
-sdmc:/switch/mw2sp/
-├── mw2sp.nro                  Campaign
-├── mw2sp.toml                 its settings (optional)
-└── mw2sp_shaders.spvpack      Campaign shaders, and its index
+sdmc:/atmosphere/contents/01F2D6C0A9E40000/
+├── game/                      your disc files and Title Update 6's .xexp files
+├── update/                    the rest of Title Update 6
+├── mw2mp_shaders.spvpack      Multiplayer shaders, and its index (.spvidx)
+├── mw2sp_shaders.spvpack      Campaign shaders, and its index (.spvidx)
+├── pipelines/                 per-level pipeline lists
+├── mods/bot_warfare/          the bundled script mod
+├── mw2mp.toml, mw2sp.toml     settings (optional, you write them)
+├── cache/                     pipeline caches, made by the game
+└── logs/                      one numbered log per run
 ```
 
-The Campaign reads `game/`, `update/` and `user/` from the `mw2mp` folder.
+Profile, settings and saves are the console's own save data for the game, so they follow the Switch user and show up in
+the save manager. The installed game never reads `sdmc:/switch/`.
+
+**Building the NSP yourself** (and running the programs as plain NROs from the Homebrew Menu for development) is in
+[docs/building.md](docs/building.md).
+
+## Playing
+
+- **Clocks.** The game runs best at CPU 1785 / GPU 614 / memory 2133 MHz. That is fast without running the console hot.
+  If you use sys-clk, add a profile for **both** program IDs, `01F2D6C0A9E40000` (Campaign) and `01F2D6C0A9E40001`
+  (Multiplayer); without one Multiplayer runs at the stock docked clocks and loses about half its frame rate.
+- **Switching modes** takes the same time as starting a game: the other program loads when you choose it.
+- **First map load.** A level compiles its pipelines the first time you visit it; expect a longer load and some hitches
+  then. The pipeline cache makes every later visit faster.
+- **Multiplayer.** Start a private match and press D-pad Down for Bot Warfare's menu. The Switch user's nickname is the
+  player's name (`mw2mp_user_name` overrides it).
 
 ## Script mods
 
-Multiplayer loads GSC mods made for CoD Xe. Put a mod's folder in `sdmc:/switch/mw2mp/mods/`, name it in `mw2mp.toml`
+Multiplayer loads GSC mods made for CoD Xe. Put a mod's folder in the game's `mods/` folder, name it in `mw2mp.toml`
 with `mw2mp_mod = "<name>"`, and start Multiplayer. `mw2mp_mod = ""` plays without mods. Folder layouts, the functions
 added for mods and Bot Warfare's menu: [docs/script-mods.md](docs/script-mods.md).
 
@@ -123,11 +143,13 @@ frame on the Switch's GPU. The game's shaders are translated to SPIR-V when you 
 
 ## Warnings
 
-- **Memory.** One heap backs the GPU's memory, the stacks and the caches, so running out of it can crash the game.
-  Start from a game-opened Homebrew Menu, not the applet one.
-- **Four CPU cores.** The fourth core belongs to the system, so in theory using it can make the console unstable. It is
-  off by default; a forwarder with four cores enabled turns it on.
+- **Memory.** One heap backs the GPU's memory, the stacks and the caches, so running out of it can crash the game. The
+  installed game gets the console's full memory; do not run it with other homebrew resident in the background.
+- **Crashes.** Atmosphère writes a crash report to `sdmc:/atmosphere/crash_reports/`. Attach it and the newest file in
+  `logs/` to a bug report.
 - **Sleep.** Leaving the game in sleep mode for a long time might cause problems. Close it first if you will be away.
+- **Known issues.** Load and checkpoint hitches remain in the Campaign's heaviest levels, and black textures can show on
+  the first map load of a session. See [docs/MW2.md](docs/MW2.md#known-issues).
 
 ## Credits
 

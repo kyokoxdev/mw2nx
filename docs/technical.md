@@ -77,9 +77,17 @@ The ReXGlue SDK (`sdk/`) carries Xenia's implementation of the 360's kernel and 
   stacks and the caches, so memory left is watched.
 - **Threads**: each guest thread is a Horizon thread. libnx cannot detach a `std::thread`, so helper threads are joined
   or leaked.
-- **Cores**: three by default; the fourth from a forwarder with four cores enabled (`mw2mp_cpu_cores`).
+- **Cores**: four in the installed game (its NPDM allows core 3); an NRO has three unless a forwarder with four cores
+  enabled starts it (`mw2mp_cpu_cores`). The audio mixer thread, which MW2 leaves unnamed, is found by its guest start
+  address (`switch_audio_guest_threads = "0x..."`) and runs at the audio priority.
+- **Two programs, one application**: the installed game is a multi-program NSP. `XamLoaderLaunchTitle`, which the SDK
+  lists but does not implement, is `appletExecuteProgram` with the Switch user and the launch data, so the Campaign and
+  Multiplayer switch from the game's own menus and share one save. The installed NSO fetches a real own-process handle
+  over self-IPC, since the pseudo-handle fails `svcMapProcess*`.
 - **Audio**: the game mixes on its own threads; the runtime provides XAudio and the XMA decoder, out through `audout`.
-- **Files**: `game/`, `update/` and `user/`, falling back to `sdmc:/switch/mw2mp`. Loading screens and menus read from
+- **Files**: installed, `sdmc:/atmosphere/contents/01F2D6C0A9E40000/` (`game/`, `update/`, shader libraries, caches),
+  with the profile and saves in the application's save data; as an NRO, `game/`, `update/` and `user/` beside it,
+  falling back to `sdmc:/switch/mw2mp`. Loading screens and menus read from
   the SD card, so reads that block a render thread are moved off it.
 - **Sockets**: an empty socket answers `EWOULDBLOCK` locally until a watcher thread blocked in `poll()` sees data, so
   the game's server thread does not spend its time inside the socket service.
@@ -117,14 +125,22 @@ same way.
 | `-O3`, direct calls | Every call between game functions can inline |
 | LTO | Builds in 15 GB of RAM; the NRO is 45.5 MB |
 | Graphics presets with draw distance and model detail | Cuts draws on every preset below `high` |
-| Adaptive frame pacing (Campaign) | Holds 30 where 60 cannot be kept |
+| Native job-queue scan (Campaign) | Drops the recompiled code's atomic write-back of the queue hint on every queue it visits; Worker threads had spent about half their busy time there |
+| Small-prop cull on `very_low` | Hides small static props past their last detail level, as PC MW2 does; about 1 % of a heavy level's draws at reach 64, more at 128 |
+| Lighting volume by writer hook | The renderer takes the pages the volume's one writer marked instead of hashing the volume every update (XXH3 was 2-4 % of the ring thread) |
+| Vertex cache in 64 KB chunks | Shifting vertex ranges in a big buffer share one pool copy instead of thrashing |
+| Scene at 75 % (Campaign) and 70 % (Multiplayer) | Cuts GPU time on the 1024x600 scene pass |
+| Clocks 1785 / 614 / 2133 | Ring thread about twice as fast per draw as at 1224 / 614 / 1666, SoC about 45 C |
 
 Tried and not adopted: GPU skinning and CPU NEON skinning (skinning is negligible on MW2's CPU), and Direct3D-level
 renderer hooks (about +2 % at best).
 
-In progress: PGO training (`MW2_PGO`), the bounds-tree frustum cull in native code, the worker-command dispatcher's
-polling, texture write stamps and register locals for the hottest functions. The run-by-run detail is in
-[MW2.md](MW2.md).
+**What limits it.** In the Campaign's heaviest levels (invasion: 12-13.6k draws a frame) the renderer's single ring
+thread is the limit at about 2.5 us a draw, not the GPU, which has slack at 614 MHz. Cutting draws is what pays; a 30
+lock does not (it is off by default).
+
+Still open: the worker-command dispatcher's polling, register locals for the hottest functions, and the load and
+checkpoint hitches in the Campaign. The run-by-run detail is in [MW2.md](MW2.md).
 
 ## Testing and measuring
 
@@ -133,4 +149,8 @@ polling, texture write stamps and register locals for the hottest functions. The
   `tools/profile_sym.py`.
 - **Logs**: each run writes a numbered console log; the renderer reports draws, pipelines compiled and skipped draws
   every ten seconds.
-- **Crashes**: Atmosphère's crash report is matched to the ELF by build ID.
+- **Crashes**: Atmosphère's crash report is matched to the ELF by build ID (module ID), so a stale program is spotted.
+- **Clocks**: the profile log prints the real CPU, GPU and memory clocks with the SoC temperature every ten seconds;
+  check it before blaming code for a slow run (a missing sys-clk profile for Multiplayer's program ID once looked like a
+  performance bug).
+- **Store watch**: `MW2_WATCH_STORES=1` builds a diagnostic that names the writers of a guest range.

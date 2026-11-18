@@ -7,7 +7,11 @@ The build host is **Linux or WSL2** (no sudo needed). The Switch is the only tar
 RAM (WSL2 with extra swap works); each generated file takes 2-3 GB to compile and the LTO link about 2 GB more.
 
 Steps 1-5 build Multiplayer (`default_mp.xex`); the Campaign (`default.xex`) repeats them with its own scripts, as
-[below](#campaign).
+[below](#campaign). The release is the NSP of [the last section](#the-installable-nsp); the NROs from steps 5 and 7 are
+the development layout, run from the Homebrew Menu.
+
+Players who only install the released NSP need steps 1, 6 and 7 (game files, shader libraries, staging); the rest builds
+the program itself.
 
 ## What you need
 
@@ -71,7 +75,7 @@ build script.
 mw2mp/build_switch.sh
 ```
 
-Writes `mw2mp/out/switch/mw2mp.nro`. Options, as environment variables:
+Writes `mw2mp/out/switch/mw2mp.nro` and the stripped ELF the NSP is made from. Options, as environment variables:
 
 | Variable | What it does |
 |---|---|
@@ -80,6 +84,9 @@ Writes `mw2mp/out/switch/mw2mp.nro`. Options, as environment variables:
 | `MW2_PGO=generate` | A training build in `out/switch-pgo`. Run it with `mw2mp_benchmark = true` in a private match; it writes the profile to `sdmc:/switch/mw2mp/pgo` |
 | `MW2_PGO=use` | The final build with that profile (`MW2_PGO_DIR`, default `data/pgo`). Retrain whenever the generated code or flags change; use together with `MW2_LTO=1` |
 | `MW2_GUEST_MEMORY_PLAIN=0` | Volatile guest loads and stores instead of plain ones |
+| `MW2_WATCH_STORES=1` | A diagnostic build that watches stores into a guest range, to find a page's writers (Campaign build too) |
+
+A release build is `MW2_PGO=use MW2_LTO=1`; a plain run gives the smaller `-O3` program without the profile.
 
 ## Step 6: build the shader library
 
@@ -112,3 +119,30 @@ MW2_SP=1 tools/mw2shaders/build_mw2mp_shaders.sh <work folder>
 The Campaign builds the same sources as Multiplayer with `mw2sp/src/mw2sp_game_remap.h` forced in, which names the
 campaign's counterpart of each Multiplayer address. Its program lives in `sdmc:/switch/mw2sp/` (the Homebrew Menu shows
 one NRO per folder) and reads the game files from `sdmc:/switch/mw2mp/`.
+
+## The installable NSP
+
+The release is one application, title ID `01F2D6C0A9E40000`, built as a retail multi-program game: program 0 is the
+Campaign (`01F2D6C0A9E40000`), program 1 is Multiplayer (`01F2D6C0A9E40001`), each with its own `main` (an NSO) and
+NPDM (`tools/nsp/mw2nx.npdm.json`: application type 1, four cores, 39-bit address space). The game menus switch between
+them with `appletExecuteProgram`, passing the Switch user along so both programs share one save.
+
+```bash
+# the last LTO+PGO builds of both programs, then:
+python3 -I tools/make_nsp.py --version 1.0.0
+```
+
+| Needs | Where |
+|---|---|
+| `elf2nso`, `npdmtool`, `nacptool` | devkitPro (`DEVKITPRO`, default `~/devkitpro`) |
+| `hacbrewpack` with `--extraprogram` | v3.05 plus `patches/hacbrewpack-extraprogram.patch`; `--hacbrewpack` points at it (`make clean` after header changes) |
+| Your console's keys | `--keys` (default `docs/prod.keys`): the NCAs are encrypted with the builder's own keys |
+| An icon | `--icon` (default `docs/images/icon.jpg`) |
+
+The output is `<data>/nsp/mw2nx-1.0.0-[01F2D6C0A9E40000].nsp`. The keys and the icon are local files and are never
+committed (both paths are git-ignored); the NSP contains no game data.
+
+**Installed, the program uses its own folder**, `sdmc:/atmosphere/contents/01F2D6C0A9E40000/`, for `game/`, `update/`,
+the shader libraries, `pipelines/`, caches, settings and logs, and never reads `sdmc:/switch/`. The profile and saves
+are the console's save data of the application (32 MB with a 16 MB journal). `application_type` in the NPDM must stay
+`1`: as an applet the process got only about 394 MB.

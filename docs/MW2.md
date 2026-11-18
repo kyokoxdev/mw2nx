@@ -7,6 +7,9 @@ Building: [building.md](building.md).
 
 The Switch is the only target: no desktop builds.
 
+**Release 1.0.0** is out as an installable NSP (application `01F2D6C0A9E40000`: the Campaign is program 0, Multiplayer
+program 1). Every milestone below is done; what is left is under [Known issues](#known-issues) and goes into 1.0.x.
+
 ## Inputs (yours, never committed)
 
 - Xbox 360 disc ISO, version 1.0.557 (USA/Europe).
@@ -33,22 +36,42 @@ The Switch is the only target: no desktop builds.
 4. **Native renderer**: PM4 to Vulkan with a build-time shader pack from the game's fastfiles.
 5. **Perf**: LTO, PGO, the fourth core, direct calls, locals and native hot paths.
 6. **Campaign** (`default.xex`).
-7. **Packaging (installable NSP)**, only once the whole game is done. The program ships as an NSP with no game data. On
-   first start it creates its folders on the SD card (`game/`, `update/`, `user/`, each with a short "put X here" note)
-   and, while files are missing, shows a screen listing what to copy where. Players stage from their own disc and TU6 on
-   the PC (`tools/install/tu6_setup.py`, `tools/stage_sd_mw2mp.py`) and paste onto the SD card. Open points: title ID,
-   NPDM (`npdmtool`) and NSP build (`hacbrewpack`, which needs the builder's own console keys). A full application gets
-   more memory than an NRO run as an applet, and an NPDM with `highest_cpu_id: 3` gives the fourth core without a
-   forwarder.
-   - One app and one title ID for both modes, asking Multiplayer or Campaign at start (today two NROs, each in its own
-     `sdmc:/switch/` folder because the Homebrew Menu shows one NRO per folder). Needs both recompiled images in one
-     program.
-   - Mode switch from inside the game: the campaign menu's Multiplayer (and back) launches the other executable through
-     `XamLoaderLaunchTitle`, which the SDK lists but does not implement. Candidate: the app restarts itself in the other
-     mode (`appletRestartProgram` with the mode as the launch parameter).
-   - Paths: game data already falls back to `sdmc:/switch/mw2mp` (`mw2mp/src/mw2mp_app.h`); the shader packs are still
-     read from the executable's folder and must move to that fixed folder. They are built from the disc's zones, so they
-     stay on the SD card, staged by the player, never in the NSP.
+7. **Packaging (installable NSP)**, done: one application, two programs (see below).
+
+## Release 1.0.0
+
+`python3 -I tools/make_nsp.py --version 1.0.0` packs the last LTO+PGO ELFs of both programs. No game data is in it.
+
+- **One application, one title ID** `01F2D6C0A9E40000`: program 0 the Campaign (`mw2sp`), program 1 Multiplayer
+  (`mw2mp`, `01F2D6C0A9E40001`), each an NSO with its own NPDM (application type 1, four cores, 39-bit). `hacbrewpack`
+  v3.05 with `patches/hacbrewpack-extraprogram.patch` builds the multi-program NCAs, encrypted with the builder's own
+  keys, which are never committed.
+- **Mode switch** from the game's menus: `XamLoaderLaunchTitle` is `appletExecuteProgram` with the Switch user and the
+  launch data (`mw2mp/src/mw2mp_launch.cpp`), so both programs share one save.
+- **First start** (`mw2mp/src/mw2mp_first_start.cpp`): makes `game/` and `update/` in the game's folder, each with a "put
+  X here" note, and shows a screen that lists the missing files until they are copied.
+- **Paths**: the installed game uses only `sdmc:/atmosphere/contents/01F2D6C0A9E40000/` (game data, update, shader
+  libraries, pipelines, caches, settings, logs) and never `sdmc:/switch/`. The shader libraries are built from the
+  player's disc and stay on the SD card; per-level pipeline key lists (no game bytes) ship with the port.
+- **Memory**: `__nx_heap_size = 0`, so the NSO gets all memory like a game started through `hbloader`; the profile shows
+  about 3,189 MB. `application_type` must be 1: as an applet the process had 394 MB and the 31 MB image allocation failed.
+- **Saves**: console save data of the application (32 MB, 16 MB journal); the pipeline caches stay on the SD card.
+- **Recommended clocks** (sys-clk, profile for both program IDs): CPU 1785 / GPU 614 / memory 2133. SoC plateaus near
+  45 C after 30 minutes; the ring thread is twice as fast per draw as at 1224 / 614 / 1666. Raise the GPU to 768 only
+  where a log window shows the GPU's time per swap above the frame time (the invasion level).
+
+## Known issues
+
+- **Campaign performance.** The heaviest levels (invasion: 12-13.6k draws a frame) are limited by the renderer's ring
+  thread at about 2.5 us a draw, not the GPU; frame times run 16-50 ms. Cutting draws is the lever; a 30 lock is not
+  (off by default).
+- **Hitches** on level loads and checkpoints in the Campaign, and a longer first load of every level while its pipelines
+  compile.
+- **Black textures** can show on the first map load of a session in Multiplayer, probably textures rather than shaders
+  or pipelines.
+- **Memory.** One heap backs GPU memory, stacks and caches; the Gulag load ran out in an early run. Watch the heap left
+  in the profile log.
+- **Texture write stamps** for the texture shortcuts are not finished (re-hash and re-upload of unchanged pages).
 
 ## Status
 
@@ -83,11 +106,11 @@ The Switch is the only target: no desktop builds.
     `cl_ingame`; `mw2mp_native_load_hold_s` (60) keeps the loading image up until the first complete frame.
   - Open: black textures still show on the first map load of a session, probably textures rather than shaders or
     pipelines. The 50-second freeze on the Xenos path needs stack samples. Texture write stamps (below).
-- [~] 5 Perf. Order = payoff per effort; each step measured with `mw2mp_benchmark` before the next.
+- [x] 5 Perf (1.0.0). Order = payoff per effort; each step measured with `mw2mp_benchmark` before the next.
   - [x] `-O3`, the fourth core.
-  - [x] LTO (`MW2_LTO=1`): `mw2mp.nro` 45.5 MB. Not yet measured on hardware.
-  - [~] PGO: `MW2_PGO=generate` dumps gcov at the end of the `mw2mp_benchmark` window; `MW2_PGO=use MW2_LTO=1` is the
-    final build. Train only after the codegen-level steps: a profile goes stale whenever the generated code changes.
+  - [x] LTO (`MW2_LTO=1`): `mw2mp.nro` 45.5 MB.
+  - [x] PGO: `MW2_PGO=generate` dumps gcov at the end of the `mw2mp_benchmark` window; `MW2_PGO=use MW2_LTO=1` is the
+    release build. A profile goes stale whenever the generated code changes: retrain, then build.
   - [x] Direct calls (`tools/direct_calls.py`, run by `tools/codegen_mw2mp.sh` and `tools/codegen_mw2sp.sh`, checked by
     both `build_switch.sh`): 54k calls to unhooked functions are no longer opaque.
   - [ ] Locals (`tools/localize.py`): more guest registers as C++ locals in the hottest functions, from a list made from
@@ -95,8 +118,8 @@ The Switch is the only target: no desktop builds.
   - [~] Profiles on hardware (`tools/profile_sym.py`, `tools/pc_profile_report.py`): stack samples of every game
     thread, symbolised to `sub_X`. A campaign profile found the Mesa pipeline-cache stalls; a match profile for
     multiplayer is still to do.
-  - [~] Native hot paths: CPU skinning was tried and dropped (the NEON kernels ran slower than the game's and skinning is
-    in no thread's top 25 samples). In progress: the bounds-tree frustum cull (`mw2mp_native_cull.cpp`), checked against
+  - [x] Native hot paths: CPU skinning was tried and dropped (the NEON kernels ran slower than the game's and skinning is
+    in no thread's top 25 samples). Shipped: the bounds-tree frustum cull (`mw2mp_native_cull.cpp`), checked against
     the game's at run time. Candidates from a multiplayer profile: the VMX bounds and plane culling loop (`sub_8240DDA0`
     in multiplayer, `sub_823D1598` in the campaign, 3.5 % on Main and Backend) and the worker-command dispatcher's
     polling (`sub_823F0870`, 3.3 % on Worker2; the campaign's three Worker threads took about 60 % in run mw2sp_004).
@@ -104,7 +127,7 @@ The Switch is the only target: no desktop builds.
     shortcuts (re-hash and re-upload skipped for unchanged pages) can come on.
   - [-] GPU skinning: dropped, skinning is negligible on MW2's CPU.
   - [-] Direct3D-level hooks: dropped (2026-11-12). A Direct3D-level renderer gained about 2 % at best.
-- [~] 6 Campaign (`mw2sp/`, TU6 `default.xex`): the same program as mw2mp (native renderer, native CRT, app, settings),
+- [x] 6 Campaign (1.0.0) (`mw2sp/`, TU6 `default.xex`): the same program as mw2mp (native renderer, native CRT, app, settings),
   in `sdmc:/switch/mw2sp/` with its own shader library, using `sdmc:/switch/mw2mp`'s `game/`, `update/` and `user/`.
   Runs on hardware (run mw2sp_025 played through Oilrig to the start of Gulag). Open: load and checkpoint hitches, heap
   headroom (out of memory at the Gulag load in run 022).
@@ -131,9 +154,28 @@ The Switch is the only target: no desktop builds.
   - Draw distance: `r_zfar` at 10000, 6000 and 4000 units for `medium`, `low` and `very_low`, the level's own at `high`;
     `mw2mp_draw_distance` overrides it.
   - Model detail: `XModelGetLodForDist` is `sub_82300B50` (campaign) and `sub_8232E1C0` (multiplayer). The presets hook
-    it: the ramp distance times 1, 1.5, 2 and 4 from `high` to `very_low` (`mw2mp_model_detail` overrides), never better
+    it: the ramp distance times 1, 1.25, 1.5 and 2.5 from `high` to `very_low` (`mw2mp_model_detail` overrides), never better
     than the game's pick, never hiding a model the game draws, long models measured from their nearest point.
   - Run mw2sp_006 (LTO, preset `low`, three cores, GPU 768 MHz): playable, frame times 16-50 ms inside every 20 s
     window. Light stretches hold 60; the heaviest run 18-25 fps GPU-bound (7-8k draws, 0.7-1.3 M triangles in the
-    1024x600 scene pass). Added adaptive pacing (`mw2mp_frame_pacing`, campaign default `auto`).
+    1024x600 scene pass). Added adaptive pacing (`mw2mp_frame_pacing`); it is off by default since 2026-11-13: every lock let go within 2-10 s and 7-40 % of the locked frames showed for 50 ms.
   - LTO and PGO for mw2sp use the same variables (`MW2_LTO=1`, `MW2_PGO=generate|use`, profile in `data/pgo-sp`).
+  - Runs mw2sp_012 to mw2sp_020 (the release candidates), in order:
+    - Run 012 (invasion): ring thread at 100 %, 12-13.6k draws a frame at about 2.5 us each at `very_low`. `very_low` now
+      hides small static props (`mw2mp_model_cull_reach`, `XModelGetLodForDist` called from the static model loops only;
+      characters, weapons, vehicles, scene and brush models never). Vertex ranges in big buffers are cached in 64 KB
+      chunks (`mw2mp_native_vertex_cache_chunk_kb`).
+    - Run 014 (`favela_escape`): the cull at reach 64 hid about 1 % of the draws with no visible pop-in; Worker2 spent
+      49 % of its busy time in the job-queue scan `sub_823B7430`, whose stwcx. write-back of an unchanged hint is a full
+      atomic on a hot line once recompiled. It runs natively without it (`mw2mp_native_job_scan`); the multiplayer
+      twin of the model-cull callers is `sub_823ECDD8` and its three neighbours. MW2's unnamed XAudio mixer thread is
+      raised to the audio priority by its guest start address.
+    - Run 016: model detail 3 with reach 128 showed pop-in, so the `very_low` factor is 2.5 (1, 1.25, 1.5, 2.5 from
+      `high`) and the Campaign's scene scale 80 %. Run 018 (gulag, dcburning): 55-63 fps mostly; the scene scale
+      settled at 75 % (Campaign) and 70 % (Multiplayer).
+    - Run 018-020: the lighting volume's pages come from the one writer, `sub_8239F480` (multiplayer `sub_823F7DB8`),
+      hooked in `mw2mp_volume_writes.cpp`, instead of hashing the volume every update (XXH3 was 4.2 % of the ring thread
+      in the Campaign, 2.1 % in Multiplayer). The first 300 updates, then one in 64, also hash every page; a page
+      changed without a mark switches the marks off for the run. Found with the `MW2_WATCH_STORES` build.
+    - Run mw2mp_004 (installed): about 30 fps GPU-bound at the stock 1020 / 307 / 1331 clocks, because sys-clk had no
+      profile for Multiplayer's program ID.
