@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstdlib>
 #include <cstring>
 #include <mutex>
 #include <string>
@@ -59,7 +60,8 @@ REXCVAR_DEFINE_STRING(switch_audio_guest_threads, "", "Kernel",
                       "Switch: guest threads that run at the audio priority (0x2B) instead of the guest one (0x3B): "
                       "comma-separated prefixes of the names the game gives them. For a game whose sound is mixed "
                       "on a guest thread that the audio callback waits for: at 0x3B it waits for its 10 ms turn "
-                      "behind busy threads and the sound drops out whenever the CPU is full");
+                      "behind busy threads and the sound drops out whenever the CPU is full. An entry \"0x...\" "
+                      "matches the thread's guest start address instead (unnamed threads)");
 REXCVAR_DEFINE_INT32(switch_audio_core_mask, 0, "Kernel",
                      "Switch: cores the threads at the audio priority (0x2B) may run on, as a bit mask (bit 0 = core "
                      "0). 0 = their mask is not touched. Audio preempts every other thread, so this keeps it off a "
@@ -515,7 +517,7 @@ void XThread::set_last_error(uint32_t error_code) {
 
 #if REX_PLATFORM_SWITCH
 namespace {
-int SwitchPriorityFor(bool guest_thread, std::string_view name);
+int SwitchPriorityFor(bool guest_thread, std::string_view name, uint32_t start_address);
 }  // namespace
 #endif
 
@@ -531,7 +533,7 @@ void XThread::set_name(const std::string_view name) {
     // Games name their threads after creating them (SetThreadName), so a guest thread on the audio list gets its
     // priority here; one named before it starts gets it in Create().
     if (guest_thread_) {
-      const int priority = SwitchPriorityFor(true, thread_name_);
+      const int priority = SwitchPriorityFor(true, thread_name_, creation_params_.start_address);
       if (priority != REX_SWITCH_PRIO_GUEST) {
         thread_->set_priority(priority);
         REXSYS_INFO("{}: Switch priority {:#x} (switch_audio_guest_threads)", thread_name_, priority);
@@ -698,8 +700,9 @@ namespace {
 // above it (a lower number), able to preempt the spinners: audio first, then
 // the GPU and the kernel's own workers. Host threads are told apart by the
 // name their owner gives them before Create().
-// A guest thread whose name starts with one of switch_audio_guest_threads' prefixes.
-bool GuestAudioThread(std::string_view name) {
+// A guest thread whose name starts with one of switch_audio_guest_threads' prefixes, or whose guest start address is
+// one of its "0x..." entries (a game that leaves its mixer thread unnamed: MW2's XAudio thread).
+bool GuestAudioThread(std::string_view name, uint32_t start_address) {
   const std::string prefixes = REXCVAR_GET(switch_audio_guest_threads);
   size_t i = 0;
   while (i < prefixes.size()) {
@@ -715,16 +718,20 @@ bool GuestAudioThread(std::string_view name) {
     while (!prefix.empty() && prefix.back() == ' ') {
       prefix.remove_suffix(1);
     }
-    if (!prefix.empty() && name.starts_with(prefix)) {
+    if (prefix.starts_with("0x")) {
+      if (start_address && std::strtoul(std::string(prefix).c_str(), nullptr, 16) == start_address) {
+        return true;
+      }
+    } else if (!prefix.empty() && name.starts_with(prefix)) {
       return true;
     }
   }
   return false;
 }
 
-int SwitchPriorityFor(bool guest_thread, std::string_view name) {
+int SwitchPriorityFor(bool guest_thread, std::string_view name, uint32_t start_address) {
   if (guest_thread) {
-    return GuestAudioThread(name) ? REX_SWITCH_PRIO_AUDIO : REX_SWITCH_PRIO_GUEST;
+    return GuestAudioThread(name, start_address) ? REX_SWITCH_PRIO_AUDIO : REX_SWITCH_PRIO_GUEST;
   }
   // set_name() stores the name with the handle appended ("Audio Worker (F8000014)"),
   // so the prefix is compared. With an exact comparison the Audio Worker and the
@@ -851,8 +858,12 @@ X_STATUS XThread::Create() {
     rex::initialize_seh_thread();
 #if REX_PLATFORM_SWITCH
     {
-      const int priority = SwitchPriorityFor(guest_thread_, thread_name_);
+      const int priority = SwitchPriorityFor(guest_thread_, thread_name_, creation_params_.start_address);
       RexSwitchSetCurrentThreadPriority(priority);
+      if (guest_thread_ && priority == REX_SWITCH_PRIO_AUDIO) {
+        REXSYS_INFO("{} (start {:08X}): Switch priority {:#x} (switch_audio_guest_threads)", thread_name_,
+                    creation_params_.start_address, priority);
+      }
       if (const int32_t mask = REXCVAR_GET(switch_audio_core_mask);
           priority == REX_SWITCH_PRIO_AUDIO && mask > 0) {
         const bool accepted = RexSwitchSetCurrentThreadCoreMask(uint64_t(mask));

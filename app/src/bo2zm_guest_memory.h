@@ -57,3 +57,31 @@ typedef u64 __attribute__((may_alias)) bo2zm_guest_u64;
 #define REX_GUEST_BARRIER() ((void)0)
 
 #endif
+
+// mw2nx diagnostic (CMake MW2_WATCH_STORES, mw2sp/build_switch.sh MW2_WATCH_STORES=1; never in a release): every
+// guest store, and every vector access through REX_RAW_ADDR, checks whether it lands in the physical range the
+// renderer published (the model lighting volume, mw2mp_native_draws.cpp UpdateVolume); a hit records the host return
+// address and the guest lr, reported in the C3 3D textures line. Finds the volume's writer, as BO2's PC page watch
+// found sub_828E5570, so its pages can be marked instead of hashing all 2 MB on every update.
+#if defined(MW2_WATCH_STORES)
+extern "C" unsigned mw2_watch_lo;
+extern "C" unsigned mw2_watch_size;
+extern "C" void mw2_watch_hit(unsigned guest, unsigned long long guest_lr);
+static inline u32 mw2_watch_check(u32 x, unsigned long long guest_lr) {
+  if (x >= 0xA0000000u &&
+      (x & 0x1FFFFFFFu) + (x >= 0xE0000000u ? 0x1000u : 0u) - mw2_watch_lo < mw2_watch_size) [[unlikely]] {
+    mw2_watch_hit(x, guest_lr);
+  }
+  return x;
+}
+#undef REX_RAW_ADDR
+#undef REX_STORE_U8
+#undef REX_STORE_U16
+#undef REX_STORE_U32
+#undef REX_STORE_U64
+#define REX_RAW_ADDR(x) (base + mw2_watch_check((u32)(x), ctx.lr) + REX_PHYS_HOST_OFFSET(x))
+#define REX_STORE_U8(x, y) (*(volatile u8*)REX_RAW_ADDR(x) = (y))
+#define REX_STORE_U16(x, y) (*(volatile u16*)REX_RAW_ADDR(x) = __builtin_bswap16(y))
+#define REX_STORE_U32(x, y) (*(volatile u32*)REX_RAW_ADDR(x) = __builtin_bswap32(y))
+#define REX_STORE_U64(x, y) (*(volatile u64*)REX_RAW_ADDR(x) = __builtin_bswap64(y))
+#endif

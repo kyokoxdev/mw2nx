@@ -681,7 +681,7 @@ void Report(u64 elapsed_ticks, u64 tick_freq, u64 counters_last[kCounterCount],
       std::fprintf(f, "   no samples\n");
       continue;
     }
-    std::vector<u64> pcs, lrs;
+    std::vector<u64> pcs, lrs, callers;
     size_t in_svc = 0;
     for (auto it = lo; it != hi; ++it) {
       if (AfterSvc(it->pc)) {
@@ -690,6 +690,7 @@ void Report(u64 elapsed_ticks, u64 tick_freq, u64 counters_last[kCounterCount],
       }
       pcs.push_back(it->pc);
       lrs.push_back(it->lr);
+      callers.push_back(it->frames[0]);
     }
     std::fprintf(f, "   %zu samples, %.0f%% waiting in the kernel\n", n,
                  double(in_svc) * 100.0 / double(n));
@@ -710,11 +711,14 @@ void Report(u64 elapsed_ticks, u64 tick_freq, u64 counters_last[kCounterCount],
     // site, can be put on their callers. Stack sampling only. Caution: on the console the lr of the ring thread's
     // memcpy samples pointed just after system calls (a condition variable wait, an IPC), not at callers, probably
     // because the context handed back keeps an older lr; the BO2_MEMCPY_CALLERS test build counts callers instead.
+    // mw2nx: so the pair takes the first frame record's return address instead (fp chain, read with the thread
+    // paused): for a leaf without a frame of its own (memcpy, clock_gettime, malloc) that is its caller's caller at
+    // worst, and a real return address, where the lr of runs mw2sp_018 / MP put every leaf after a condvar wait.
     if (active) {
       std::vector<std::pair<u64, u64>> pairs;
       pairs.reserve(pcs.size());
       for (size_t k = 0; k < pcs.size(); ++k) {
-        pairs.emplace_back(pcs[k], lrs[k]);
+        pairs.emplace_back(pcs[k], callers[k]);
       }
       std::sort(pairs.begin(), pairs.end());
       std::vector<std::pair<std::pair<u64, u64>, u32>> counted;
@@ -729,7 +733,7 @@ void Report(u64 elapsed_ticks, u64 tick_freq, u64 counters_last[kCounterCount],
       for (size_t k = 0; k < counted.size() && k < 120u; ++k) {
         std::fprintf(f, "   %5.1f%%  pair ", double(counted[k].second) * 100.0 / double(busy));
         PrintAddr(f, counted[k].first.first);
-        std::fputs(" lr ", f);
+        std::fputs(" frame ", f);
         PrintAddr(f, counted[k].first.second);
         std::fputc('\n', f);
       }

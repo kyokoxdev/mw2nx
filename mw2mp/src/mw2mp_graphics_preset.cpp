@@ -68,13 +68,14 @@ REXCVAR_DEFINE_INT32(mw2mp_draw_distance, -1, "Graphics",
 // The calibration knob for model detail (the hook on XModelGetLodForDist below; campaign only).
 REXCVAR_DEFINE_DOUBLE(mw2mp_model_detail, 0.0, "Graphics",
                       "Campaign: how much sooner models switch to their simpler versions (their switch distances are "
-                      "divided by this). 0: the preset's (very_low 2, low 1.5, medium 1.25, high 1 = the game's own). A "
+                      "divided by this). 0: the preset's (very_low 2.5, low 1.5, medium 1.25, high 1 = the game's own). A "
                       "model the game draws is never hidden by it, only simplified. Applied at once")
     .range(0.0, 8.0);
 
-// The calibration knob for the small-prop cull (ChooseModelVersion below; campaign, very_low only).
-REXCVAR_DEFINE_DOUBLE(mw2mp_model_cull_reach, 64.0, "Graphics",
-                      "Campaign, very_low preset: static props smaller than this many units (middle to farthest "
+// The calibration knob for the small-prop cull (ChooseModelVersion below; very_low only).
+// Run mw2sp_014: at 64 it hid ~1 % of favela_escape's draws and no pop-in showed; 128 takes medium props too.
+REXCVAR_DEFINE_DOUBLE(mw2mp_model_cull_reach, 128.0, "Graphics",
+                      "very_low preset: static props smaller than this many units (middle to farthest "
                       "corner) are hidden once their distance times the model detail factor passes their simplest "
                       "version's distance, as PC MW2 does with r_lodScaleRigid. Characters, weapons, vehicles and "
                       "effects are never hidden. 0: off. Applied at once")
@@ -87,13 +88,16 @@ REXCVAR_DEFINE_DOUBLE(mw2mp_model_cull_reach, 64.0, "Graphics",
 // drew MW2 at 1024x600; BO2 at 880x720. Run mw2sp_004: 40 ms of GPU a frame at 768 MHz in the second mission, with
 // the fragment ALU as the limit.
 #if defined(MW2_CAMPAIGN) && MW2_CAMPAIGN
-#define MW2MP_SCENE_SCALE_DEFAULT 85
+// Run mw2sp_016 (85, model detail 3): pop-in showed, so the campaign trades resolution for a longer pop-in distance.
+// Run mw2mp_004: ~30 FPS, GPU-bound (28-31 ms real per Swap at 307 MHz, the ring waiting ~23 ms a frame on fences).
+// Run mw2sp_018 (80 %, gulag and dcburning): mostly 55-63 FPS; the user asked for 75 here and 70 in multiplayer.
+#define MW2MP_SCENE_SCALE_DEFAULT 75
 #else
-#define MW2MP_SCENE_SCALE_DEFAULT 100
+#define MW2MP_SCENE_SCALE_DEFAULT 70
 #endif
 REXCVAR_DEFINE_INT32(mw2mp_scene_scale, MW2MP_SCENE_SCALE_DEFAULT, "Graphics",
                      "3D scene resolution in percent of the game's own (1024x600, as the Xbox 360), per axis; the HUD "
-                     "and the output stay at 1280x720. 85 = 864x512 (72 % of the pixels), 75 = 768x448. Lower: "
+                     "and the output stay at 1280x720. 85 = 864x512 (72 % of the pixels), 80 = 816x480, 75 = 768x448, 70 = 720x424. Lower: "
                      "faster on the GPU, blurrier. 100 = the game's own. Needs a restart")
     .range(50, 100)
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
@@ -223,8 +227,10 @@ constexpr uint32_t kMipsMinus[kLevels] = {0, 0, 0, 1};
 // Model detail (MW2_XMODEL_LOD_FOR_DIST): the factor the hook scales a model's version distance by, per level. 4 at
 // very low as BO2's LOW model detail, its very low preset's (there, with draw distance, half the game's draws).
 // Run mw2sp_007: at 4 up to 37 % of the picks were simpler than the game's and the switches showed as pop-in, so
-// halved.
-constexpr float kModelFactors[kLevels] = {1.0f, 1.25f, 1.5f, 2.0f};
+// halved. Run mw2sp_014 (very_low at 2, small-prop cull at 64): the user saw no pop-in at all, while the ring thread
+// still set the frame rate, so very_low took 3. Run mw2sp_016 (3, cull reach 128): pop-in noticeable, so 2.5 (models
+// switch and small props vanish 20 % farther out), paid for with the scene at 80 %.
+constexpr float kModelFactors[kLevels] = {1.0f, 1.25f, 1.5f, 2.5f};
 std::atomic<float> g_model_factor{1.0f};
 std::atomic<uint32_t> g_model_picks{0};    // the hook's calls since the last report
 std::atomic<uint32_t> g_model_simpler{0};  // of those, a simpler version than the game's
@@ -537,11 +543,12 @@ float ModelReach(const uint8_t* model) {
 // each), ~2,000 model picks a frame, already at very_low. The campaign's static model loops call XModelGetLodForDist
 // from these return addresses: sub_823B3998 (the camera's), sub_823B3E20, sub_823B40E0 and sub_823B4350 (the same
 // loop over the 44-byte static model instances of the world, gfxWorld +88, after their own cull distance). The other
-// callers (DObj models: characters, weapons, vehicles; scene models; brush models) are never culled. Multiplayer: none.
+// callers (DObj models: characters, weapons, vehicles; scene models; brush models) are never culled. Multiplayer: the
+// same four loops, same code and spacing, in sub_823ECDD8/823ED260/823ED520/823ED790 calling sub_8232E1C0.
 #if defined(MW2_CAMPAIGN) && MW2_CAMPAIGN
 constexpr uint32_t kStaticModelCallers[] = {0x823B3BDC, 0x823B3FA8, 0x823B4220, 0x823B4588};
 #else
-constexpr uint32_t kStaticModelCallers[] = {0};
+constexpr uint32_t kStaticModelCallers[] = {0x823ED01C, 0x823ED3E8, 0x823ED660, 0x823ED9C8};
 #endif
 bool FromStaticModels(uint64_t lr) {
   for (const uint32_t caller : kStaticModelCallers) {

@@ -128,6 +128,9 @@ static const uint32_t kSpirvGlowSmooth[1] = {0};
 // Only for RexSwitchSetCurrentThreadPriorityOk (texture bind thread). That header deliberately does not
 // include switch.h (same as in mw2mp_native_render.cpp).
 #include "core/threading_switch.h"  // SDK src/ is on the include path (CMakeLists.txt)
+// libnx (declared here: switch.h is kept out of this file). romfsInit is a static inline wrapper of this one in
+// romfs_dev.h, so it has no symbol to link against.
+extern "C" uint32_t romfsMountSelf(const char* name);
 #endif
 
 /*
@@ -1126,7 +1129,10 @@ REXCVAR_DEFINE_INT32(mw2mp_native_vertex_cache_whole_kb, 256, "BO2",
 // "without room" for 175k index ranges: draws over buffers bigger than whole_kb (merged world surfaces, whose
 // [vmin, vmax] shifts as the view changes) each had their own overlapping copy. Rounded out to chunks of the buffer,
 // those ranges share a copy.
-REXCVAR_DEFINE_INT32(mw2mp_native_vertex_cache_chunk_kb, 64, "BO2",
+// Run mw2sp_014 (favela_escape, chunk 64): each pool copy grew from ~15-30 KB to ~70-90 KB, the pools switched ~8 times
+// a minute (012: ~2) with bursts of 20 in 10 s, the ring helped refill 3-20 ms a frame in those bursts (60-75 ms
+// frames), and "without room" still reached 165k: off by default.
+REXCVAR_DEFINE_INT32(mw2mp_native_vertex_cache_chunk_kb, 0, "BO2",
                      "Native renderer: with the vertex cache by writes, a draw's range in a buffer bigger than "
                      "mw2mp_native_vertex_cache_whole_kb is cached rounded out to chunks of about this many KB of the "
                      "buffer (a multiple of the stride), so ranges that shift inside the same chunks share one copy. "
@@ -1214,6 +1220,20 @@ REXCVAR_DEFINE_BOOL(mw2mp_native_input_front, true, "BO2",
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 REXCVAR_DEFINE_BOOL(mw2mp_native_input_front_ab, false, "BO2",
                     "Test, with mw2mp_benchmark_ab_s: A/B factor 1 is mw2mp_native_input_front")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_BOOL(mw2mp_native_draw_census, true, "MW2",
+                    "Diagnostic: every 10 s log the draws per VS/PS pair and how many repeat a mesh already drawn "
+                    "in the frame (C6 draw census). Costs a hash insert per draw: turn off for releases")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_BOOL(mw2mp_native_repeat_draws, true, "MW2",
+                    "Native renderer: a draw identical to the previous one except for its shader constants (the same "
+                    "mesh again, another world matrix) reuses everything the previous draw prepared and only uploads "
+                    "its constants. Self-checking (1 in 1,024 compared with the full path). false = every draw in full")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_BOOL(mw2mp_native_repeat_geometry, true, "MW2",
+                    "Native renderer, with mw2mp_native_repeat_draws: a draw identical to the previous one except for "
+                    "its constants and its index range (another piece of the same buffer) only scans and uploads its "
+                    "indices and vertices and reuses the rest. Self-checking like the repeat. false = off")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 REXCVAR_DEFINE_BOOL(mw2mp_native_prefetch_cache_lines, true, "BO2",
                     "Native renderer: prefetch the vertex and index caches' table lines and write stamps "
@@ -2102,6 +2122,64 @@ float Float(uint32_t value) {
   return std::bit_cast<float>(value);
 }
 
+// 2^e for a fetch constant's 6-bit signed exponent (-32..31), built from the bits: exactly std::ldexp(1.0f, e) for
+// that range (all normal floats). Runs mw2sp_018 / MP: ldexpf + scalbnf were ~0.6 / 1.2 % of the ring's samples
+// (WriteScale, per sampler per draw).
+constexpr float Pow2(int32_t e) {
+  return std::bit_cast<float>(uint32_t(127 + e) << 23);
+}
+static_assert([] {
+  for (int32_t e = -32; e < 32; ++e) {
+    float p = 1.0f;
+    for (int32_t i = 0; i < (e < 0 ? -e : e); ++i) {
+      p = e < 0 ? p * 0.5f : p * 2.0f;
+    }
+    if (Pow2(e) != p) {
+      return false;
+    }
+  }
+  return true;
+}());
+
+}  // namespace
+
+// The store watch of a diagnostic build (MW2_WATCH_STORES, app/src/bo2zm_guest_memory.h): the physical range the
+// generated code's stores are checked against (the model lighting volume, set in UpdateVolume; empty = nothing hits),
+// and who wrote into it: host return address (inside the generated function, sub_XXXXXXXX in the ELF) and guest lr
+// (its caller), with a count. Defined in every build; only the watch build calls mw2_watch_hit.
+extern "C" {
+unsigned mw2_watch_lo = 0;
+unsigned mw2_watch_size = 0;
+}
+namespace {
+struct WatchWriter {
+  std::atomic<uint64_t> key{0};  // host return address
+  std::atomic<uint32_t> guest_lr{0};
+  std::atomic<uint32_t> count{0};
+};
+std::array<WatchWriter, 64> g_watch_writers;
+std::atomic<uint64_t> g_watch_hits{0};
+std::atomic<uint64_t> g_watch_dropped{0};  // writers past the table's 64
+}  // namespace
+extern "C" [[gnu::noinline]] void mw2_watch_hit(unsigned, unsigned long long guest_lr) {
+  const uint64_t pc = uint64_t(reinterpret_cast<uintptr_t>(__builtin_return_address(0)));
+  g_watch_hits.fetch_add(1, std::memory_order_relaxed);
+  for (uint32_t i = 0, slot = uint32_t((pc >> 2) * 0x9E3779B1u) & 63; i < 64; ++i, slot = (slot + 1) & 63) {
+    WatchWriter& w = g_watch_writers[slot];
+    uint64_t key = w.key.load(std::memory_order_relaxed);
+    if (key == 0 && w.key.compare_exchange_strong(key, pc, std::memory_order_relaxed)) {
+      w.guest_lr.store(uint32_t(guest_lr), std::memory_order_relaxed);
+      key = pc;
+    }
+    if (key == pc) {
+      w.count.fetch_add(1, std::memory_order_relaxed);
+      return;
+    }
+  }
+  g_watch_dropped.fetch_add(1, std::memory_order_relaxed);
+}
+namespace {
+
 // Arithmetic of the Xenos mip level layout (pipeline/texture/util.cpp: GetPackedMipLevel,
 // GetPackedMipOffset and GetGuestTextureLayout).
 uint32_t Log2Ceiling(uint32_t v) {
@@ -2840,6 +2918,7 @@ struct IncrementalVolume {
                            // and the pages past 2 MB are other game data that changes every frame)
   std::vector<uint8_t> raw;  // the guest bytes as last read
   std::vector<uint64_t> hashes;  // per page with texels: XXH3 of its bytes in raw (what was untiled)
+  uint32_t stamp_epoch = 0;  // page_writes epoch of the last look by marks: a newer stamp counts as a mark
   std::vector<uint8_t> host;   // the untiled, byte-swapped base level: what the image holds
   // A run of consecutive x in one row: contiguous in guest memory (16 bytes at most).
   struct Span {
@@ -3124,6 +3203,40 @@ class VulkanDrawsImpl final : public VulkanDraws {
     if (!count) {
       return true;
     }
+    if (census_ < 0) {
+      census_ = REXCVAR_GET(mw2mp_native_draw_census) ? 1 : 0;
+    }
+    if (census_ > 0) {
+      Census(p.vs->number, ps ? ps->number : 0xFFFFu,
+             source_kind == uint32_t(xenos::SourceSelect::kDMA) ? r[gr::XE_GPU_REG_VGT_DMA_BASE] : 0, count);
+    }
+    // The repeat shortcut (mw2mp_native_repeat_draws): the same draw as the previous one but for its constants.
+    if (repeat_on_) {
+      repeat_check_ = false;
+      repeat_check_count_ = UINT32_MAX;
+      const RepeatMatch match = time_ ? kRepeatNo : MatchRepeat(p, r);
+      if (match == kRepeatSame) {
+        const uint64_t n = ++repeat_matches_;
+        if (n <= kRepeatChecks || (n & 1023) == 0) {
+          repeat_check_ = true;  // the full path below compares its result with the shortcut's (CheckRepeat)
+        } else if (DrawRepeat(p, r)) {
+          return true;
+        }
+      } else if (match == kRepeatGeometry) {
+        const uint64_t n = repeat_geometry_matches_ + 1;
+        const bool check = n <= kRepeatChecks || (n & 1023) == 0;
+        if (DrawRepeatGeometry(p, r, check)) {
+          ++repeat_geometry_matches_;
+          return true;
+        }
+        if (check && repeat_check_count_ != UINT32_MAX) {  // it fit: the full path below is compared with it
+          ++repeat_geometry_matches_;
+          repeat_check_ = true;
+        }
+      }
+      repeat_.valid = false;  // this draw goes the full way; it becomes the next one's reference if it records
+    }
+    const RepeatCheckGuard guard_repeat{this};
     VkPrimitiveTopology topology;
     bool quads = false;
     bool accepts_restart = false;
@@ -3443,46 +3556,7 @@ class VulkanDrawsImpl final : public VulkanDraws {
           (order == xenos::Endian::k8in16 || order == xenos::Endian::kNone)) {
         // The common case: 16 bits without restart or offset. They are uploaded as 16 bits, with a
         // branch-free loop the compiler can vectorize.
-        indices16_.resize(count);  // uninitialized (UninitializedAllocator): filled by the scan
-        uint16_t* output = indices16_.data();
-        uint32_t min = 0xFFFF;
-        uint32_t max = 0;
-        // A converted copy in the vertex cache's pools whose pages have no newer write stamp.
-        const bool from_pool = icache_active_ && IndexCacheByWrites(data, count, order == xenos::Endian::k8in16,
-                                                                    base & 0x1FFFFFFF, uint32_t(order), min, max,
-                                                                    indices_pool_);
-        // The same range already scanned and uploaded in this frame (DedupeIndices).
-        indices_known_ = nullptr;
-        if (dedupe_indices_on_ && !from_pool) {
-          const uint32_t sync = g_syncs_ring.load(std::memory_order_relaxed);
-          if (sync != dedupe_indices_sync_view_) {
-            dedupe_indices_sync_view_ = sync;
-            dedupe_indices_.Forget();
-          }
-          indices_known_ = dedupe_indices_.Find(base & 0x1FFFFFFF, count, uint32_t(order));
-        }
-        index_data_ = data;
-        index_flip_ = order == xenos::Endian::k8in16;
-        index_base_ = base & 0x1FFFFFFF;
-        index_order_ = uint32_t(order);
-        const bool check_known = indices_known_ && (dedupe_indices_checks_ < kDedupeIndicesChecks ||
-                                                    (++dedupe_indices_sampled_ & 4095) == 0);
-        if (from_pool) {
-          indices_scanned_ = false;  // no scan and no upload: bound from the pool
-        } else if (indices_known_ && !check_known) {
-          min = indices_known_->min;  // the scan is skipped; the upload reuses the copy (or converts then)
-          max = indices_known_->max;
-          indices_scanned_ = false;
-          ++dedupe_indices_hits_;
-        } else {
-          // With hand-written NEON and its guard (Indices16, mw2mp_native_indices_neon).
-          Indices16(data, count, output, index_flip_, min, max);
-          if (check_known) {
-            CheckKnownIndices(count, min, max);
-          }
-        }
-        vmin = min;
-        vmax = max;
+        ScanIndices16(data, count, order, base, vmin, vmax);
         indices_16 = true;
       } else {
         indices_.resize(count);
@@ -3541,15 +3615,6 @@ class VulkanDrawsImpl final : public VulkanDraws {
     // The indices stay as they come: vkCmdDrawIndexed subtracts vmin through vertexOffset.
     const uint32_t vertices = vmax - vmin + 1;
 
-    // Bytes of each vertex binding in guest memory.
-    struct VertexSource {
-      const uint8_t* data;
-      xenos::Endian order;
-      uint32_t bytes;
-      uint64_t address;  // physical, of the first byte used
-      uint32_t start;      // bytes from the buffer's start to address
-      uint32_t available;  // the buffer's bytes (fetch constant)
-    };
     // mw2mp_native_fewer_copies: every binding below writes its source or rejects the draw, and only
     // the bindings' sources are read, so the 384 bytes need no zeroing.
     std::array<VertexSource, 16> sources;
@@ -3560,37 +3625,8 @@ class VulkanDrawsImpl final : public VulkanDraws {
       return Reject(9, "too many vertex streams");
     }
     VkDeviceSize bytes_vertices = 0;
-    for (size_t b = 0; b < input->bindings.size(); ++b) {
-      const VertexBinding& binding = input->bindings[b];
-      const uint32_t d0 = r[kRegFetch + binding.slot * 2];
-      const uint32_t d1 = r[kRegFetch + binding.slot * 2 + 1];
-      if ((d0 & 0x3) != uint32_t(xenos::FetchConstantType::kVertex)) {
-        return Reject(10, "invalid vertex fetch constant");
-      }
-      const uint64_t address = uint64_t(d0 & 0x1FFFFFFC);
-      const uint64_t available = uint64_t((d1 >> 2) & 0xFFFFFF) * 4;
-      const uint64_t start = uint64_t(vmin) * binding.stride;
-      uint64_t needed = uint64_t(vertices) * binding.stride;
-      if (start + needed > available) {
-        Warn(11, "vertices past the end of their buffer: clipped");
-        needed = available > start ? (available - start) / binding.stride * binding.stride : 0;
-      }
-      if (!needed || address + start + needed > kMemoryPhysical) {
-        return Reject(12, "vertices outside memory");
-      }
-      sources[b] = {memory_->TranslatePhysical(uint32_t(address + start)),
-                     static_cast<xenos::Endian>(d1 & 0x3), uint32_t(needed),
-                     address + start, uint32_t(start), uint32_t(available)};
-      // Its vertex cache set and stamp line, fetched before the uploads stage looks them up.
-      if (prefetch_lines_ && vcache_active_ && vcache_by_writes_) {
-        PrefetchCacheLines(((address + start) & 0x1FFFFFFF) | (uint64_t(uint32_t(needed) & 0x3FFFFFF) << 29) |
-                               (uint64_t(d1 & 0x3) << 55) | (uint64_t(1) << 63),
-                           uint32_t(address + start));
-      }
-      if (needed >= 4096) {
-        g_probe_vertex_address.store(uint32_t(address + start), std::memory_order_relaxed);
-      }
-      bytes_vertices += (needed + 3) & ~VkDeviceSize(3);
+    if (const uint32_t cause = SourcesOf(*input, r, vmin, vertices, true, sources, bytes_vertices)) {
+      return Reject(cause, cause == 10 ? "invalid vertex fetch constant" : "vertices outside memory");
     }
 
     // Diagnostic: one line per combination of VS, PS and render target (at most 32).
@@ -4014,193 +4050,11 @@ class VulkanDrawsImpl final : public VulkanDraws {
     reuse_valid_ = reuse_pending_ && generation_textures_ == reuse_generation_textures_ &&
                    slots_retired_ == reuse_slots_retired_;  // see reuse_textures (textures stage)
     std::array<VkDeviceSize, 16> offsets_vertices{};
-    // If the guest has waited for the GPU since the last draw, it may legally have rewritten an already
-    // referenced range: what was recorded is no longer valid.
-    if (dedupe_active_) {
-      const uint32_t sync = g_syncs_ring.load(std::memory_order_relaxed);
-      if (sync != dedupe_sync_view_) {
-        dedupe_sync_view_ = sync;
-        dedupe_.Forget();
-      }
-    }
-    const auto before_vertices =
-        time_ ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
-    for (size_t b = 0; b < input->bindings.size(); ++b) {
-      const VertexSource& source = sources[b];
-      // Each binding's time by path (C6 substages 40-42).
-      const auto t_binding = time_ ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
-      if (diag_vertices_repeated_) {
-        AnnotateVerticesRepeated(source.address, source.bytes, uint32_t(source.order), source.data);
-      }
-      VkDeviceSize offset;
-      // In the dedupe's check frames every range carries the hash of its guest bytes; a reuse whose
-      // bytes differ is counted (DedupeVertices::discrepancies) and copied as usual.
-      const uint64_t hash_dedupe =
-          dedupe_active_ && dedupe_hash_frame_ ? XXH3_64bits(source.data, size_t(source.bytes)) | 1 : 0;
-      // If this same range was already copied in this frame, its place in the upload buffer is reused and
-      // nothing is copied. See mw2mp_native_vertex_dedupe.h.
-      if (dedupe_active_ &&
-          dedupe_.Find(source.address, source.bytes, uint32_t(source.order), offset, hash_dedupe)) {
-        offsets_vertices[b] = offset;
-        SamplerPath(40, t_binding);
-        continue;
-      }
-      // GPU skinning (mw2mp_gpu_skin.h). A range that holds skinning jobs' output is skinned by compute
-      // dispatches into its place in the upload buffer instead of copied (the parts without a job are copied).
-      if (skin_on_ && mw2mp::gpu_skin::MayOverlap(uint32_t(source.address), source.bytes) &&
-          SkinOnGpu(source.data, source.order, source.bytes, source.address, input->bindings[b].stride,
-                    input->bindings.size() == 1, offset)) {
-        offsets_vertices[b] = offset;
-        bytes_vertices_ += source.bytes;
-        if (dedupe_active_) {
-          dedupe_.Annotate(source.address, source.bytes, uint32_t(source.order), offset, hash_dedupe);
-        }
-        SamplerPath(42, t_binding);
-        continue;
-      }
-      // mw2mp_native_vertex_cache: bound from a persistent copy when its bytes did not change (the offset then
-      // carries kVertexPoolTag; see ResolveVertexBinding).
-      if (vcache_active_) {
-        const VkDeviceSize alignment =
-            vertices_base_cero_ && input->bindings.size() == 1 ? VkDeviceSize(input->bindings[0].stride) : 4;
-        uint64_t hash_cache = hash_dedupe;
-        if (VertexCache(source.data, source.bytes, source.order, source.address, alignment, hash_cache, offset,
-                        source.start, source.available)) {
-          offsets_vertices[b] = offset;
-          if (dedupe_active_) {
-            dedupe_.Annotate(source.address, source.bytes, uint32_t(source.order), offset, hash_dedupe);
-          }
-          SamplerPath(41, t_binding);
-          continue;
-        }
-      }
-      // With a single binding, at a multiple of its stride (mw2mp_native_zero_base_vertices).
-      if (vertices_base_cero_ && input->bindings.size() == 1) {
-        ReserveMultiple(source.bytes, input->bindings[0].stride, offset);
-      } else {
-        Reserve(source.bytes, 4, offset);
-      }
-      const CopyJob job{source.data, upload_data_ + offset, source.bytes / 4, source.order};
-      if (!copies_active_ || !EnqueueCopy(job)) {
-        CopyVertices(job);
-      }
-      if (watch_vertices_) [[unlikely]] {
-        WatchVerticesCollect(source.address, source.bytes);
-      }
-      bytes_vertices_ += source.bytes;
-      offsets_vertices[b] = offset;
-      if (dedupe_active_) {
-        dedupe_.Annotate(source.address, source.bytes, uint32_t(source.order), offset, hash_dedupe);
-      }
-      SamplerPath(42, t_binding);
-    }
-    if (time_) {
-      ns_vertices_ += uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
-                                   std::chrono::steady_clock::now() - before_vertices)
-                                   .count());
-    }
+    UploadVertices(*input, sources, offsets_vertices);
     CutSubstage(37, t_uploads);
-    VkDeviceSize offset_indices = 0;
-    if (with_indices) {
-      if (indices_pool_) {
-        offset_indices = indices_pool_;  // in the index cache's pool (tagged as the vertex cache's)
-        bytes_indices_saved_ += bytes_indices;
-      } else if (indices_16 && indices_known_ && indices_known_->frame == dedupe_indices_.frame()) {
-        // Already in this upload buffer (DedupeIndices).
-        offset_indices = indices_known_->offset;
-        bytes_indices_saved_ += bytes_indices;
-      } else {
-        Reserve(bytes_indices, 4, offset_indices);
-        bytes_indices_uploaded_ += bytes_indices;
-        if (indices_16 && indices_known_ && !indices_scanned_) {
-          // The scan was skipped and the upload buffer changed since (a submit in between): convert from the
-          // guest's indices, which a draw cannot change, straight into the upload buffer.
-          uint32_t mn = 0;
-          uint32_t mx = 0;
-          Indices16Neon(index_data_, uint32_t(bytes_indices / 2),
-                        reinterpret_cast<uint16_t*>(upload_data_ + offset_indices), index_flip_, mn, mx);
-          ++dedupe_indices_converted_;
-        } else {
-          std::memcpy(upload_data_ + offset_indices,
-                      indices_16 ? static_cast<const void*>(indices16_.data())
-                                    : static_cast<const void*>(indices_.data()),
-                      size_t(bytes_indices));
-        }
-        if (indices_16 && dedupe_indices_on_) {
-          // While reuses are checked, the guest bytes' hash goes with the entry (CheckKnownIndices).
-          const uint64_t hash = dedupe_indices_checks_ < kDedupeIndicesChecks || (dedupe_indices_sampled_ & 4095) < 64
-                                    ? XXH3_64bits(index_data_, size_t(bytes_indices))
-                                    : 0;
-          dedupe_indices_.Annotate(index_base_, uint32_t(bytes_indices / 2), index_order_, uint16_t(vmin),
-                                   uint16_t(vmax), offset_indices, hash);
-        }
-      }
-    }
-    indices_known_ = nullptr;
-    indices_scanned_ = true;
+    const VkDeviceSize offset_indices = UploadIndices(with_indices, indices_16, bytes_indices, vmin, vmax);
     CutSubstage(38, t_uploads);
-    // Only the registers each shader reads (ShaderInput::constants_bytes). With the same generation, the
-    // copy is reused if it already covers what this shader needs.
-    const uint32_t bytes_vs = std::min<uint32_t>(p.vs->constants_bytes, kRegistersConstants * 4);
-    // mw2mp_native_constants_used: a block copied in part holds only its shader's registers.
-    const bool vs_runs = constants_used_active_ && p.vs->constants_runs_valid;
-    if (constants_vs_generation_ != p.generation_constants_vs ||
-        constants_vs_epoch_ != epoch_upload_ || bytes_vs > constants_vs_bytes_ ||
-        (constants_vs_shader_ && constants_vs_shader_ != p.vs)) {
-      // Why they are uploaded again (measurement only; each upload is another set 4 offset).
-      ++reuploads_vs_[constants_vs_generation_ != p.generation_constants_vs ? 0
-                      : constants_vs_epoch_ != epoch_upload_                 ? 1
-                                                                              : 2];
-      // With UBOs the block goes whole (the driver may read the full range) and aligned to the device minimum
-      const auto t_copy = time_ ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
-      Reserve(use_ubo_ ? std::max<VkDeviceSize>(bytes_vs, kUboBytesVs) : bytes_vs, use_ubo_ ? alignment_ubo_ : 16,
-               constants_vs_offset_);
-      if (vs_runs) {
-        for (const auto& [first, n] : p.vs->constants_runs) {
-          std::memcpy(upload_data_ + constants_vs_offset_ + first * 16u, r + kRegConstantsVs + first * 4u, n * 16u);
-        }
-        bytes_constants_vs_ += p.vs->constants_runs_bytes;
-      } else {
-        std::memcpy(upload_data_ + constants_vs_offset_, r + kRegConstantsVs, bytes_vs);
-        bytes_constants_vs_ += bytes_vs;
-      }
-      constants_vs_shader_ = vs_runs ? p.vs : nullptr;
-      SamplerPath(43, t_copy);  // C6 substage
-      constants_vs_generation_ = p.generation_constants_vs;
-      constants_vs_epoch_ = epoch_upload_;
-      constants_vs_bytes_ = bytes_vs;
-    }
-    const uint32_t bytes_ps =
-        ps ? std::min<uint32_t>(ps->constants_bytes, kRegistersConstants * 4) : 0;
-    const bool ps_runs = ps && constants_used_active_ && ps->constants_runs_valid;
-    if (ps && (constants_ps_generation_ != p.generation_constants_ps ||
-               constants_ps_epoch_ != epoch_upload_ || bytes_ps > constants_ps_bytes_ ||
-               (constants_ps_shader_ && constants_ps_shader_ != ps))) {
-      ++reuploads_ps_[constants_ps_generation_ != p.generation_constants_ps ? 0
-                      : constants_ps_epoch_ != epoch_upload_                 ? 1
-                                                                              : 2];
-      const auto t_copy = time_ ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
-      Reserve(use_ubo_ ? std::max<VkDeviceSize>(bytes_ps, kUboBytesPs) : bytes_ps, use_ubo_ ? alignment_ubo_ : 16,
-               constants_ps_offset_);
-      if (ps_runs) {
-        for (const auto& [first, n] : ps->constants_runs) {
-          // A PS reads at most 224 registers of its block (bytes_ps); the analysis never names more.
-          if (first * 16u + n * 16u <= bytes_ps) {
-            std::memcpy(upload_data_ + constants_ps_offset_ + first * 16u, r + kRegConstantsPs + first * 4u,
-                        n * 16u);
-          }
-        }
-        bytes_constants_ps_ += ps->constants_runs_bytes;
-      } else {
-        std::memcpy(upload_data_ + constants_ps_offset_, r + kRegConstantsPs, bytes_ps);
-        bytes_constants_ps_ += bytes_ps;
-      }
-      constants_ps_shader_ = ps_runs ? ps : nullptr;
-      SamplerPath(44, t_copy);  // C6 substage
-      constants_ps_generation_ = p.generation_constants_ps;
-      constants_ps_epoch_ = epoch_upload_;
-      constants_ps_bytes_ = bytes_ps;
-    }
+    const uint32_t bytes_ps = UploadConstants(p, ps, r);
     CopyCompositeTreated(ps, r, bytes_ps);  // mw2mp_visual_treatment (see the function)
     CutSubstage(39, t_uploads);
 
@@ -4723,31 +4577,7 @@ class VulkanDrawsImpl final : public VulkanDraws {
         std::memcpy(push_recorded_, push, sizeof(push));
       }
     }
-    // Set 4 (dynamic UBOs). Always bound, because the new shaders use it statically: with the real offsets
-    // if mw2mp_native_constants_ubo is set, and 0 otherwise. Only recorded when something changes.
-    {
-      const std::array<uint32_t, 3> offsets_ubo =
-          use_ubo_ ? std::array<uint32_t, 3>{uint32_t(constants_vs_offset_), uint32_t(constants_ps_offset_),
-                                              uint32_t(offset_shared)}
-                    : std::array<uint32_t, 3>{0, 0, 0};
-      ++set4_draws_;  // C6 set 4 report
-      if (!ubo_bound_ || slot_ubo_bound_ != slot_current_ || offsets_ubo != offsets_ubo_bound_) {
-        // Which offsets change at each bind (measurement only). What NVK saves by differences depends on it:
-        // every cbuf whose offset does not change is one rebind less in the Draw.
-        if (!ubo_bound_ || slot_ubo_bound_ != slot_current_) {
-          ++set4_first_;
-        } else {
-          ++set4_changes_[(offsets_ubo[0] != offsets_ubo_bound_[0] ? 1u : 0u) |
-                          (offsets_ubo[1] != offsets_ubo_bound_[1] ? 2u : 0u) |
-                          (offsets_ubo[2] != offsets_ubo_bound_[2] ? 4u : 0u)];
-        }
-        MW2MP_SUB(2, dfn_.vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, layout_pipeline_, 4, 1,
-                                                  &sets_ubo_[slot_current_], 3, offsets_ubo.data()));
-        offsets_ubo_bound_ = offsets_ubo;
-        slot_ubo_bound_ = slot_current_;
-        ubo_bound_ = true;
-      }
-    }
+    BindSet4(cmd, offset_shared);
     if (!recorded || !SameBytes<sizeof(viewport)>(&viewport, &viewport_recorded_)) {
       MW2MP_SUB(3, dfn_.vkCmdSetViewport(cmd, 0, 1, &viewport));
       viewport_recorded_ = viewport;
@@ -4796,57 +4626,8 @@ class VulkanDrawsImpl final : public VulkanDraws {
      */
     bool base_cero = false;
     uint32_t first_vertex = 0;  // offset / stride: where the copy starts, in vertices
-    // Each binding's buffer (the upload buffer or a vertex cache pool) and its offset in it.
-    std::array<VkBuffer, 16> bind_buffers;
-    std::array<VkDeviceSize, 16> bind_offsets;
-    for (size_t i = 0; i < input->bindings.size(); ++i) {
-      ResolveVertexBinding(offsets_vertices[i], upload_, bind_buffers[i], bind_offsets[i]);
-    }
-    if (vertices_base_cero_ && input->bindings.size() == 1) {
-      const VkDeviceSize stride = input->bindings[0].stride;
-      if (bind_offsets[0] % stride == 0) {
-        base_cero = CheckBaseZero(bind_offsets[0], stride, sources[0].bytes, vmin, first_vertex,
-                                  bind_buffers[0] == upload_ ? std::min(kSizeUpload, upload_size_real_)
-                                                             : vpools_[0].size);
-      } else {
-        ++base_zero_misaligned_;
-      }
-    } else if (input->bindings.size() > 1) {
-      ++base_zero_several_bindings_;
-    }
-    if (!input->bindings.empty()) {
-      // The buffers come from ResolveVertexBinding (the upload buffer or a vertex cache pool); a
-      // binding is the same as the recorded one only with the same buffer and offset.
-      /*
-       * And do not bind again if it is exactly what is already bound.
-       *
-       * In NVK each binding is 5 dwords plus an invocation of the MME macro NVK_MME_BIND_VB
-       * (nvk_cmd_draw.c:4658), with no redundancy check inside: ~2,800 MME macros per frame. With vertex
-       * deduplication 28-33 % of the bindings reuse the same offset, so two consecutive draws of the same
-       * mesh give exactly the same offsets.
-       */
-      // On the base-zero path what gets bound is the whole buffer, from 0.
-      static constexpr VkDeviceSize kBindingInZero = 0;
-      const VkDeviceSize* a_bind = base_cero ? &kBindingInZero : bind_offsets.data();
-      const uint32_t n_bindings = uint32_t(input->bindings.size());
-      bool equal = n_bindings == bindings_recorded_;
-      for (uint32_t i = 0; equal && i < n_bindings; ++i) {
-        equal = a_bind[i] == offsets_recorded_[i] && bind_buffers[i] == buffers_vertices_[i];
-      }
-      if (!equal) {
-        MW2MP_SUB(8, dfn_.vkCmdBindVertexBuffers(cmd, 0, n_bindings, bind_buffers.data(), a_bind));
-        ++base_zero_bindings_recorded_;
-        bindings_recorded_ = n_bindings;
-        for (uint32_t i = 0; i < n_bindings; ++i) {
-          offsets_recorded_[i] = a_bind[i];
-          buffers_vertices_[i] = bind_buffers[i];
-        }
-      } else {
-        ++bindings_saved_;
-      }
-      ++base_cero_total_;
-      base_zero_draws_ += base_cero ? 1 : 0;
-    }
+    BindVertices(cmd, *input, offsets_vertices, input->bindings.size() == 1 ? sources[0].bytes : 0, vmin, base_cero,
+                 first_vertex);
     // With a game occlusion query open, this draw counts toward it.
     if (occlusion_open_ && query_occlusion_ == UINT32_MAX) {
       MW2MP_SUB(13, query_occlusion_ = context_->BeginQueryOcclusion());
@@ -4946,24 +4727,11 @@ class VulkanDrawsImpl final : public VulkanDraws {
             frame_ + (mw2mp::reflection_demand::VisibilityChecked() ? kWitnessEvery : uint64_t(2));
       }
     }
+    uint32_t first_index_draw = 0;  // the draw's arguments, for the repeat shortcut
+    int32_t offset_vertices_draw = 0;
     if (with_indices) {
-      // The upload buffer is bound once per index type and each draw uses firstIndex.
-      const VkIndexType type_indices = indices_16 ? VK_INDEX_TYPE_UINT16 : VK_INDEX_TYPE_UINT32;
-      // Or the index cache's pool (mw2mp_native_index_cache), with the same tag as the vertex cache's.
-      VkBuffer buffer_indices = upload_;
-      VkDeviceSize at_indices = offset_indices;
-      ResolveVertexBinding(offset_indices, upload_, buffer_indices, at_indices);
-      if (type_indices != type_indices_recorded_ || buffer_indices != buffer_indices_recorded_) {
-        MW2MP_SUB(9, dfn_.vkCmdBindIndexBuffer(cmd, buffer_indices, 0, type_indices));
-        type_indices_recorded_ = type_indices;
-        buffer_indices_recorded_ = buffer_indices;
-      }
-      // On the base-zero path, vertexOffset also carries where the copy starts (in vertices).
-      const int32_t offset_vertices =
-          base_cero ? int32_t(int64_t(first_vertex) - int64_t(vmin)) : -int32_t(vmin);
-      MW2MP_SUB(10, dfn_.vkCmdDrawIndexed(cmd, uint32_t(indices_16 ? indices16_.size() : indices_.size()),
-                                          1, uint32_t(at_indices / (indices_16 ? 2 : 4)),
-                                          offset_vertices, 0));
+      DrawIndexed(cmd, offset_indices, indices_16, uint32_t(indices_16 ? indices16_.size() : indices_.size()),
+                  base_cero, first_vertex, vmin, first_index_draw, offset_vertices_draw);
     } else {
       MW2MP_SUB(10, dfn_.vkCmdDraw(cmd, count, 1, base_cero ? first_vertex : 0, 0));  // firstVertex
     }
@@ -4981,7 +4749,933 @@ class VulkanDrawsImpl final : public VulkanDraws {
     ++drawn_;
     ++draws_in_pass_;  // to know at which position of the pass the sky ends up emitted
     drawn_timed_ += time_ ? 1 : 0;
+    if (repeat_on_) {
+      RepeatDraw done;
+      done.pipeline = pipeline;
+      done.key = key;
+      done.offset_shared = offset_shared;
+      done.with_indices = with_indices;
+      done.indices_16 = indices_16;
+      done.index_count = with_indices ? uint32_t(indices_16 ? indices16_.size() : indices_.size()) : 0;
+      done.first_index = first_index_draw;
+      done.vertex_offset = offset_vertices_draw;
+      done.count = count;
+      done.first_vertex = base_cero ? first_vertex : 0;
+      done.vmin = vmin;
+      done.viewport = viewport;
+      done.scissor = scissor_final;
+      std::memcpy(done.blend, blend_constant, sizeof(done.blend));
+      std::memcpy(done.bias, bias, sizeof(done.bias));
+      done.stencil[0] = keys[4] ? stencil_frontface : 0;
+      done.stencil[1] = keys[4] ? stencil_backface : 0;
+      done.category = TargetCategory(pitch, keys);
+      done.triangles = (with_indices ? done.index_count : count) / 3;
+      done.n_bindings = uint32_t(input->bindings.size());
+      done.input = input;
+      if (repeat_check_) {
+        CheckRepeat(done);
+      }
+      // Only draws whose record has no side effect besides the draw itself: no query around it, no report to C2
+      // (shadow overlay, deferred depth), no constants treated after the upload, not the sky.
+      const uint64_t hash_ps = ps && ps->shader ? ps->shader->hash : 0;
+      if (repeat_on_ && !reads_reflection && query_draw == UINT32_MAX && query_visibility == UINT32_MAX &&
+          !occlusion_open_ && query_occlusion_ == UINT32_MAX && !composite_no_blur && !shadow_min_draw &&
+          !pass_overlay_shadow_ && !watch_vertices_ && !diag_stats_draw_ && hash_ps != kHashComposite &&
+          hash_ps != kHashSky && hash_ps != kHashBrightPass && pipeline == pipeline_bound_) {
+        SnapshotRepeat(done, p, ps, r);
+      }
+    }
     return true;
+  }
+
+  /*
+   * The repeat shortcut (mw2mp_native_repeat_draws).
+   *
+   * The draw census (runs mw2sp_024 / mw2mp_007) found 35-54 % of the Campaign's draws repeat a mesh already drawn
+   * in the frame and 30-50 % repeat the previous draw: the same model again with another world matrix. The ring is
+   * the limit there (~1000 ms/s at 5-7k draws per frame), and each draw costs ~2.5 us even though every stage's
+   * own cache already hits on such a repeat: the cost is the ten lookups themselves.
+   *
+   * So one check replaces them. A draw is recorded as a repeat of the previous one when everything Draw reads
+   * except the shader constants is unchanged:
+   *  - the request: the same VS and PS objects, VS microcode generation, framing generation and game verdict;
+   *  - the registers Draw reads outside the framing (kRepeatRegisters) and the fetch block 0x4800-0x48BF (by
+   *    generation, else by value);
+   *  - the frame, the upload buffer epoch, the texture generation, retired slots and guest syncs (memory the
+   *    guest may rewrite only after a sync, the same rule as the vertex and index dedupes);
+   *  - and the GPU state the previous draw left is still what is bound: the same command buffer, pass and
+   *    pipeline, the tracked dynamic state and bindings not reset since (the deferred sky resets them).
+   * Then the previous draw's pipeline, vertex and index bindings, shared block, framing and dynamic state are all
+   * still right: only the VS and PS constants are uploaded (when they changed), set 4 rebound to their offsets,
+   * and the draw recorded with the previous draw's arguments.
+   *
+   * Only a draw whose own record had no side effect but the draw becomes a reference (SnapshotRepeat): no
+   * queries around it, no report to C2, not the sky, the composite or the bright pass.
+   *
+   * Guard: the first kRepeatChecks matches, then 1 in 1,024, take the full path instead and compare what it
+   * records (pipeline key, counts, framing, dynamic state) with what the shortcut would have used; a difference,
+   * or a full path that does not record at all, turns the shortcut off for the run with a MISMATCH line.
+   * Upload offsets may differ legitimately (a dedupe collision copies again): those are only counted.
+   *
+   * The C6 counters of the skipped stages (early Z, colorless draws, discards, samplers) do not count repeats.
+   */
+  static constexpr uint32_t kRepeatRegisters[] = {
+      gr::XE_GPU_REG_RB_MODECONTROL,
+      gr::XE_GPU_REG_RB_SURFACE_INFO,
+      gr::XE_GPU_REG_RB_COLOR_MASK,
+      gr::XE_GPU_REG_RB_COLOR_INFO,
+      gr::XE_GPU_REG_RB_COLOR1_INFO,
+      gr::XE_GPU_REG_RB_COLOR2_INFO,
+      gr::XE_GPU_REG_RB_COLOR3_INFO,
+      gr::XE_GPU_REG_RB_BLENDCONTROL0,
+      gr::XE_GPU_REG_RB_BLENDCONTROL1,
+      gr::XE_GPU_REG_RB_BLENDCONTROL2,
+      gr::XE_GPU_REG_RB_BLENDCONTROL3,
+      gr::XE_GPU_REG_RB_COLORCONTROL,
+      gr::XE_GPU_REG_RB_DEPTHCONTROL,
+      gr::XE_GPU_REG_RB_DEPTH_INFO,
+      gr::XE_GPU_REG_RB_ALPHA_REF,
+      gr::XE_GPU_REG_RB_BLEND_RED,
+      gr::XE_GPU_REG_RB_BLEND_GREEN,
+      gr::XE_GPU_REG_RB_BLEND_BLUE,
+      gr::XE_GPU_REG_RB_BLEND_ALPHA,
+      gr::XE_GPU_REG_RB_STENCILREFMASK,
+      gr::XE_GPU_REG_RB_STENCILREFMASK_BF,
+      gr::XE_GPU_REG_VGT_DRAW_INITIATOR,
+      gr::XE_GPU_REG_VGT_DMA_BASE,
+      gr::XE_GPU_REG_VGT_DMA_SIZE,
+      gr::XE_GPU_REG_VGT_INDX_OFFSET,
+      gr::XE_GPU_REG_VGT_MULTI_PRIM_IB_RESET_INDX,
+      gr::XE_GPU_REG_PA_SU_POLY_OFFSET_FRONT_SCALE,
+      gr::XE_GPU_REG_PA_SU_POLY_OFFSET_FRONT_OFFSET,
+      gr::XE_GPU_REG_PA_SU_POLY_OFFSET_BACK_SCALE,
+      gr::XE_GPU_REG_PA_SU_POLY_OFFSET_BACK_OFFSET,
+      kRegBooleans + 0,
+      kRegBooleans + 1,
+      kRegBooleans + 2,
+      kRegBooleans + 3,
+      kRegBooleans + 4,
+      kRegBooleans + 5,
+      kRegBooleans + 6,
+      kRegBooleans + 7,
+  };
+  static constexpr size_t kRepeatRegisterCount = std::size(kRepeatRegisters);
+  static constexpr uint32_t kRepeatFetchWords = 0x48C0 - kRegFetch;  // 0x4800-0x48BF
+  static constexpr uint64_t kRepeatChecks = 4096;
+  // Why a draw was not a repeat ("C6 repeat shortcut" report).
+  enum RepeatMiss : uint32_t {
+    kRepeatMissPrevious,  // the previous draw is no reference (did not record, or had side effects)
+    kRepeatMissShaders,   // other VS/PS, VS microcode, framing or game verdict
+    kRepeatMissFrame,     // another frame, upload epoch, texture generation or retired slots
+    kRepeatMissSync,      // the guest waited for the GPU since
+    kRepeatMissRegister,  // one of kRepeatRegisters
+    kRepeatMissFetch,     // the fetch constants
+    kRepeatMissBound,     // the GPU state the previous draw left is not bound any more
+    kRepeatMissRoom,      // no room for the constants in the upload buffer
+    kRepeatMissGeometry,  // only the index range differs, but the geometry variant does not fit (or is off)
+    kRepeatMissCount,
+  };
+  struct RepeatDraw {
+    bool valid = false;
+    // What the match compares.
+    const ShaderInput* vs = nullptr;
+    const ShaderInput* ps_request = nullptr;  // p.ps as it came
+    const ShaderInput* ps = nullptr;          // the one the draw used (mode 5 / colorless: nullptr)
+    uint64_t generation_vs = 0, generation_fetch = 0, generation_framing = 0;
+    uint16_t vegetation_game = 0;
+    uint64_t frame = 0, epoch_upload = 0, generation_textures = 0, slots_retired = 0;
+    uint64_t generation_commands = 0, pass_key = 0;
+    uint32_t sync = 0;
+    std::array<uint32_t, kRepeatRegisterCount> registers{};
+    std::array<uint32_t, kRepeatFetchWords> fetch{};
+    // What the record used.
+    VkPipeline pipeline = VK_NULL_HANDLE;
+    PipelineKey key{};
+    VkDeviceSize offset_shared = 0;
+    bool with_indices = false, indices_16 = false;
+    uint32_t index_count = 0, first_index = 0, count = 0, first_vertex = 0, vmin = 0;
+    int32_t vertex_offset = 0;
+    VkViewport viewport{};
+    VkRect2D scissor{};
+    float blend[4] = {};
+    float bias[2] = {};
+    uint32_t stencil[2] = {};
+    uint32_t category = 0, triangles = 0, n_bindings = 0;
+    const VertexInput* input = nullptr;  // InputOf: a function of the VS and its generation
+    // Fetch words (0x4800 + i) only the vertex bindings read, no sampler: they may differ in a geometry variant.
+    std::array<uint64_t, (kRepeatFetchWords + 63) / 64> fetch_vertex{};
+  };
+  // A check draw that leaves Draw without reaching CheckRepeat recorded nothing where the shortcut would have.
+  struct RepeatCheckGuard {
+    VulkanDrawsImpl* self;
+    ~RepeatCheckGuard() {
+      if (self->repeat_check_) {
+        self->MismatchRepeat("the full path did not record the draw", self->repeat_check_count_ != UINT32_MAX);
+      }
+    }
+  };
+
+  // What MatchRepeat found.
+  enum RepeatMatch : uint32_t {
+    kRepeatNo,        // take the full path
+    kRepeatSame,      // a repeat of the previous draw (DrawRepeat)
+    kRepeatGeometry,  // a repeat but for its index range: count, VGT_DMA_BASE, VGT_DMA_SIZE (DrawRepeatGeometry)
+  };
+  // The registers a geometry variant may change; of VGT_DRAW_INITIATOR only the count (bits 16-31): the
+  // primitive type, the index source and the index size stay.
+  static constexpr bool RegisterOfGeometry(uint32_t reg) {
+    return reg == gr::XE_GPU_REG_VGT_DRAW_INITIATOR || reg == gr::XE_GPU_REG_VGT_DMA_BASE ||
+           reg == gr::XE_GPU_REG_VGT_DMA_SIZE;
+  }
+
+  RepeatMatch MatchRepeat(const DrawRequest& p, const uint32_t* r) {
+    RepeatDraw& d = repeat_;
+    if (!d.valid) {
+      ++repeat_misses_[kRepeatMissPrevious];
+      return kRepeatNo;
+    }
+    if (p.vs != d.vs || p.ps != d.ps_request || p.generation_vs != d.generation_vs ||
+        p.generation_framing != d.generation_framing || p.vegetation_game != d.vegetation_game) {
+      ++repeat_misses_[kRepeatMissShaders];
+      return kRepeatNo;
+    }
+    if (frame_ != d.frame || epoch_upload_ != d.epoch_upload || generation_textures_ != d.generation_textures ||
+        slots_retired_ != d.slots_retired) {
+      ++repeat_misses_[kRepeatMissFrame];
+      return kRepeatNo;
+    }
+    if (g_syncs_ring.load(std::memory_order_relaxed) != d.sync) {
+      ++repeat_misses_[kRepeatMissSync];
+      return kRepeatNo;
+    }
+    size_t geometry = SIZE_MAX;  // the first geometry register that differs (for the miss report)
+    for (size_t i = 0; i < kRepeatRegisterCount; ++i) {
+      const uint32_t reg = kRepeatRegisters[i];
+      if (r[reg] != d.registers[i]) {
+        if (RegisterOfGeometry(reg) &&
+            (reg != gr::XE_GPU_REG_VGT_DRAW_INITIATOR || ((r[reg] ^ d.registers[i]) & 0xFFFF) == 0)) {
+          geometry = std::min(geometry, i);
+          continue;
+        }
+        ++repeat_misses_[kRepeatMissRegister];
+        ++repeat_misses_register_[i];
+        return kRepeatNo;
+      }
+    }
+    if (geometry != SIZE_MAX && !(repeat_geometry_on_ && d.with_indices && d.indices_16 && d.input)) {
+      ++repeat_misses_[kRepeatMissRegister];
+      ++repeat_misses_register_[geometry];
+      return kRepeatNo;
+    }
+    bool fetch_geometry = false;  // only vertex fetch words differ: another vertex buffer (geometry variant)
+    if (p.generation_fetch != d.generation_fetch) {
+      if (!SameBytes<kRepeatFetchWords * 4>(d.fetch.data(), r + kRegFetch)) {
+        // Run mw2sp_029: once the index range could differ, 35-51 % of draws missed here, on the vertex fetch
+        // words: the next piece also comes from another vertex buffer. SourcesOf reads those words again.
+        fetch_geometry = repeat_geometry_on_ && d.with_indices && d.indices_16 && d.input;
+        for (uint32_t w = 0; fetch_geometry && w < kRepeatFetchWords; ++w) {
+          fetch_geometry = r[kRegFetch + w] == d.fetch[w] || ((d.fetch_vertex[w >> 6] >> (w & 63)) & 1);
+        }
+        if (!fetch_geometry) {
+          ++repeat_misses_[kRepeatMissFetch];
+          return kRepeatNo;
+        }
+      } else {
+        d.generation_fetch = p.generation_fetch;  // the next draws with no fetch write take the fast check
+      }
+    }
+    const uint64_t commands = context_->GenerationCommands();
+    if (!pass_active_ || pass_key_ != d.pass_key || pass_generation_ != commands ||
+        recording_generation_ != commands || d.generation_commands != commands || pipeline_bound_ != d.pipeline ||
+        !state_recorded_ || !sets_bound_ || bindings_recorded_ != d.n_bindings || occlusion_open_ ||
+        pass_overlay_shadow_ || diag_stats_draw_) {
+      ++repeat_misses_[kRepeatMissBound];
+      return kRepeatNo;
+    }
+    const VkDeviceSize room = use_ubo_ ? kUboBytesVs + kUboBytesPs + 2 * alignment_ubo_
+                                       : 2 * VkDeviceSize(kRegistersConstants) * 4 + 32;
+    if (upload_used_ + room > kSizeUpload) {
+      ++repeat_misses_[kRepeatMissRoom];
+      return kRepeatNo;
+    }
+    return geometry == SIZE_MAX && !fetch_geometry ? kRepeatSame : kRepeatGeometry;
+  }
+
+  // Records the draw as a repeat of repeat_ (MatchRepeat held). false = not recorded: take the full path.
+  bool DrawRepeat(const DrawRequest& p, const uint32_t* r) {
+    const RepeatDraw& d = repeat_;
+    const VkCommandBuffer cmd = pass_commands_;
+    // Dynamic state phases 1 and 2: the same key as the bound one returns at once; a guard difference switches
+    // dynamic state off, and then the full path binds this draw's usual pipeline.
+    if (eds_mode_ && !SetStateDynamic(cmd, d.key)) {
+      return false;
+    }
+    UploadConstants(p, d.ps, r);
+    BindSet4(cmd, d.offset_shared);
+    if (d.with_indices) {
+      dfn_.vkCmdDrawIndexed(cmd, d.index_count, 1, d.first_index, d.vertex_offset, 0);
+    } else {
+      dfn_.vkCmdDraw(cmd, d.count, 1, d.first_vertex, 0);
+    }
+    ++draws_per_category_[d.category];
+    triangles_per_category_[d.category] += d.triangles;
+    ++drawn_;
+    ++draws_in_pass_;
+    ++repeat_hits_;
+    return true;
+  }
+
+  /*
+   * The geometry variant (mw2mp_native_repeat_geometry).
+   *
+   * Run mw2sp_027 (Estate): 52-55 % of all draws missed the repeat only on VGT_DRAW_INITIATOR, ~5 % on
+   * VGT_DMA_BASE: the same VS, PS, textures, state and vertex buffer with another index range (pieces of the
+   * world drawn from one buffer). Everything but the geometry is still the previous draw's, so only the stages
+   * that depend on the index range run: the 16-bit index scan, the vertex sources and their uploads, the index
+   * upload, the constants, the vertex and index bindings and the draw. Targets, textures, the pass, the framing,
+   * the shared block, the pipeline and the dynamic state are the reference's.
+   *
+   * Only after a reference that took the 16-bit path (no restart, offset, quads or 32-bit indices: the low bits of
+   * VGT_DRAW_INITIATOR, VGT_INDX_OFFSET and the framing are equal, so this draw would take it too, but for the
+   * byte order in VGT_DMA_SIZE, checked here). The preparation (scan, sources, room) changes nothing the full path
+   * depends on: anything that does not fit returns false before the first upload and the full path runs. With
+   * check set (the guard) it stops there too, and CheckRepeat compares what the full path records.
+   */
+  bool DrawRepeatGeometry(const DrawRequest& p, const uint32_t* r, bool check) {
+    RepeatDraw& d = repeat_;
+    const VertexInput& input = *d.input;
+    const uint32_t count = r[gr::XE_GPU_REG_VGT_DRAW_INITIATOR] >> 16;
+    const uint32_t size = r[gr::XE_GPU_REG_VGT_DMA_SIZE];
+    const auto order = static_cast<xenos::Endian>(size >> 30);
+    const uint32_t base = r[gr::XE_GPU_REG_VGT_DMA_BASE] & ~uint32_t(1);
+    if ((order != xenos::Endian::k8in16 && order != xenos::Endian::kNone) || count > (size & 0xFFFFFF) ||
+        uint64_t(base & 0x1FFFFFFF) + uint64_t(count) * 2 > kMemoryPhysical) {
+      ++repeat_misses_[kRepeatMissGeometry];
+      return false;
+    }
+    indices_.clear();
+    indices_pool_ = 0;
+    uint32_t vmin = UINT32_MAX;
+    uint32_t vmax = 0;
+    ScanIndices16(memory_->TranslatePhysical(base & 0x1FFFFFFF), count, order, base, vmin, vmax);
+    const auto give_up = [&](bool miss) {
+      indices_known_ = nullptr;  // as the full path leaves them (it sets them again anyway)
+      indices_scanned_ = true;
+      repeat_misses_[kRepeatMissGeometry] += miss ? 1 : 0;
+      return false;
+    };
+    std::array<VertexSource, 16> sources;
+    VkDeviceSize bytes_vertices = 0;
+    const VkDeviceSize bytes_indices = VkDeviceSize(count) * 2;
+    // As the full path's upload space, without the textures and the shared block (the reference's).
+    const VkDeviceSize room =
+        (vertices_base_cero_ && input.bindings.size() == 1 ? VkDeviceSize(input.bindings[0].stride) : 0) +
+        bytes_indices + 4 + 64 * 8 +
+        (use_ubo_ ? kUboBytesVs + kUboBytesPs + 2 * alignment_ubo_ : 2 * VkDeviceSize(kRegistersConstants) * 4 + 32);
+    if (vmin > vmax || vmax - vmin >= kMaxVerticesPerDraw ||
+        SourcesOf(input, r, vmin, vmax - vmin + 1, false, sources, bytes_vertices) ||
+        upload_used_ + room + bytes_vertices > kSizeUpload) {
+      return give_up(true);
+    }
+    if (check) {
+      repeat_check_count_ = count;  // what the shortcut would have drawn (CheckRepeat)
+      return give_up(false);
+    }
+    const VkCommandBuffer cmd = pass_commands_;
+    if (eds_mode_ && !SetStateDynamic(cmd, d.key)) {
+      return give_up(false);
+    }
+    std::array<VkDeviceSize, 16> offsets_vertices{};
+    UploadVertices(input, sources, offsets_vertices);
+    const VkDeviceSize offset_indices = UploadIndices(true, true, bytes_indices, vmin, vmax);
+    UploadConstants(p, d.ps, r);
+    BindSet4(cmd, d.offset_shared);
+    bool base_cero = false;
+    uint32_t first_vertex = 0;
+    BindVertices(cmd, input, offsets_vertices, input.bindings.size() == 1 ? sources[0].bytes : 0, vmin, base_cero,
+                 first_vertex);
+    uint32_t first_index = 0;
+    int32_t vertex_offset = 0;
+    DrawIndexed(cmd, offset_indices, true, count, base_cero, first_vertex, vmin, first_index, vertex_offset);
+    ++draws_per_category_[d.category];
+    triangles_per_category_[d.category] += count / 3;
+    ++drawn_;
+    ++draws_in_pass_;
+    ++repeat_geometry_hits_;
+    // The next draw compares with this one: the reference but for its geometry.
+    for (size_t i = 0; i < kRepeatRegisterCount; ++i) {
+      d.registers[i] = r[kRepeatRegisters[i]];
+    }
+    std::memcpy(d.fetch.data(), r + kRegFetch, sizeof(d.fetch));
+    d.generation_fetch = p.generation_fetch;
+    d.index_count = count;
+    d.count = count;  // run mw2sp_030: left stale, the next plain check saw "MISMATCH (counts)" and switched all off
+    d.first_vertex = base_cero ? first_vertex : 0;
+    d.first_index = first_index;
+    d.vertex_offset = vertex_offset;
+    d.vmin = vmin;
+    d.triangles = count / 3;
+    return true;
+  }
+
+  // --- Draw's geometry stages, shared with the geometry variant ---------------------------------------------
+  // The common 16-bit index case (no restart, offset or quads) into indices16_, or bound from the index cache's
+  // pool (indices_pool_), or known from this frame's uploads (indices_known_). vmin/vmax: the range used.
+  void ScanIndices16(const uint8_t* data, uint32_t count, xenos::Endian order, uint32_t base, uint32_t& vmin,
+                     uint32_t& vmax) {
+    indices16_.resize(count);  // uninitialized (UninitializedAllocator): filled by the scan
+    uint16_t* output = indices16_.data();
+    uint32_t min = 0xFFFF;
+    uint32_t max = 0;
+    // A converted copy in the vertex cache's pools whose pages have no newer write stamp.
+    const bool from_pool = icache_active_ && IndexCacheByWrites(data, count, order == xenos::Endian::k8in16,
+                                                                base & 0x1FFFFFFF, uint32_t(order), min, max,
+                                                                indices_pool_);
+    // The same range already scanned and uploaded in this frame (DedupeIndices).
+    indices_known_ = nullptr;
+    if (dedupe_indices_on_ && !from_pool) {
+      const uint32_t sync = g_syncs_ring.load(std::memory_order_relaxed);
+      if (sync != dedupe_indices_sync_view_) {
+        dedupe_indices_sync_view_ = sync;
+        dedupe_indices_.Forget();
+      }
+      indices_known_ = dedupe_indices_.Find(base & 0x1FFFFFFF, count, uint32_t(order));
+    }
+    index_data_ = data;
+    index_flip_ = order == xenos::Endian::k8in16;
+    index_base_ = base & 0x1FFFFFFF;
+    index_order_ = uint32_t(order);
+    const bool check_known = indices_known_ && (dedupe_indices_checks_ < kDedupeIndicesChecks ||
+                                                (++dedupe_indices_sampled_ & 4095) == 0);
+    if (from_pool) {
+      indices_scanned_ = false;  // no scan and no upload: bound from the pool
+    } else if (indices_known_ && !check_known) {
+      min = indices_known_->min;  // the scan is skipped; the upload reuses the copy (or converts then)
+      max = indices_known_->max;
+      indices_scanned_ = false;
+      ++dedupe_indices_hits_;
+    } else {
+      // With hand-written NEON and its guard (Indices16, mw2mp_native_indices_neon).
+      Indices16(data, count, output, index_flip_, min, max);
+      if (check_known) {
+        CheckKnownIndices(count, min, max);
+      }
+    }
+    vmin = min;
+    vmax = max;
+  }
+
+  // Bytes of each vertex binding in guest memory.
+  struct VertexSource {
+    const uint8_t* data;
+    xenos::Endian order;
+    uint32_t bytes;
+    uint64_t address;  // physical, of the first byte used
+    uint32_t start;      // bytes from the buffer's start to address
+    uint32_t available;  // the buffer's bytes (fetch constant)
+  };
+  // Each binding's source for vertices vmin..vmin+vertices-1. 0 = all set; otherwise the Reject cause:
+  // 10 invalid fetch constant, 12 outside memory, 11 past the end of the buffer (only with clip false; with clip
+  // true it is clipped with a warning).
+  uint32_t SourcesOf(const VertexInput& input, const uint32_t* r, uint32_t vmin, uint32_t vertices, bool clip,
+                     std::array<VertexSource, 16>& sources, VkDeviceSize& bytes_vertices) {
+    for (size_t b = 0; b < input.bindings.size(); ++b) {
+      const VertexBinding& binding = input.bindings[b];
+      const uint32_t d0 = r[kRegFetch + binding.slot * 2];
+      const uint32_t d1 = r[kRegFetch + binding.slot * 2 + 1];
+      if ((d0 & 0x3) != uint32_t(xenos::FetchConstantType::kVertex)) {
+        return 10;
+      }
+      const uint64_t address = uint64_t(d0 & 0x1FFFFFFC);
+      const uint64_t available = uint64_t((d1 >> 2) & 0xFFFFFF) * 4;
+      const uint64_t start = uint64_t(vmin) * binding.stride;
+      uint64_t needed = uint64_t(vertices) * binding.stride;
+      if (start + needed > available) {
+        if (!clip) {
+          return 11;
+        }
+        Warn(11, "vertices past the end of their buffer: clipped");
+        needed = available > start ? (available - start) / binding.stride * binding.stride : 0;
+      }
+      if (!needed || address + start + needed > kMemoryPhysical) {
+        return 12;
+      }
+      sources[b] = {memory_->TranslatePhysical(uint32_t(address + start)),
+                     static_cast<xenos::Endian>(d1 & 0x3), uint32_t(needed),
+                     address + start, uint32_t(start), uint32_t(available)};
+      // Its vertex cache set and stamp line, fetched before the uploads stage looks them up.
+      if (prefetch_lines_ && vcache_active_ && vcache_by_writes_) {
+        PrefetchCacheLines(((address + start) & 0x1FFFFFFF) | (uint64_t(uint32_t(needed) & 0x3FFFFFF) << 29) |
+                               (uint64_t(d1 & 0x3) << 55) | (uint64_t(1) << 63),
+                           uint32_t(address + start));
+      }
+      if (needed >= 4096) {
+        g_probe_vertex_address.store(uint32_t(address + start), std::memory_order_relaxed);
+      }
+      bytes_vertices += (needed + 3) & ~VkDeviceSize(3);
+    }
+    return 0;
+  }
+
+  // Each binding's place: this frame's copy (dedupe), GPU skinning, the vertex cache or a new copy.
+  void UploadVertices(const VertexInput& input, const std::array<VertexSource, 16>& sources,
+                      std::array<VkDeviceSize, 16>& offsets_vertices) {
+    // If the guest has waited for the GPU since the last draw, it may legally have rewritten an already
+    // referenced range: what was recorded is no longer valid.
+    if (dedupe_active_) {
+      const uint32_t sync = g_syncs_ring.load(std::memory_order_relaxed);
+      if (sync != dedupe_sync_view_) {
+        dedupe_sync_view_ = sync;
+        dedupe_.Forget();
+      }
+    }
+    const auto before_vertices =
+        time_ ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+    for (size_t b = 0; b < input.bindings.size(); ++b) {
+      const VertexSource& source = sources[b];
+      // Each binding's time by path (C6 substages 40-42).
+      const auto t_binding = time_ ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+      if (diag_vertices_repeated_) {
+        AnnotateVerticesRepeated(source.address, source.bytes, uint32_t(source.order), source.data);
+      }
+      VkDeviceSize offset;
+      // In the dedupe's check frames every range carries the hash of its guest bytes; a reuse whose
+      // bytes differ is counted (DedupeVertices::discrepancies) and copied as usual.
+      const uint64_t hash_dedupe =
+          dedupe_active_ && dedupe_hash_frame_ ? XXH3_64bits(source.data, size_t(source.bytes)) | 1 : 0;
+      // If this same range was already copied in this frame, its place in the upload buffer is reused and
+      // nothing is copied. See mw2mp_native_vertex_dedupe.h.
+      if (dedupe_active_ &&
+          dedupe_.Find(source.address, source.bytes, uint32_t(source.order), offset, hash_dedupe)) {
+        offsets_vertices[b] = offset;
+        SamplerPath(40, t_binding);
+        continue;
+      }
+      // GPU skinning (mw2mp_gpu_skin.h). A range that holds skinning jobs' output is skinned by compute
+      // dispatches into its place in the upload buffer instead of copied (the parts without a job are copied).
+      if (skin_on_ && mw2mp::gpu_skin::MayOverlap(uint32_t(source.address), source.bytes) &&
+          SkinOnGpu(source.data, source.order, source.bytes, source.address, input.bindings[b].stride,
+                    input.bindings.size() == 1, offset)) {
+        offsets_vertices[b] = offset;
+        bytes_vertices_ += source.bytes;
+        if (dedupe_active_) {
+          dedupe_.Annotate(source.address, source.bytes, uint32_t(source.order), offset, hash_dedupe);
+        }
+        SamplerPath(42, t_binding);
+        continue;
+      }
+      // mw2mp_native_vertex_cache: bound from a persistent copy when its bytes did not change (the offset then
+      // carries kVertexPoolTag; see ResolveVertexBinding).
+      if (vcache_active_) {
+        const VkDeviceSize alignment =
+            vertices_base_cero_ && input.bindings.size() == 1 ? VkDeviceSize(input.bindings[0].stride) : 4;
+        uint64_t hash_cache = hash_dedupe;
+        if (VertexCache(source.data, source.bytes, source.order, source.address, alignment, hash_cache, offset,
+                        source.start, source.available)) {
+          offsets_vertices[b] = offset;
+          if (dedupe_active_) {
+            dedupe_.Annotate(source.address, source.bytes, uint32_t(source.order), offset, hash_dedupe);
+          }
+          SamplerPath(41, t_binding);
+          continue;
+        }
+      }
+      // With a single binding, at a multiple of its stride (mw2mp_native_zero_base_vertices).
+      if (vertices_base_cero_ && input.bindings.size() == 1) {
+        ReserveMultiple(source.bytes, input.bindings[0].stride, offset);
+      } else {
+        Reserve(source.bytes, 4, offset);
+      }
+      const CopyJob job{source.data, upload_data_ + offset, source.bytes / 4, source.order};
+      if (!copies_active_ || !EnqueueCopy(job)) {
+        CopyVertices(job);
+      }
+      if (watch_vertices_) [[unlikely]] {
+        WatchVerticesCollect(source.address, source.bytes);
+      }
+      bytes_vertices_ += source.bytes;
+      offsets_vertices[b] = offset;
+      if (dedupe_active_) {
+        dedupe_.Annotate(source.address, source.bytes, uint32_t(source.order), offset, hash_dedupe);
+      }
+      SamplerPath(42, t_binding);
+    }
+    if (time_) {
+      ns_vertices_ += uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                   std::chrono::steady_clock::now() - before_vertices)
+                                   .count());
+    }
+  }
+
+  // The indices' place: the index cache's pool, this frame's copy (DedupeIndices) or a new one. Leaves
+  // indices_known_ cleared and indices_scanned_ set.
+  VkDeviceSize UploadIndices(bool with_indices, bool indices_16, VkDeviceSize bytes_indices, uint32_t vmin,
+                             uint32_t vmax) {
+    VkDeviceSize offset_indices = 0;
+    if (with_indices) {
+      if (indices_pool_) {
+        offset_indices = indices_pool_;  // in the index cache's pool (tagged as the vertex cache's)
+        bytes_indices_saved_ += bytes_indices;
+      } else if (indices_16 && indices_known_ && indices_known_->frame == dedupe_indices_.frame()) {
+        // Already in this upload buffer (DedupeIndices).
+        offset_indices = indices_known_->offset;
+        bytes_indices_saved_ += bytes_indices;
+      } else {
+        Reserve(bytes_indices, 4, offset_indices);
+        bytes_indices_uploaded_ += bytes_indices;
+        if (indices_16 && indices_known_ && !indices_scanned_) {
+          // The scan was skipped and the upload buffer changed since (a submit in between): convert from the
+          // guest's indices, which a draw cannot change, straight into the upload buffer.
+          uint32_t mn = 0;
+          uint32_t mx = 0;
+          Indices16Neon(index_data_, uint32_t(bytes_indices / 2),
+                        reinterpret_cast<uint16_t*>(upload_data_ + offset_indices), index_flip_, mn, mx);
+          ++dedupe_indices_converted_;
+        } else {
+          std::memcpy(upload_data_ + offset_indices,
+                      indices_16 ? static_cast<const void*>(indices16_.data())
+                                    : static_cast<const void*>(indices_.data()),
+                      size_t(bytes_indices));
+        }
+        if (indices_16 && dedupe_indices_on_) {
+          // While reuses are checked, the guest bytes' hash goes with the entry (CheckKnownIndices).
+          const uint64_t hash = dedupe_indices_checks_ < kDedupeIndicesChecks || (dedupe_indices_sampled_ & 4095) < 64
+                                    ? XXH3_64bits(index_data_, size_t(bytes_indices))
+                                    : 0;
+          dedupe_indices_.Annotate(index_base_, uint32_t(bytes_indices / 2), index_order_, uint16_t(vmin),
+                                   uint16_t(vmax), offset_indices, hash);
+        }
+      }
+    }
+    indices_known_ = nullptr;
+    indices_scanned_ = true;
+    return offset_indices;
+  }
+
+  /*
+   * mw2mp_native_zero_base_vertices. With a single binding whose copy starts at a multiple of its stride,
+   * the upload buffer is bound at 0 (once per command buffer, or after the deferred sky) and the draw is
+   * shifted with first_vertex. The others bind as usual. bytes0: the single binding's source bytes.
+   */
+  void BindVertices(VkCommandBuffer cmd, const VertexInput& input, const std::array<VkDeviceSize, 16>& offsets_vertices,
+                    uint32_t bytes0, uint32_t vmin, bool& base_cero, uint32_t& first_vertex) {
+    // Each binding's buffer (the upload buffer or a vertex cache pool) and its offset in it.
+    std::array<VkBuffer, 16> bind_buffers;
+    std::array<VkDeviceSize, 16> bind_offsets;
+    for (size_t i = 0; i < input.bindings.size(); ++i) {
+      ResolveVertexBinding(offsets_vertices[i], upload_, bind_buffers[i], bind_offsets[i]);
+    }
+    if (vertices_base_cero_ && input.bindings.size() == 1) {
+      const VkDeviceSize stride = input.bindings[0].stride;
+      if (bind_offsets[0] % stride == 0) {
+        base_cero = CheckBaseZero(bind_offsets[0], stride, bytes0, vmin, first_vertex,
+                                  bind_buffers[0] == upload_ ? std::min(kSizeUpload, upload_size_real_)
+                                                             : vpools_[0].size);
+      } else {
+        ++base_zero_misaligned_;
+      }
+    } else if (input.bindings.size() > 1) {
+      ++base_zero_several_bindings_;
+    }
+    if (!input.bindings.empty()) {
+      // The buffers come from ResolveVertexBinding (the upload buffer or a vertex cache pool); a
+      // binding is the same as the recorded one only with the same buffer and offset.
+      /*
+       * And do not bind again if it is exactly what is already bound.
+       *
+       * In NVK each binding is 5 dwords plus an invocation of the MME macro NVK_MME_BIND_VB
+       * (nvk_cmd_draw.c:4658), with no redundancy check inside: ~2,800 MME macros per frame. With vertex
+       * deduplication 28-33 % of the bindings reuse the same offset, so two consecutive draws of the same
+       * mesh give exactly the same offsets.
+       */
+      // On the base-zero path what gets bound is the whole buffer, from 0.
+      static constexpr VkDeviceSize kBindingInZero = 0;
+      const VkDeviceSize* a_bind = base_cero ? &kBindingInZero : bind_offsets.data();
+      const uint32_t n_bindings = uint32_t(input.bindings.size());
+      bool equal = n_bindings == bindings_recorded_;
+      for (uint32_t i = 0; equal && i < n_bindings; ++i) {
+        equal = a_bind[i] == offsets_recorded_[i] && bind_buffers[i] == buffers_vertices_[i];
+      }
+      if (!equal) {
+        MW2MP_SUB(8, dfn_.vkCmdBindVertexBuffers(cmd, 0, n_bindings, bind_buffers.data(), a_bind));
+        ++base_zero_bindings_recorded_;
+        bindings_recorded_ = n_bindings;
+        for (uint32_t i = 0; i < n_bindings; ++i) {
+          offsets_recorded_[i] = a_bind[i];
+          buffers_vertices_[i] = bind_buffers[i];
+        }
+      } else {
+        ++bindings_saved_;
+      }
+      ++base_cero_total_;
+      base_zero_draws_ += base_cero ? 1 : 0;
+    }
+  }
+
+  // The index buffer (bound once per index type and buffer) and the indexed draw. first_index / vertex_offset:
+  // the draw's arguments, for the repeat shortcut.
+  void DrawIndexed(VkCommandBuffer cmd, VkDeviceSize offset_indices, bool indices_16, uint32_t index_count,
+                   bool base_cero, uint32_t first_vertex, uint32_t vmin, uint32_t& first_index,
+                   int32_t& vertex_offset) {
+    // The upload buffer is bound once per index type and each draw uses firstIndex.
+    const VkIndexType type_indices = indices_16 ? VK_INDEX_TYPE_UINT16 : VK_INDEX_TYPE_UINT32;
+    // Or the index cache's pool (mw2mp_native_index_cache), with the same tag as the vertex cache's.
+    VkBuffer buffer_indices = upload_;
+    VkDeviceSize at_indices = offset_indices;
+    ResolveVertexBinding(offset_indices, upload_, buffer_indices, at_indices);
+    if (type_indices != type_indices_recorded_ || buffer_indices != buffer_indices_recorded_) {
+      MW2MP_SUB(9, dfn_.vkCmdBindIndexBuffer(cmd, buffer_indices, 0, type_indices));
+      type_indices_recorded_ = type_indices;
+      buffer_indices_recorded_ = buffer_indices;
+    }
+    // On the base-zero path, vertexOffset also carries where the copy starts (in vertices).
+    vertex_offset = base_cero ? int32_t(int64_t(first_vertex) - int64_t(vmin)) : -int32_t(vmin);
+    first_index = uint32_t(at_indices / (indices_16 ? 2 : 4));
+    MW2MP_SUB(10, dfn_.vkCmdDrawIndexed(cmd, index_count, 1, first_index, vertex_offset, 0));
+  }
+
+  // The draw just recorded in full becomes the reference for the next one.
+  void SnapshotRepeat(const RepeatDraw& done, const DrawRequest& p, const ShaderInput* ps, const uint32_t* r) {
+    RepeatDraw& d = repeat_;
+    d = done;
+    d.vs = p.vs;
+    d.ps_request = p.ps;
+    d.ps = ps;
+    d.generation_vs = p.generation_vs;
+    d.generation_fetch = p.generation_fetch;
+    d.generation_framing = p.generation_framing;
+    d.vegetation_game = p.vegetation_game;
+    d.frame = frame_;
+    d.epoch_upload = epoch_upload_;
+    d.generation_textures = generation_textures_;
+    d.slots_retired = slots_retired_;
+    d.generation_commands = context_->GenerationCommands();
+    d.pass_key = pass_key_;
+    d.sync = g_syncs_ring.load(std::memory_order_relaxed);
+    for (size_t i = 0; i < kRepeatRegisterCount; ++i) {
+      d.registers[i] = r[kRepeatRegisters[i]];
+    }
+    std::memcpy(d.fetch.data(), r + kRegFetch, sizeof(d.fetch));
+    // The vertex bindings' fetch words, minus any a sampler of either shader reads (6 words per texture slot).
+    d.fetch_vertex = {};
+    if (d.input) {
+      for (const VertexBinding& b : d.input->bindings) {
+        for (uint32_t w = b.slot * 2; w < b.slot * 2 + 2 && w < kRepeatFetchWords; ++w) {
+          d.fetch_vertex[w >> 6] |= uint64_t(1) << (w & 63);
+        }
+      }
+    }
+    for (const ShaderInput* shader : {static_cast<const ShaderInput*>(p.vs), ps}) {
+      for (const SamplerShader& sampler : shader ? std::span<const SamplerShader>(shader->samplers)
+                                                 : std::span<const SamplerShader>()) {
+        const uint32_t first = uint32_t(sampler.reg_index) * 6;
+        for (uint32_t w = first; w < first + 6 && w < kRepeatFetchWords; ++w) {
+          d.fetch_vertex[w >> 6] &= ~(uint64_t(1) << (w & 63));
+        }
+      }
+    }
+    d.valid = true;
+  }
+
+  // A check draw: the full path's record against what the shortcut would have recorded (repeat_, still the
+  // previous draw's).
+  void CheckRepeat(const RepeatDraw& full) {
+    repeat_check_ = false;
+    ++repeat_checks_;
+    const RepeatDraw& d = repeat_;
+    const uint32_t count_geometry = repeat_check_count_;  // the index count the geometry variant would draw
+    const bool geometry = count_geometry != UINT32_MAX;     // a geometry variant's check (DrawRepeatGeometry)
+    repeat_check_count_ = UINT32_MAX;
+    const char* what = nullptr;
+    if (full.pipeline != d.pipeline) {
+      what = "pipeline";
+    } else if (std::memcmp(&full.key, &d.key, sizeof(full.key)) != 0) {
+      what = "pipeline key";
+    } else if (geometry ? !full.with_indices || !full.indices_16 || full.index_count != count_geometry ||
+                              full.n_bindings != d.n_bindings
+                        : full.with_indices != d.with_indices || full.indices_16 != d.indices_16 ||
+                              full.index_count != d.index_count || full.count != d.count || full.vmin != d.vmin ||
+                              full.n_bindings != d.n_bindings) {
+      what = geometry ? "geometry counts" : "counts";
+    } else if (std::memcmp(&full.viewport, &d.viewport, sizeof(full.viewport)) != 0 ||
+               std::memcmp(&full.scissor, &d.scissor, sizeof(full.scissor)) != 0) {
+      what = "framing";
+    } else if (std::memcmp(full.blend, d.blend, sizeof(full.blend)) != 0 ||
+               std::memcmp(full.bias, d.bias, sizeof(full.bias)) != 0 ||
+               std::memcmp(full.stencil, d.stencil, sizeof(full.stencil)) != 0) {
+      what = "dynamic state";
+    } else if (full.category != d.category) {
+      what = "target category";
+    }
+    if (what) {
+      MismatchRepeat(what, geometry);
+      return;
+    }
+    if (!geometry && full.first_index != d.first_index || full.vertex_offset != d.vertex_offset ||
+        full.first_vertex != d.first_vertex || full.offset_shared != d.offset_shared) {
+      ++repeat_offsets_moved_;
+    }
+  }
+
+  // A geometry variant's check switches off only the variant (mw2mp_native_repeat_geometry).
+  void MismatchRepeat(const char* what, bool geometry) {
+    repeat_check_ = false;
+    repeat_check_count_ = UINT32_MAX;
+    (geometry ? repeat_geometry_on_ : repeat_on_) = false;
+    repeat_.valid = false;
+    REXLOG_ERROR("[native] C6 repeat shortcut{}: MISMATCH ({}) after {} matches and {} checks: switched OFF for the "
+                 "rest of the session. VS n{} PS n{} count {} index count {}",
+                 geometry ? " (geometry variant)" : "", what, geometry ? repeat_geometry_matches_ : repeat_matches_,
+                 repeat_checks_, repeat_.vs ? int(repeat_.vs->number) : -1, repeat_.ps ? int(repeat_.ps->number) : -1,
+                 repeat_.count, repeat_.index_count);
+  }
+
+  void ReportRepeat() {
+    const auto now = std::chrono::steady_clock::now();
+    if (now < repeat_next_) {
+      return;
+    }
+    const bool first = repeat_next_ == std::chrono::steady_clock::time_point{};
+    repeat_next_ = now + std::chrono::seconds(10);
+    if (first) {
+      MW2MP_REPORT_RING("[native] C6 repeat shortcut (mw2mp_native_repeat_draws): {}", repeat_on_ ? "on" : "off");
+    }
+    uint64_t misses = 0;
+    for (uint64_t m : repeat_misses_) {
+      misses += m;
+    }
+    const uint64_t draws = repeat_hits_ + repeat_geometry_hits_ + misses;
+    if (!first && draws) {
+      // The three registers that most often broke a match.
+      std::array<size_t, kRepeatRegisterCount> order;
+      for (size_t i = 0; i < order.size(); ++i) {
+        order[i] = i;
+      }
+      std::partial_sort(order.begin(), order.begin() + 3, order.end(),
+                        [&](size_t a, size_t b) { return repeat_misses_register_[a] > repeat_misses_register_[b]; });
+      std::string registers;
+      for (size_t k = 0; k < 3 && repeat_misses_register_[order[k]]; ++k) {
+        fmt::format_to(std::back_inserter(registers), "{}{:04X} {}", k ? ", " : "", kRepeatRegisters[order[k]],
+                       repeat_misses_register_[order[k]]);
+      }
+      const auto pct = [&](uint64_t v) { return 100.0 * double(v) / double(draws); };
+      MW2MP_REPORT_RING(
+          "[native] C6 repeat shortcut ({}), last 10 s: {} of {} draws recorded as a repeat of the previous one "
+          "({:.1f} %); not a repeat: previous no reference {:.1f} %, shaders {:.1f} %, frame {:.1f} %, sync {:.1f} %, "
+          "registers {:.1f} % ({}), fetch {:.1f} %, bound state {:.1f} %, room {:.1f} %; {} checked against the full "
+          "path in total, {} of them with other upload offsets (fine) | geometry variant "
+          "(mw2mp_native_repeat_geometry {}): {} draws ({:.1f} %), {:.1f} % that did not fit; {} matches in total",
+          repeat_on_ ? "on" : "OFF", repeat_hits_, draws, pct(repeat_hits_), pct(repeat_misses_[kRepeatMissPrevious]),
+          pct(repeat_misses_[kRepeatMissShaders]), pct(repeat_misses_[kRepeatMissFrame]),
+          pct(repeat_misses_[kRepeatMissSync]), pct(repeat_misses_[kRepeatMissRegister]),
+          registers.empty() ? std::string("none") : registers, pct(repeat_misses_[kRepeatMissFetch]),
+          pct(repeat_misses_[kRepeatMissBound]), pct(repeat_misses_[kRepeatMissRoom]), repeat_checks_,
+          repeat_offsets_moved_, repeat_geometry_on_ ? "on" : "off", repeat_geometry_hits_, pct(repeat_geometry_hits_),
+          pct(repeat_misses_[kRepeatMissGeometry]), repeat_geometry_matches_);
+    }
+    repeat_hits_ = 0;
+    repeat_geometry_hits_ = 0;
+    repeat_misses_ = {};
+    repeat_misses_register_ = {};
+  }
+
+  // Set 4 (dynamic UBOs). Always bound, because the new shaders use it statically: with the real offsets
+  // if mw2mp_native_constants_ubo is set, and 0 otherwise. Only recorded when something changes. Draw's record
+  // stage and the repeat shortcut.
+  void BindSet4(VkCommandBuffer cmd, VkDeviceSize offset_shared) {
+    {
+      const std::array<uint32_t, 3> offsets_ubo =
+          use_ubo_ ? std::array<uint32_t, 3>{uint32_t(constants_vs_offset_), uint32_t(constants_ps_offset_),
+                                              uint32_t(offset_shared)}
+                    : std::array<uint32_t, 3>{0, 0, 0};
+      ++set4_draws_;  // C6 set 4 report
+      if (!ubo_bound_ || slot_ubo_bound_ != slot_current_ || offsets_ubo != offsets_ubo_bound_) {
+        // Which offsets change at each bind (measurement only). What NVK saves by differences depends on it:
+        // every cbuf whose offset does not change is one rebind less in the Draw.
+        if (!ubo_bound_ || slot_ubo_bound_ != slot_current_) {
+          ++set4_first_;
+        } else {
+          ++set4_changes_[(offsets_ubo[0] != offsets_ubo_bound_[0] ? 1u : 0u) |
+                          (offsets_ubo[1] != offsets_ubo_bound_[1] ? 2u : 0u) |
+                          (offsets_ubo[2] != offsets_ubo_bound_[2] ? 4u : 0u)];
+        }
+        MW2MP_SUB(2, dfn_.vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, layout_pipeline_, 4, 1,
+                                                  &sets_ubo_[slot_current_], 3, offsets_ubo.data()));
+        offsets_ubo_bound_ = offsets_ubo;
+        slot_ubo_bound_ = slot_current_;
+        ubo_bound_ = true;
+      }
+    }
+  }
+
+  /*
+   * The VS and PS constants of a draw, into the upload buffer (Draw's uploads stage and the repeat shortcut).
+   * Only the registers each shader reads (ShaderInput::constants_bytes). With the same generation, the copy is
+   * reused if it already covers what this shader needs. Returns the PS bytes (CopyCompositeTreated). The caller
+   * has checked the room in the upload buffer.
+   */
+  uint32_t UploadConstants(const DrawRequest& p, const ShaderInput* ps, const uint32_t* r) {
+    const uint32_t bytes_vs = std::min<uint32_t>(p.vs->constants_bytes, kRegistersConstants * 4);
+    // mw2mp_native_constants_used: a block copied in part holds only its shader's registers.
+    const bool vs_runs = constants_used_active_ && p.vs->constants_runs_valid;
+    if (constants_vs_generation_ != p.generation_constants_vs ||
+        constants_vs_epoch_ != epoch_upload_ || bytes_vs > constants_vs_bytes_ ||
+        (constants_vs_shader_ && constants_vs_shader_ != p.vs)) {
+      // Why they are uploaded again (measurement only; each upload is another set 4 offset).
+      ++reuploads_vs_[constants_vs_generation_ != p.generation_constants_vs ? 0
+                      : constants_vs_epoch_ != epoch_upload_                 ? 1
+                                                                              : 2];
+      // With UBOs the block goes whole (the driver may read the full range) and aligned to the device minimum
+      const auto t_copy = time_ ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+      Reserve(use_ubo_ ? std::max<VkDeviceSize>(bytes_vs, kUboBytesVs) : bytes_vs, use_ubo_ ? alignment_ubo_ : 16,
+               constants_vs_offset_);
+      if (vs_runs) {
+        for (const auto& [first, n] : p.vs->constants_runs) {
+          std::memcpy(upload_data_ + constants_vs_offset_ + first * 16u, r + kRegConstantsVs + first * 4u, n * 16u);
+        }
+        bytes_constants_vs_ += p.vs->constants_runs_bytes;
+      } else {
+        std::memcpy(upload_data_ + constants_vs_offset_, r + kRegConstantsVs, bytes_vs);
+        bytes_constants_vs_ += bytes_vs;
+      }
+      constants_vs_shader_ = vs_runs ? p.vs : nullptr;
+      SamplerPath(43, t_copy);  // C6 substage
+      constants_vs_generation_ = p.generation_constants_vs;
+      constants_vs_epoch_ = epoch_upload_;
+      constants_vs_bytes_ = bytes_vs;
+    }
+    const uint32_t bytes_ps =
+        ps ? std::min<uint32_t>(ps->constants_bytes, kRegistersConstants * 4) : 0;
+    const bool ps_runs = ps && constants_used_active_ && ps->constants_runs_valid;
+    if (ps && (constants_ps_generation_ != p.generation_constants_ps ||
+               constants_ps_epoch_ != epoch_upload_ || bytes_ps > constants_ps_bytes_ ||
+               (constants_ps_shader_ && constants_ps_shader_ != ps))) {
+      ++reuploads_ps_[constants_ps_generation_ != p.generation_constants_ps ? 0
+                      : constants_ps_epoch_ != epoch_upload_                 ? 1
+                                                                              : 2];
+      const auto t_copy = time_ ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+      Reserve(use_ubo_ ? std::max<VkDeviceSize>(bytes_ps, kUboBytesPs) : bytes_ps, use_ubo_ ? alignment_ubo_ : 16,
+               constants_ps_offset_);
+      if (ps_runs) {
+        for (const auto& [first, n] : ps->constants_runs) {
+          // A PS reads at most 224 registers of its block (bytes_ps); the analysis never names more.
+          if (first * 16u + n * 16u <= bytes_ps) {
+            std::memcpy(upload_data_ + constants_ps_offset_ + first * 16u, r + kRegConstantsPs + first * 4u,
+                        n * 16u);
+          }
+        }
+        bytes_constants_ps_ += ps->constants_runs_bytes;
+      } else {
+        std::memcpy(upload_data_ + constants_ps_offset_, r + kRegConstantsPs, bytes_ps);
+        bytes_constants_ps_ += bytes_ps;
+      }
+      constants_ps_shader_ = ps_runs ? ps : nullptr;
+      SamplerPath(44, t_copy);  // C6 substage
+      constants_ps_generation_ = p.generation_constants_ps;
+      constants_ps_epoch_ = epoch_upload_;
+      constants_ps_bytes_ = bytes_ps;
+    }
+    return bytes_ps;
   }
 
   /*
@@ -6530,6 +7224,8 @@ class VulkanDrawsImpl final : public VulkanDraws {
     ReportHashes();  // texture hash thread, every 10 s
     ReportReuse();  // measurement only: new textures with a live one's content, every 10 s
     ReportTextureStamps();  // texture rechecks by write stamps, every 10 s
+    ReportCensus();  // draw census (mw2mp_native_draw_census), every 10 s
+    ReportRepeat();  // repeat shortcut (mw2mp_native_repeat_draws), every 10 s
     ReportTextureReuse();  // new textures that took a cold one's image, every 10 s
     EvictTexturesYesDoesMissing();
     pool_textures_.PerFrame(frame_);  // grows with headroom, never exactly on demand
@@ -6732,6 +7428,7 @@ class VulkanDrawsImpl final : public VulkanDraws {
   // of the entries costs ~95 us per copy on the Switch.
   void InvalidateTexturesIn(uint32_t address) override {
     address &= 0x1FFFF000u;
+    repeat_.valid = false;  // the previous draw may sample it (repeat shortcut)
     for (CacheSampler& c : cache_samplers_) {
       const uint32_t d = AddressCacheSampler(c.fetch.data());
       if ((d & ~1u) == address || (d & 1u)) {
@@ -6768,6 +7465,7 @@ class VulkanDrawsImpl final : public VulkanDraws {
   // image); what has to be redone is which slot each fetch constant gets. By their slots' generations,
   // without walking the caches.
   void InvalidateImages(VkImage a, VkImage b) override {
+    repeat_.valid = false;  // the previous draw may sample them (repeat shortcut)
     for (VkImage image : {a, b}) {
       if (image == VK_NULL_HANDLE || (image == b && a == b)) {
         continue;
@@ -6792,6 +7490,7 @@ class VulkanDrawsImpl final : public VulkanDraws {
       query_occlusion_ = UINT32_MAX;
     }
     occlusion_open_ = open;
+    repeat_.valid = false;
   }
 
   uint64_t Drawn() const override { return drawn_; }
@@ -7915,7 +8614,8 @@ class VulkanDrawsImpl final : public VulkanDraws {
                            "{} unchanged, {} updated ({} pages, {:.2f} MB uploaded), {:.1f} ms; {} checked against the "
                            "whole read since boot; finding the changed pages: comparing {:.0f} us each ({}), by hash "
                            "{:.0f} us each ({}), by the writer's marks {:.0f} us each ({}; {} also hashed as a check, "
-                           "{} pages marked only after the check, {} pages changed without a mark)",
+                           "{} pages marked only after the check, {} pages changed without a mark, {} pages by "
+                           "write stamps)",
                            volume_states_, volume_no_changes_, volume_updated_report_, volume_pages_,
                            double(volume_bytes_) / 1048576.0, double(volume_ns_) / 1e6, volume_checked_,
                            volume_detects_[0] ? double(volume_detect_ns_[0]) / 1e3 / double(volume_detects_[0]) : 0.0,
@@ -7923,11 +8623,29 @@ class VulkanDrawsImpl final : public VulkanDraws {
                            volume_detects_[1] ? double(volume_detect_ns_[1]) / 1e3 / double(volume_detects_[1]) : 0.0,
                            volume_detects_[1],
                            volume_detects_[2] ? double(volume_detect_ns_[2]) / 1e3 / double(volume_detects_[2]) : 0.0,
-                           volume_detects_[2], volume_mark_checked_, volume_mark_late_, volume_mark_misses_);
+                           volume_detects_[2], volume_mark_checked_, volume_mark_late_, volume_mark_misses_,
+                           volume_mark_stamped_);
+      volume_mark_stamped_ = 0;
       volume_states_ = volume_no_changes_ = volume_updated_report_ = 0;
       volume_pages_ = volume_bytes_ = volume_ns_ = 0;
       volume_detect_ns_[0] = volume_detect_ns_[1] = volume_detects_[0] = volume_detects_[1] = 0;
       volume_detect_ns_[2] = volume_detects_[2] = volume_mark_checked_ = volume_mark_misses_ = volume_mark_late_ = 0;
+    }
+    if (const uint64_t hits = g_watch_hits.exchange(0, std::memory_order_relaxed)) {
+      // Host addresses are absolute: the reference (mw2_watch_hit's own address) gives the image base from its ELF
+      // symbol, then each pc symbolizes to the generated function that stored.
+      std::string writers;
+      for (WatchWriter& w : g_watch_writers) {
+        const uint32_t n = w.count.exchange(0, std::memory_order_relaxed);
+        if (n) {
+          writers += fmt::format(" | pc {:#x} guest lr {:08X} x{}", w.key.load(std::memory_order_relaxed),
+                                 w.guest_lr.load(std::memory_order_relaxed), n);
+        }
+      }
+      MW2MP_REPORT_RING("[native] C3 volume store watch, last 10 s: {} stores into {:08X}+{:#x} ({} dropped); "
+                        "reference mw2_watch_hit at {:#x}{}",
+                        hits, mw2_watch_lo, mw2_watch_size, g_watch_dropped.exchange(0, std::memory_order_relaxed),
+                        uint64_t(reinterpret_cast<uintptr_t>(&mw2_watch_hit)), writers);
     }
     if (volumes_read_.empty()) {
       return;
@@ -12322,8 +13040,12 @@ class VulkanDrawsImpl final : public VulkanDraws {
       valid_until = texture.next - 1;
       return;
     }
-    // A stable texture's due recheck, skipped while nothing wrote its pages since the last.
-    if (TextureUnwritten(texture, key, valid_until)) {
+    // A stable texture's due recheck, skipped while nothing wrote its pages since the last. Only tiled ones: the
+    // linear ones are the Bink frame planes (1280x720 / 640x360 format 2), which the decoder writes with plain stores
+    // that leave no stamp. A plane that looked unchanged once (a 30 fps video at 60) was skipped until the guard's
+    // 1 in 4: old video frames flashed in cutscenes and the load video (every "changed without a write stamp" in
+    // runs mw2sp_025-029 was one of these, each new video again).
+    if (((f[0] >> 31) & 0x1) && TextureUnwritten(texture, key, valid_until)) {
       prepare_outcome_ = 1;
       return;
     }
@@ -13207,6 +13929,8 @@ class VulkanDrawsImpl final : public VulkanDraws {
       v = texture.incremental.get();
       v->address = address;
       v->bound = bound;
+      mw2_watch_lo = address;  // the store watch's range (diagnostic build only; see mw2_watch_hit)
+      mw2_watch_size = pages * 4096;
       v->depth3d = depth3d;
       v->height = blocks_y_host;
       v->width_host = blocks_x_host;
@@ -13259,7 +13983,11 @@ class VulkanDrawsImpl final : public VulkanDraws {
         v->hashes[p] = XXH3_64bits(v->raw.data() + since, std::min<uint32_t>(4096, bound - since));
         dirty.push_back(p);
       }
+      v->stamp_epoch = mw2mp::page_writes::Epoch();
       ++volume_states_;
+      // A new volume (a level, after its load video or cutscene): its first 300 looks are checked in full again, so
+      // a write the hook does not mark there is seen at its own look instead of up to 63 looks later.
+      volume_mark_looks_ = 0;
       // PC diagnostics (mw2mp_debug_watch_volume): who writes the pages that hold texels.
       {
         std::vector<uint32_t> watched;
@@ -13292,11 +14020,24 @@ class VulkanDrawsImpl final : public VulkanDraws {
       if (by_marks) {
         marked_pages_.clear();
         mw2mp::volume_writes::TakeMarks(address, v->pages, marked_pages_);
-        page_marked_.assign(v->pages, 0);
-        for (const uint32_t p : marked_pages_) {
-          if (p >= v->pages || v->start_page[p + 1] == v->start_page[p]) {
-            continue;  // no texel of the volume in this page
+        // The game's copy and fill routines run native (mw2mp_crt.cpp), unseen by the hook and by the store watch:
+        // their write stamps count as marks. Run mw2sp_021: 10 pages changed at once without a mark in dcburning.
+        const size_t hooked = marked_pages_.size();
+        if (!mw2mp::page_writes::Unchanged(address, v->pages * 4096, v->stamp_epoch)) {
+          for (uint32_t p = 0; p < v->pages; ++p) {
+            if (!mw2mp::page_writes::Unchanged(address + p * 4096, 4096, v->stamp_epoch)) {
+              marked_pages_.push_back(p);
+            }
           }
+        }
+        v->stamp_epoch = mw2mp::page_writes::Epoch();
+        page_marked_.assign(v->pages, 0);
+        for (size_t i = 0; i < marked_pages_.size(); ++i) {
+          const uint32_t p = marked_pages_[i];
+          if (p >= v->pages || v->start_page[p + 1] == v->start_page[p] || page_marked_[p]) {
+            continue;  // no texel of the volume in this page, or already taken
+          }
+          volume_mark_stamped_ += i >= hooked ? 1 : 0;
           page_marked_[p] = 1;
           const uint32_t since = p * 4096;
           const uint32_t bytes = std::min<uint32_t>(4096, bound - since);
@@ -13304,16 +14045,28 @@ class VulkanDrawsImpl final : public VulkanDraws {
           v->hashes[p] = XXH3_64bits(v->raw.data() + since, bytes);
           dirty.push_back(p);
         }
-        // The previous check's suspects: a late mark clears them.
-        for (const uint32_t p : volume_mark_suspects_) {
-          if (p < v->pages && page_marked_[p]) {
+        // Earlier checks' suspects in this volume: a late mark clears them. Judged by physical page and only in
+        // their own volume (several volume textures share the list), with a grace of kVolumeMarkGraceFrames: a job
+        // worker preempted between its stores and its mark on the 3 shared cores (run mw2sp_022: one brick, 2
+        // pages, flagged one look later) is late, not another writer.
+        const uint32_t first_page = address >> 12;
+        size_t kept = 0;
+        for (const VolumeSuspect& s : volume_mark_suspects_) {
+          const uint32_t p = s.physical_page - first_page;
+          if (s.physical_page < first_page || p >= v->pages) {
+            if (frame_ - s.frame < 600) {
+              volume_mark_suspects_[kept++] = s;  // another volume's: judged at its own look (dropped if never)
+            }
+          } else if (page_marked_[p]) {
             ++volume_mark_late_;
+          } else if (frame_ - s.frame < kVolumeMarkGraceFrames) {
+            volume_mark_suspects_[kept++] = s;
           } else {
             ++volume_mark_misses_;
-            mw2mp::volume_writes::Missed(address + p * 4096);
+            mw2mp::volume_writes::Missed(s.physical_page << 12);
           }
         }
-        volume_mark_suspects_.clear();
+        volume_mark_suspects_.resize(kept);
       } else {
         volume_mark_suspects_.clear();
       }
@@ -13328,7 +14081,7 @@ class VulkanDrawsImpl final : public VulkanDraws {
                                        : std::memcmp(live + since, v->raw.data() + since, bytes) != 0;
           if (changed) {
             if (by_marks) {
-              volume_mark_suspects_.push_back(p);  // judged at the next look
+              volume_mark_suspects_.push_back({(address >> 12) + p, frame_});  // judged at later looks
             }
             std::memcpy(v->raw.data() + since, live + since, bytes);
             v->hashes[p] = XXH3_64bits(v->raw.data() + since, bytes);
@@ -13465,9 +14218,101 @@ class VulkanDrawsImpl final : public VulkanDraws {
   uint64_t volume_mark_checked_ = 0;
   uint64_t volume_mark_misses_ = 0;
   uint64_t volume_mark_late_ = 0;  // suspects cleared by a mark that came after the check (report interval)
+  uint64_t volume_mark_stamped_ = 0;  // pages taken by a write stamp, not the hook (report interval)
   std::vector<uint32_t> marked_pages_;
   std::vector<uint8_t> page_marked_;
-  std::vector<uint32_t> volume_mark_suspects_;
+  /*
+   * Draw census (mw2mp_native_draw_census, diagnostic): what the ring's draws are, per VS/PS pair. A mesh is the
+   * pair plus the index buffer address and count; "again" = a mesh already drawn this frame (room for instancing),
+   * "back to back" = the same mesh as the previous draw (room for merging consecutive draws).
+   */
+  struct CensusPair {
+    uint64_t draws = 0, indices = 0, again = 0, back_to_back = 0;
+  };
+  // The repeat shortcut (mw2mp_native_repeat_draws; see MatchRepeat).
+  bool repeat_on_ = REXCVAR_GET(mw2mp_native_repeat_draws);
+  bool repeat_check_ = false;  // this draw takes the full path to check a match (CheckRepeat)
+  // The geometry variant (mw2mp_native_repeat_geometry; see DrawRepeatGeometry).
+  bool repeat_geometry_on_ = REXCVAR_GET(mw2mp_native_repeat_geometry);
+  uint32_t repeat_check_count_ = UINT32_MAX;  // a geometry check: the index count the variant would draw
+  uint64_t repeat_geometry_matches_ = 0;     // since start
+  uint64_t repeat_geometry_hits_ = 0;        // report interval
+  RepeatDraw repeat_;
+  uint64_t repeat_matches_ = 0, repeat_checks_ = 0, repeat_offsets_moved_ = 0;  // since start
+  uint64_t repeat_hits_ = 0;                                                  // report interval
+  std::array<uint64_t, kRepeatMissCount> repeat_misses_{};
+  std::array<uint64_t, kRepeatRegisterCount> repeat_misses_register_{};
+  std::chrono::steady_clock::time_point repeat_next_{};
+  int census_ = -1;
+  std::unordered_map<uint64_t, CensusPair> census_pairs_;
+  std::unordered_set<uint64_t> census_meshes_;
+  uint64_t census_last_mesh_ = 0, census_frame_ = UINT64_MAX, census_frames_ = 0;
+  std::chrono::steady_clock::time_point census_next_{};
+
+  void Census(uint32_t vs, uint32_t ps, uint32_t index_base, uint32_t count) {
+    if (census_frame_ != frame_) {
+      census_frame_ = frame_;
+      census_meshes_.clear();
+      census_last_mesh_ = 0;
+      ++census_frames_;
+    }
+    const uint64_t pair = (uint64_t(vs) << 32) | ps;
+    const uint64_t mesh = (pair * 0x9E3779B97F4A7C15ull) ^ (uint64_t(index_base) << 24) ^ count;
+    CensusPair& c = census_pairs_[pair];
+    ++c.draws;
+    c.indices += count;
+    c.again += census_meshes_.insert(mesh).second ? 0 : 1;
+    c.back_to_back += mesh == census_last_mesh_ ? 1 : 0;
+    census_last_mesh_ = mesh;
+  }
+
+  void ReportCensus() {
+    if (census_ <= 0) {
+      return;
+    }
+    const auto now = std::chrono::steady_clock::now();
+    if (now < census_next_) {
+      return;
+    }
+    const bool first = census_next_ == std::chrono::steady_clock::time_point{};
+    census_next_ = now + std::chrono::seconds(10);
+    if (!first && census_frames_) {
+      std::vector<std::pair<uint64_t, CensusPair>> v(census_pairs_.begin(), census_pairs_.end());
+      std::sort(v.begin(), v.end(), [](const auto& a, const auto& b) { return a.second.draws > b.second.draws; });
+      CensusPair all;
+      for (const auto& [pair, c] : v) {
+        all.draws += c.draws;
+        all.indices += c.indices;
+        all.again += c.again;
+        all.back_to_back += c.back_to_back;
+      }
+      const double frames = double(census_frames_);
+      std::string top;
+      for (size_t i = 0; i < std::min<size_t>(12, v.size()); ++i) {
+        const CensusPair& c = v[i].second;
+        const uint32_t ps = uint32_t(v[i].first);
+        fmt::format_to(std::back_inserter(top), " | VS {} PS {}: {:.0f}/frame, {:.0f} indices, {:.0f} % again, {:.0f} % back to back",
+                       uint32_t(v[i].first >> 32), ps == 0xFFFFu ? std::string("none") : std::to_string(ps),
+                       double(c.draws) / frames, double(c.indices) / double(c.draws),
+                       100.0 * double(c.again) / double(c.draws), 100.0 * double(c.back_to_back) / double(c.draws));
+      }
+      MW2MP_REPORT_RING("[native] C6 draw census, last 10 s ({} frames): {:.0f} draws/frame in {} VS/PS pairs, {:.0f} "
+                        "indices per draw; {:.0f} % repeat a mesh already drawn this frame, {:.0f} % back to back{}",
+                        census_frames_, double(all.draws) / frames, v.size(),
+                        all.draws ? double(all.indices) / double(all.draws) : 0.0,
+                        all.draws ? 100.0 * double(all.again) / double(all.draws) : 0.0,
+                        all.draws ? 100.0 * double(all.back_to_back) / double(all.draws) : 0.0, top);
+    }
+    census_pairs_.clear();
+    census_frames_ = 0;
+  }
+
+  struct VolumeSuspect {
+    uint32_t physical_page;  // guest physical address >> 12
+    uint64_t frame;          // frame_ when the check saw it changed without a mark
+  };
+  static constexpr uint64_t kVolumeMarkGraceFrames = 4;
+  std::vector<VolumeSuspect> volume_mark_suspects_;
 
   bool ReadVolume(const uint32_t* f, const HostTextureFormat& tf, uint32_t blocks_x,
                    uint32_t blocks_y, uint32_t depth3d, uint32_t blocks_x_host,
@@ -14064,7 +14909,7 @@ class VulkanDrawsImpl final : public VulkanDraws {
     }
   }
   static void WriteScale(uint32_t* shared, uint32_t reg_index, const uint32_t* fetch) {
-    float scale = std::ldexp(1.0f, int32_t(fetch[3] << 13) >> 26);
+    float scale = Pow2(int32_t(fetch[3] << 13) >> 26);
     if (fetch[3] & 0x1) {
       scale *= MaxWhole(fetch[1] & 0x3F);
     }
@@ -16123,6 +16968,21 @@ class VulkanDrawsImpl final : public VulkanDraws {
     return rex::filesystem::GetExecutableFolder() / "pipelines" / (map + ".bin");
   }
 
+  // Where a level's list is read from: the NSP's RomFS (romfs:/pipelines/, the lists shipped with the port), else
+  // PathMapList (the NRO's folder, and where recorded lists are written).
+  static std::filesystem::path PathMapListRead(const std::string& map) {
+#if REX_PLATFORM_SWITCH
+    static const bool romfs = romfsMountSelf("romfs") == 0;  // fails without a RomFS (NRO)
+    if (romfs) {
+      const std::filesystem::path path = std::filesystem::path("romfs:/pipelines") / (map + ".bin");
+      if (std::ifstream(path, std::ios::binary)) {
+        return path;
+      }
+    }
+#endif
+    return PathMapList(map);
+  }
+
   // A list in the prewarm list's format; false (records empty) if missing or not a list.
   static bool ReadMapList(const std::filesystem::path& path, std::vector<PipelineRecord>& records) {
     records.clear();
@@ -16236,7 +17096,7 @@ class VulkanDrawsImpl final : public VulkanDraws {
     StopMapWarm();
     FlushModules();  // after StopMapWarm: no warm thread hands one meanwhile
     const NativeShaders* library = LibraryActive();
-    if (!ReadMapList(PathMapList(map_), map_warm_records_) || map_warm_records_.empty() || !library ||
+    if (!ReadMapList(PathMapListRead(map_), map_warm_records_) || map_warm_records_.empty() || !library ||
         !library->loaded() || layout_pipeline_ == VK_NULL_HANDLE || cache_pipelines_ == VK_NULL_HANDLE) {
       REXLOG_INFO("[native] map list {}: {}", map_, map_warm_records_.empty() ? "none" : "no library yet, not used");
       return;
@@ -18379,9 +19239,11 @@ class VulkanDrawsImpl final : public VulkanDraws {
    * N distinct fetches in M slots, the fraction sharing a slot with another is 1 - e^(-N/M): with ~600
    * that is 44 % at 1024 and 14 % at 4096. The hit conditions do not change: there is just more room. The
    * misses-by-cause report (every 10 s) says how many were collisions.
+   * Run mw2sp_014 (favela_escape): still 10-13k collisions per 10 s (~1 % of lookups, each a PrepareTexture), so 8192
+   * (~720 KB; 16384 would leave L2 and make InvalidateTexturesIn's walk four times as long).
    */
-  std::array<CacheSampler, 4096> cache_fetch_{};
-  std::array<uint32_t, 4096> cache_fetch_dir_{};  // each entry's AddressCacheSampler
+  std::array<CacheSampler, 8192> cache_fetch_{};
+  std::array<uint32_t, 8192> cache_fetch_dir_{};  // each entry's AddressCacheSampler
   uint64_t samplers_cache_fetch_ = 0;
   uint64_t fetch_misses_collision_ = 0;      // The slot held another fetch constant
   uint64_t fetch_misses_empty_ = 0;       // cell not used yet

@@ -9,7 +9,7 @@ The game switches between them with appletExecuteProgram (mw2mp/src/mw2mp_launch
 start each other.
 
 Players' files go next to it on the SD card, in sdmc:/atmosphere/contents/01F2D6C0A9E40000/ (game/, update/, shader
-libraries, pipelines/); the game makes that folder and lists what is missing. Saves are the console's save data.
+libraries); the game makes that folder and lists what is missing. Saves are the console's save data.
 
 Needs devkitPro (DEVKITPRO, default ~/devkitpro: elf2nso, npdmtool, nacptool) and hacbrewpack with the extra program
 option (patches/hacbrewpack-extraprogram.patch; --hacbrewpack, default <data>/tools/hacbrewpack/hacbrewpack), which
@@ -122,10 +122,10 @@ def hacbrewpack(args, work, program_id, exefs, control, extra=()):
     """One hacbrewpack run in its own folder; returns its NSP and the paths of its program and control NCAs."""
     os.makedirs(work)
     cmd = [os.path.abspath(args.hacbrewpack), "-k", os.path.abspath(args.keys), "--titleid", f"{program_id:016x}",
-           "--exefsdir", exefs, "--noromfs", "--nologo", "--controldir", control, "--keepncadir",
+           "--exefsdir", exefs, "--nologo", "--controldir", control, "--keepncadir",
            "--nspdir", os.path.join(work, "nsp"), "--ncadir", os.path.join(work, "nca"),
            "--tempdir", os.path.join(work, "temp"), "--backupdir", os.path.join(work, "backup")]
-    cmd += list(extra)
+    cmd += list(extra) if "--romfsdir" in extra else ["--noromfs"] + list(extra)
     out = run(cmd, cwd=work, capture_output=True, text=True).stdout
     with open(os.path.join(work, "hacbrewpack.log"), "w") as f:
         f.write(out)
@@ -187,8 +187,11 @@ def main():
     # share one save), then the application around program 0 with both added as index 1.
     _, program_mp, control_nca_mp = hacbrewpack(args, os.path.join(stage, "pack_multiplayer"), TITLE_ID + 1, exefs_mp,
                                                 control_mp, ["--nacptitleid", f"{TITLE_ID:016x}"])
+    # The Campaign's per-level pipeline lists (state keys + shader fingerprints, no game data) go in its RomFS.
+    romfs = os.path.join(stage, "romfs_campaign")
+    shutil.copytree(os.path.join(ROOT, "mw2sp", "pipelines"), os.path.join(romfs, "pipelines"))
     nsp, _, _ = hacbrewpack(args, os.path.join(stage, "pack_application"), TITLE_ID, exefs_sp, control,
-                            ["--extraprogram", program_mp, "--extracontrol", control_nca_mp])
+                            ["--romfsdir", romfs, "--extraprogram", program_mp, "--extracontrol", control_nca_mp])
     final = os.path.join(args.out, f"mw2nx-{args.version}-[{TITLE_ID:016X}].nsp")
     os.replace(nsp, final)
     print(f"{final}: {os.path.getsize(final) / (1 << 20):.1f} MB")

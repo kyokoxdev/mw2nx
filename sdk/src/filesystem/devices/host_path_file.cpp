@@ -144,9 +144,11 @@ REXCVAR_DEFINE_BOOL(switch_io_report_files, false, "Filesystem",
 // MW2 (runs mw2sp_007 and mw2mp_040): its streamed images (imagefileN.pak) are reread 50-75 % of the time in reads of
 // 64-256 KB, all under the old 256 KB floor, and the 64 MB cap was full with ~1,700 evictions; some rereads took
 // 300-470 ms on the SD and showed as texture pop-in. The heap hbloader hands over is ~3.2 GB, so 192 MB fits.
-REXCVAR_DEFINE_INT32(switch_io_ranges_mb, 192, "Filesystem",
-                     "Read cache by exact range, total cap in MB (0 = off). 192 = holds MW2's reread streamed "
-                     "images (64 was full, with evictions).");
+// Run mw2sp_021 (NSP, dcburning + contingency): 192 MB full, 10,934 evictions, 63 % hits, imagefile rereads
+// 80-88 % of the bytes per 15 s and SD reads up to 1 s behind hitches; heap 540 MB left -> 320.
+REXCVAR_DEFINE_INT32(switch_io_ranges_mb, 320, "Filesystem",
+                     "Read cache by exact range, total cap in MB (0 = off). 320 = holds more of MW2's reread "
+                     "streamed images (192 was full: 63 % hits, ~11k evictions in 20 min).");
 
 // Floor, in KB. A 4 MB floor would leave out the small requests that repeat most (a few hundred KB to 2 MB).
 REXCVAR_DEFINE_INT32(switch_io_ranges_min_kb, 64, "Filesystem",
@@ -497,14 +499,16 @@ void SaveRange(uint32_t id, uint64_t offset_bytes, uint32_t requested, const uin
   }
 
 #if REX_PLATFORM_SWITCH
-  // The heap floor, checked at most once a second (mallinfo walks the free lists).
+  // The heap floor, checked at most once every 3 s (mallinfo walks the free lists under the malloc lock: run mw2sp_014,
+  // ~0.7 % of a core on the Database thread at once a second, every other thread's malloc waiting meanwhile). Reads
+  // add ~7 MB in 3 s against the 160 MB floor; the new-handler shed and the bad_alloc catch below stay behind it.
   if (const int32_t floor_mb = REXCVAR_GET(switch_io_heap_floor_mb); floor_mb > 0) {
     static std::atomic<int64_t> checked_at{0};
     const int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
                             std::chrono::steady_clock::now().time_since_epoch())
                             .count();
     int64_t last = checked_at.load(std::memory_order_relaxed);
-    if (now - last >= 1000 && checked_at.compare_exchange_strong(last, now, std::memory_order_relaxed)) {
+    if (now - last >= 3000 && checked_at.compare_exchange_strong(last, now, std::memory_order_relaxed)) {
       uint64_t used = 0, available = 0;
       RexSwitchHeapStats(&used, &available);
       if (available < uint64_t(floor_mb) << 20) {

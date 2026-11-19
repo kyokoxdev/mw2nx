@@ -33,6 +33,12 @@ target_precompile_headers(mw2sp_recomp PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../a
 if(MW2SP_GUEST_MEMORY_PLAIN)
     target_compile_definitions(mw2sp_recomp PRIVATE BO2ZM_GUEST_MEMORY_PLAIN=1)
 endif()
+# Diagnostic only (never a release): the generated code checks every guest store against the range the renderer
+# publishes (the model lighting volume) and reports who wrote there. See app/src/bo2zm_guest_memory.h.
+option(MW2_WATCH_STORES "Diagnostic: report the writers of the model lighting volume" OFF)
+if(MW2_WATCH_STORES)
+    target_compile_definitions(mw2sp_recomp PRIVATE MW2_WATCH_STORES=1)
+endif()
 
 # Profile-guided optimization, as mw2mp/CMakeLists.txt (mw2sp/build_switch.sh, MW2_PGO): the generated code and the
 # app's hot native code, not the SDK. The training build writes sdmc:/switch/mw2sp/pgo at the end of the

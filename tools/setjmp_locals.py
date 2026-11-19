@@ -17,6 +17,11 @@ nothing changes afterwards, and copied back when the setjmp returns from a longj
     temp.s64 = ppc_setjmp(ctx.r3.u32);
     if (temp.s64 != 0) { ctx = env; r15 = sj_r15; ... }
     }
+Each copy is then made opaque (`asm volatile("" : "+m"(sj_r26))`). Without it GCC (MW2 SP countfix build, run
+mw2sp_031) coalesced the plain const copy sj_r26 with r26 itself (one stack slot, the restore dropped as a no-op):
+sub_822AD7E0's normal path set r26 = r19 (0x9002), a script error longjmp'd back, and the recovery read
+table[r26 + i*4] at guest 0x9002 -> access violation on the Server thread. The asm tells GCC the copy may hold any
+value, so it gets its own slot. --fix also upgrades sites rewritten in the older `const auto` form.
 It is idempotent, and has to run after every codegen (tools/codegen.sh does).
 
 Without --fix it reports, per site, the locals that matter: those both written after the setjmp at a point where a
@@ -41,6 +46,9 @@ MARK = "// setjmp_locals.py: the locals the game's setjmp saves, as they were at
 UNFIXED = re.compile(r"^(\t+)env = ctx;\n"
                      r"\1temp\.s64 = ppc_setjmp\((ctx\.r3\.u32)\);\n"
                      r"\1if \(temp\.s64 != 0\) ctx = env;\n", re.M)
+# The copy, opaque to GCC so it cannot share storage with the register local (see the docstring).
+OPAQUE = 'auto sj_{r} = {r}; asm volatile("" : "+m"(sj_{r}));'
+OLD_SAVE = re.compile(r"^(\t+)const auto sj_(\w+) = \2;$", re.M)  # the older form, coalesced by GCC
 DECL = re.compile(r"^\tPPC(?:CR|V)?Register (r(?:1[4-9]|2\d|3[01])|f(?:1[4-9]|2\d|3[01])|"
                   r"v(?:6[4-9]|[7-9]\d|1[01]\d|12[0-7])|cr[0-7])\{\};$", re.M)
 
@@ -115,13 +123,15 @@ def fix_function(text):
 
     def rewrite(m):
         tab, r3 = m.group(1), m.group(2)
-        save = "".join(f"{tab}const auto sj_{r} = {r};\n" for r in regs)
+        save = "".join(f"{tab}{OPAQUE.format(r=r)}\n" for r in regs)
         back = " ".join(f"{r} = sj_{r};" for r in regs)
         return (f"{tab}env = ctx;\n{tab}{{  {MARK}\n{save}"
                 f"{tab}temp.s64 = ppc_setjmp({r3});\n"
                 f"{tab}if (temp.s64 != 0) {{ ctx = env; {back} }}\n{tab}}}\n")
 
-    return UNFIXED.subn(rewrite, text)
+    text, n_old = OLD_SAVE.subn(lambda m: f"{m.group(1)}{OPAQUE.format(r=m.group(2))}", text)
+    text, n = UNFIXED.subn(rewrite, text)
+    return text, n + (1 if n_old else 0)
 
 
 def unprotected(gen):
@@ -138,7 +148,7 @@ def unprotected(gen):
         for a, b in zip(starts, starts[1:]):
             body = text[a:b]
             if DECL.search(body):  # a function with register locals: every site needs the fix
-                n += body.count("ppc_setjmp(") - body.count(MARK)
+                n += body.count("ppc_setjmp(") - body.count(MARK) + (1 if OLD_SAVE.search(body) else 0)
     return n, total
 
 

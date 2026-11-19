@@ -14,6 +14,8 @@ set(MW2MP_SOURCES
     # MW2's CRT memcpy/memset as native code ([rexcrt] in overrides.toml)
     ${CMAKE_CURRENT_LIST_DIR}/src/mw2mp_crt.cpp
     ${CMAKE_CURRENT_LIST_DIR}/src/mw2mp_page_writes.cpp
+    # The lighting volume's writer, hooked: UpdateVolume takes its marks instead of hashing
+    ${CMAKE_CURRENT_LIST_DIR}/src/mw2mp_volume_writes.cpp
     ${CMAKE_CURRENT_LIST_DIR}/src/native/mw2mp_native_system.cpp
     ${CMAKE_CURRENT_LIST_DIR}/src/native/mw2mp_render_stubs.cpp
     ${CMAKE_CURRENT_LIST_DIR}/src/native/render/mw2mp_native_render.cpp

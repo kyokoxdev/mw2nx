@@ -62,8 +62,19 @@ int CoresInUse() {
 }
 // Before the game's threads start (OnPostInitLogging), so each one a rule names is moved as it names itself. Failsafe
 // as BO2's defaults: back to three cores when our threads hold core 3 over 85 % for 2 s.
+// XAudio mixes on an unnamed guest thread (sub_820A5828 starts it at one of these entries; the campaign's in
+// mw2sp_game_remap.h) that the Audio Worker's callback only takes finished frames from. At the guest priority on full
+// cores 0-2 it fell behind: run mw2sp_020 (dcburning) had up to 660 requests without data per 10 s (5.3 ms of silence
+// each, the crackling), 74 per interval below 40 fps against 2 above 57. At the audio priority it preempts the game
+// threads for its ~10-14 % of a core. A value from the toml wins.
+#ifndef MW2_XAUDIO_THREADS
+#define MW2_XAUDIO_THREADS "0x820A56B0,0x820A5778"
+#endif
 void ConfigureCores() {
 #if REX_PLATFORM_SWITCH
+  if (rex::cvar::GetFlagByName("switch_audio_guest_threads").empty()) {
+    rex::cvar::SetFlagByName("switch_audio_guest_threads", MW2_XAUDIO_THREADS);
+  }
   RexSwitchCore3SetLog([](const char* text) { REXLOG_INFO("{}", text); });
   RexSwitchCore3SetHogLimit(85, 2);
   RexSwitchCore3Configure(REXCVAR_GET(mw2mp_core3_threads).c_str(), true, true, REXCVAR_GET(mw2mp_cpu_cores) == 4);
@@ -164,8 +175,3 @@ bool OnScreenBanner(uint32_t (&)[8]) { return false; }
 void SetFrontEndSceneKept(bool) {}
 }  // namespace mw2mp::preset
 
-namespace mw2mp::volume_writes {
-bool UseMarks() { return false; }
-void TakeMarks(uint32_t, uint32_t, std::vector<uint32_t>&) {}
-void Missed(uint32_t) {}
-}  // namespace mw2mp::volume_writes
