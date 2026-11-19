@@ -1221,7 +1221,7 @@ REXCVAR_DEFINE_BOOL(mw2mp_native_input_front, true, "BO2",
 REXCVAR_DEFINE_BOOL(mw2mp_native_input_front_ab, false, "BO2",
                     "Test, with mw2mp_benchmark_ab_s: A/B factor 1 is mw2mp_native_input_front")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
-REXCVAR_DEFINE_BOOL(mw2mp_native_draw_census, true, "MW2",
+REXCVAR_DEFINE_BOOL(mw2mp_native_draw_census, false, "MW2",
                     "Diagnostic: every 10 s log the draws per VS/PS pair and how many repeat a mesh already drawn "
                     "in the frame (C6 draw census). Costs a hash insert per draw: turn off for releases")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
