@@ -1120,6 +1120,9 @@ REXCVAR_DEFINE_INT32(mw2mp_native_vertex_cache_mb, 96, "BO2",
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 // Run mw2sp_021: each draw's vertex range is [vmin, vmax] of its indices, so one buffer drawn by many draws had one
 // pool copy per sub-range: 18 MB distinct filled 96 MB pools, ~6 switches and ~300 MB of refills per 10 s.
+// Run mw2sp_033 (boneyard, 32768): far worse than 256. Pool copies 3-4.8 GB per 10 s for 27-30 MB distinct, ~40
+// switches per 10 s, ring 120 ms a frame: the same memory comes with many fetch constants (another base and size per
+// surface of one buffer), so each "whole buffer" was another overlapping slice. Bigger buffers go by chunks (below).
 REXCVAR_DEFINE_INT32(mw2mp_native_vertex_cache_whole_kb, 256, "BO2",
                      "Native renderer: with the vertex cache by writes, a vertex buffer of at most this many KB is "
                      "cached whole (one copy for all its draws' sub-ranges). 0 = per draw range")
@@ -1132,11 +1135,15 @@ REXCVAR_DEFINE_INT32(mw2mp_native_vertex_cache_whole_kb, 256, "BO2",
 // Run mw2sp_014 (favela_escape, chunk 64): each pool copy grew from ~15-30 KB to ~70-90 KB, the pools switched ~8 times
 // a minute (012: ~2) with bursts of 20 in 10 s, the ring helped refill 3-20 ms a frame in those bursts (60-75 ms
 // frames), and "without room" still reached 165k: off by default.
-REXCVAR_DEFINE_INT32(mw2mp_native_vertex_cache_chunk_kb, 0, "BO2",
+// Run mw2sp_032 (boneyard, chunk 0): only 9k of ~90k binds per 10 s in buffers <= whole_kb; the pools filled 113k
+// times, 654 MB of pool copies per 10 s for 18 MB distinct, ring 950 ms/s. The 014 chunks were counted from the fetch
+// constant's base, which differs between draws of the same memory (033), so they did not line up. Chunks now line up
+// with guest physical addresses: every draw whose range falls in the same chunks shares one copy, whatever its base.
+REXCVAR_DEFINE_INT32(mw2mp_native_vertex_cache_chunk_kb, 256, "BO2",
                      "Native renderer: with the vertex cache by writes, a draw's range in a buffer bigger than "
-                     "mw2mp_native_vertex_cache_whole_kb is cached rounded out to chunks of about this many KB of the "
-                     "buffer (a multiple of the stride), so ranges that shift inside the same chunks share one copy. "
-                     "0 = the draw's own range")
+                     "mw2mp_native_vertex_cache_whole_kb is cached rounded out to the chunks of this many KB of guest "
+                     "physical memory it touches, so ranges that shift inside the same chunks share one copy, whatever "
+                     "their fetch constant. 0 = the draw's own range")
     .range(0, 1024)
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 REXCVAR_DEFINE_BOOL(mw2mp_native_vertex_cache_sum, true, "BO2",
@@ -4904,6 +4911,7 @@ class VulkanDrawsImpl final : public VulkanDraws {
     const VertexInput* input = nullptr;  // InputOf: a function of the VS and its generation
     // Fetch words (0x4800 + i) only the vertex bindings read, no sampler: they may differ in a geometry variant.
     std::array<uint64_t, (kRepeatFetchWords + 63) / 64> fetch_vertex{};
+    std::array<uint64_t, (kRepeatFetchWords + 63) / 64> fetch_sampler{};  // words a sampler reads (measurement)
   };
   // A check draw that leaves Draw without reaching CheckRepeat recorded nothing where the shortcut would have.
   struct RepeatCheckGuard {
@@ -4978,6 +4986,17 @@ class VulkanDrawsImpl final : public VulkanDraws {
         }
         if (!fetch_geometry) {
           ++repeat_misses_[kRepeatMissFetch];
+          // Measurement (run mw2sp_034, boneyard: 20 % of draws missed here, Estate 1-2 %): a word a sampler
+          // reads differs (another texture), or only words neither shader reads, or only vertex words but the
+          // reference cannot take the geometry variant (not 16-bit indexed).
+          bool sampler = false, unread = false;
+          for (uint32_t w = 0; !sampler && w < kRepeatFetchWords; ++w) {
+            if (r[kRegFetch + w] != d.fetch[w]) {
+              sampler = (d.fetch_sampler[w >> 6] >> (w & 63)) & 1;
+              unread |= !sampler && !((d.fetch_vertex[w >> 6] >> (w & 63)) & 1);
+            }
+          }
+          ++(sampler ? repeat_fetch_texture_ : unread ? repeat_fetch_unread_ : repeat_fetch_vertex_);
           return kRepeatNo;
         }
       } else {
@@ -5458,6 +5477,7 @@ class VulkanDrawsImpl final : public VulkanDraws {
     std::memcpy(d.fetch.data(), r + kRegFetch, sizeof(d.fetch));
     // The vertex bindings' fetch words, minus any a sampler of either shader reads (6 words per texture slot).
     d.fetch_vertex = {};
+    d.fetch_sampler = {};
     if (d.input) {
       for (const VertexBinding& b : d.input->bindings) {
         for (uint32_t w = b.slot * 2; w < b.slot * 2 + 2 && w < kRepeatFetchWords; ++w) {
@@ -5471,6 +5491,7 @@ class VulkanDrawsImpl final : public VulkanDraws {
         const uint32_t first = uint32_t(sampler.reg_index) * 6;
         for (uint32_t w = first; w < first + 6 && w < kRepeatFetchWords; ++w) {
           d.fetch_vertex[w >> 6] &= ~(uint64_t(1) << (w & 63));
+          d.fetch_sampler[w >> 6] |= uint64_t(1) << (w & 63);
         }
       }
     }
@@ -5562,14 +5583,14 @@ class VulkanDrawsImpl final : public VulkanDraws {
       MW2MP_REPORT_RING(
           "[native] C6 repeat shortcut ({}), last 10 s: {} of {} draws recorded as a repeat of the previous one "
           "({:.1f} %); not a repeat: previous no reference {:.1f} %, shaders {:.1f} %, frame {:.1f} %, sync {:.1f} %, "
-          "registers {:.1f} % ({}), fetch {:.1f} %, bound state {:.1f} %, room {:.1f} %; {} checked against the full "
+          "registers {:.1f} % ({}), fetch {:.1f} % (sampler words {:.1f} %, unread words {:.1f} %, vertex words only {:.1f} %), bound state {:.1f} %, room {:.1f} %; {} checked against the full "
           "path in total, {} of them with other upload offsets (fine) | geometry variant "
           "(mw2mp_native_repeat_geometry {}): {} draws ({:.1f} %), {:.1f} % that did not fit; {} matches in total",
           repeat_on_ ? "on" : "OFF", repeat_hits_, draws, pct(repeat_hits_), pct(repeat_misses_[kRepeatMissPrevious]),
           pct(repeat_misses_[kRepeatMissShaders]), pct(repeat_misses_[kRepeatMissFrame]),
           pct(repeat_misses_[kRepeatMissSync]), pct(repeat_misses_[kRepeatMissRegister]),
           registers.empty() ? std::string("none") : registers, pct(repeat_misses_[kRepeatMissFetch]),
-          pct(repeat_misses_[kRepeatMissBound]), pct(repeat_misses_[kRepeatMissRoom]), repeat_checks_,
+          pct(repeat_fetch_texture_), pct(repeat_fetch_unread_), pct(repeat_fetch_vertex_), pct(repeat_misses_[kRepeatMissBound]), pct(repeat_misses_[kRepeatMissRoom]), repeat_checks_,
           repeat_offsets_moved_, repeat_geometry_on_ ? "on" : "off", repeat_geometry_hits_, pct(repeat_geometry_hits_),
           pct(repeat_misses_[kRepeatMissGeometry]), repeat_geometry_matches_);
     }
@@ -5577,6 +5598,9 @@ class VulkanDrawsImpl final : public VulkanDraws {
     repeat_geometry_hits_ = 0;
     repeat_misses_ = {};
     repeat_misses_register_ = {};
+    repeat_fetch_texture_ = 0;
+    repeat_fetch_vertex_ = 0;
+    repeat_fetch_unread_ = 0;
   }
 
   // Set 4 (dynamic UBOs). Always bound, because the new shaders use it statically: with the real offsets
@@ -10821,31 +10845,44 @@ class VulkanDrawsImpl final : public VulkanDraws {
                    VkDeviceSize alignment, uint64_t& hash, VkDeviceSize& tagged, uint32_t start,
                    uint32_t available) {
     if (vcache_by_writes_) {
-      // A small buffer goes whole (mw2mp_native_vertex_cache_whole_kb): its draws bind the one copy at their start.
-      // start is vmin * stride, so a stride-aligned copy stays stride-aligned at start.
-      if (available > bytes && available <= vcache_whole_bytes_ && start + bytes <= available) {
-        if (!VertexCacheByWrites(data - start, available, order, address - start, alignment, tagged)) {
-          return false;
-        }
-        tagged += start;
-        ++vcache_whole_hits_;
-        return true;
-      }
-      // A bigger buffer by chunks (mw2mp_native_vertex_cache_chunk_kb): the range rounded out to multiples of the
-      // chunk from the buffer's start, a multiple of alignment, so start - lo keeps the binding's alignment.
-      if (vcache_chunk_bytes_ && available > vcache_whole_bytes_ && start + bytes <= available) {
-        const uint32_t align = uint32_t(std::max<VkDeviceSize>(alignment, 4));
-        const uint32_t chunk = std::max(align, vcache_chunk_bytes_ / align * align);
-        const uint32_t lo = start / chunk * chunk;
-        const uint32_t hi = uint32_t(std::min<uint64_t>(available, (uint64_t(start) + bytes + chunk - 1) / chunk * chunk));
-        const uint32_t before = start - lo;
-        if ((before || hi > start + bytes) && (address - before) + (hi - lo) <= kMemoryPhysical) {
-          if (!VertexCacheByWrites(data - before, hi - lo, order, address - before, alignment, tagged)) {
-            return false;
-          }
-          tagged += before;
-          ++vcache_chunk_hits_;
+      // A buffer up to mw2mp_native_vertex_cache_whole_kb goes whole: its draws bind the one copy at their start.
+      // start is vmin * stride, so a stride-aligned copy stays stride-aligned at start. When the whole buffer cannot
+      // be bound (first seen, a page written since, no room), the draw's own range is tried below, as before
+      // whole_kb: a partly rewritten big buffer still caches its unwritten ranges. The whole attempt is left out of
+      // the "copied as usual" counts (the range's own attempt counts them).
+      if (available > bytes && available <= vcache_whole_bytes_ && start + bytes <= available &&
+          (address - start) + available <= kMemoryPhysical) {
+        if (VertexCacheByWrites(data - start, available, order, address - start, alignment, tagged, false)) {
+          tagged += start;
+          ++vcache_whole_hits_;
           return true;
+        }
+        return VertexCacheByWrites(data, bytes, order, address, alignment, tagged);
+      }
+      if (available > vcache_whole_bytes_) {
+        ++vcache_over_whole_;  // measurement: binds the whole-buffer copy cannot cover, and the biggest buffer
+        vcache_over_whole_max_ = std::max(vcache_over_whole_max_, available);
+      }
+      // A bigger buffer by chunks (mw2mp_native_vertex_cache_chunk_kb), aligned to guest physical addresses, not to
+      // the fetch constant's base: the range rounded out to the chunks it touches, starting a whole number of
+      // `alignment` before the range (so the binding keeps its alignment; draws of one buffer share the same start
+      // in a chunk, as their vertices sit at base + n x stride). The copy may reach past the buffer into neighbouring
+      // memory (inside physical memory): a write stamped there only makes the chunk miss, and then, as when the chunk
+      // cannot be bound for any other reason, the draw's own range is tried. The chunk attempt is left out of the
+      // "copied as usual" counts.
+      if (vcache_chunk_bytes_ && available > vcache_whole_bytes_) {
+        const uint64_t align = std::max<VkDeviceSize>(alignment, 4);
+        const uint64_t chunk = vcache_chunk_bytes_;
+        const uint64_t floor = address / chunk * chunk;
+        const uint64_t back = (address - floor) / align * align;
+        const uint64_t hi = std::min<uint64_t>(kMemoryPhysical, (address + bytes + chunk - 1) / chunk * chunk);
+        const uint64_t size = (hi - (address - back)) & ~uint64_t(3);
+        if ((back || size > bytes) && size >= back + bytes && size < (uint64_t(1) << 26)) {
+          if (VertexCacheByWrites(data - back, uint32_t(size), order, address - back, alignment, tagged, false)) {
+            tagged += back;
+            ++vcache_chunk_hits_;
+            return true;
+          }
         }
       }
       return VertexCacheByWrites(data, bytes, order, address, alignment, tagged);
@@ -10907,7 +10944,7 @@ class VulkanDrawsImpl final : public VulkanDraws {
   // once into the pool being filled, in the epoch of that copy; later draws bind that copy while no page has a stamp
   // from that epoch on. A range just seen, or written since, is copied into the upload buffer as usual.
   bool VertexCacheByWrites(const uint8_t* data, uint32_t bytes, xenos::Endian order, uint64_t address,
-                           VkDeviceSize alignment, VkDeviceSize& tagged) {
+                           VkDeviceSize alignment, VkDeviceSize& tagged, bool count_usual = true) {
     const uint32_t physical = uint32_t(address) & 0x1FFFFFFFu;
     const uint64_t key = (address & 0x1FFFFFFF) | (uint64_t(bytes & 0x3FFFFFF) << 29) | (uint64_t(order) << 55) |
                          (uint64_t(1) << 63);
@@ -10938,12 +10975,14 @@ class VulkanDrawsImpl final : public VulkanDraws {
     // ~1 s refilled ~1 GB per 10 s and ChangeSum took 17 % of the ring thread.
     const bool refill = e.copy_epoch != 0 && mw2mp::page_writes::Unchanged(physical, bytes, e.copy_epoch);
     if (!refill && (e.seen_epoch == 0 || !mw2mp::page_writes::Unchanged(physical, bytes, e.seen_epoch))) {
-      ++(e.seen_epoch == 0 ? vcache_usual_first_ : vcache_usual_written_);  // C6 vertex cache detail
-      vcache_bytes_usual_ += bytes;
-      vcache_distinct_usual_ += MarkCovered(vcache_cover_usual_, physical, bytes);
+      if (count_usual) {
+        ++(e.seen_epoch == 0 ? vcache_usual_first_ : vcache_usual_written_);  // C6 vertex cache detail
+        vcache_bytes_usual_ += bytes;
+        vcache_distinct_usual_ += MarkCovered(vcache_cover_usual_, physical, bytes);
+        ++vcache_changed_;
+      }
       e.seen_epoch = epoch;  // new, or written since it was last drawn: copied as usual this time
       e.copy_epoch = 0;
-      ++vcache_changed_;
       return false;
     }
     VkDeviceSize at = 0;
@@ -11492,7 +11531,15 @@ class VulkanDrawsImpl final : public VulkanDraws {
   bool GuardVertexCacheByWrites(const uint8_t* data, uint32_t bytes, uint32_t physical, uint64_t expected,
                                 uint32_t hit) {
     const uint64_t n = ++vcache_guard_seen_;
-    if (n > 2000 && hit >= 2 && (hit & 63) != 0) {
+    // A copy of 256 KB or more (chunks, mw2mp_native_vertex_cache_chunk_kb, and draw ranges that big) is checked at
+    // its first hit and then every 64 x (its size in 256 KB, rounded up to a power of 2) hits: the bytes summed per hit
+    // stay about those of a small copy's 1 in 64, where every 64th hit of a MB-sized copy would sum MBs per frame.
+    if (const uint32_t big = bytes >> 18) {
+      const uint32_t every_mask = (64u << std::bit_width(big)) - 1;
+      if ((hit & every_mask) != 0) {
+        return true;
+      }
+    } else if (n > 2000 && hit >= 2 && (hit & 63) != 0) {
       return true;
     }
     ++vcache_checked_;
@@ -11661,10 +11708,13 @@ class VulkanDrawsImpl final : public VulkanDraws {
                         double(vcache_distinct_usual_) * 256.0 / 1048576.0, double(vcache_bytes_filled_) / 1048576.0,
                         double(vcache_distinct_filled_) * 256.0 / 1048576.0);
       MW2MP_REPORT_RING("[native] C6 vertex cache whole buffers (mw2mp_native_vertex_cache_whole_kb = {}), last 10 s: "
-                        "{} binds at their start in a whole-buffer copy; {} binds inside a chunk copy "
-                        "(mw2mp_native_vertex_cache_chunk_kb = {})",
-                        vcache_whole_bytes_ >> 10, vcache_whole_hits_, vcache_chunk_hits_, vcache_chunk_bytes_ >> 10);
+                        "{} binds at their start in a whole-buffer copy; {} binds in bigger buffers (largest {} KB); "
+                        "{} binds inside a chunk copy (mw2mp_native_vertex_cache_chunk_kb = {})",
+                        vcache_whole_bytes_ >> 10, vcache_whole_hits_, vcache_over_whole_, vcache_over_whole_max_ >> 10,
+                        vcache_chunk_hits_, vcache_chunk_bytes_ >> 10);
       vcache_whole_hits_ = 0;
+      vcache_over_whole_ = 0;
+      vcache_over_whole_max_ = 0;
       vcache_chunk_hits_ = 0;
       vcache_usual_first_ = vcache_usual_written_ = vcache_bytes_usual_ = 0;
       vcache_distinct_usual_ = vcache_distinct_filled_ = 0;
@@ -14241,6 +14291,7 @@ class VulkanDrawsImpl final : public VulkanDraws {
   uint64_t repeat_matches_ = 0, repeat_checks_ = 0, repeat_offsets_moved_ = 0;  // since start
   uint64_t repeat_hits_ = 0;                                                  // report interval
   std::array<uint64_t, kRepeatMissCount> repeat_misses_{};
+  uint64_t repeat_fetch_texture_ = 0, repeat_fetch_unread_ = 0, repeat_fetch_vertex_ = 0;  // kRepeatMissFetch split
   std::array<uint64_t, kRepeatRegisterCount> repeat_misses_register_{};
   std::chrono::steady_clock::time_point repeat_next_{};
   int census_ = -1;
@@ -19024,6 +19075,8 @@ class VulkanDrawsImpl final : public VulkanDraws {
   bool vcache_by_writes_ = false;  // mw2mp_native_vertex_cache_by_writes
   uint32_t vcache_whole_bytes_ = 0;  // mw2mp_native_vertex_cache_whole_kb in bytes
   uint64_t vcache_whole_hits_ = 0;    // binds of a whole-buffer copy (10 s)
+  uint64_t vcache_over_whole_ = 0;    // binds in buffers bigger than vcache_whole_bytes_ (10 s)
+  uint32_t vcache_over_whole_max_ = 0;  // the biggest of those buffers (10 s)
   uint32_t vcache_chunk_bytes_ = 0;  // mw2mp_native_vertex_cache_chunk_kb in bytes
   uint64_t vcache_chunk_hits_ = 0;    // binds inside a chunk copy (10 s)
   // mw2mp_native_texture_by_writes (TextureUnwritten): -1 = not read yet; this slot's arm; the 10 s counters.
