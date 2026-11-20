@@ -1242,6 +1242,13 @@ REXCVAR_DEFINE_BOOL(mw2mp_native_repeat_geometry, true, "MW2",
                     "its constants and its index range (another piece of the same buffer) only scans and uploads its "
                     "indices and vertices and reuses the rest. Self-checking like the repeat. false = off")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+// Run mw2sp_035: 17-25 % of boneyard's and Estate's draws missed the repeat only because a pixel shader sampler's fetch
+// words differed (another texture, same material): the texture variant (DrawRepeatGeometry with textures).
+REXCVAR_DEFINE_BOOL(mw2mp_native_repeat_textures, true, "MW2",
+                    "Native renderer, with mw2mp_native_repeat_geometry: a draw identical to the previous one except "
+                    "for its constants, index range and textures (all already in the sampler caches) takes the "
+                    "geometry variant plus new texture words. Self-checking like the repeat. false = off")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 REXCVAR_DEFINE_BOOL(mw2mp_native_prefetch_cache_lines, true, "BO2",
                     "Native renderer: prefetch the vertex and index caches' table lines and write stamps "
                     "of each draw early. false = looked up cold")
@@ -3221,6 +3228,7 @@ class VulkanDrawsImpl final : public VulkanDraws {
     if (repeat_on_) {
       repeat_check_ = false;
       repeat_check_count_ = UINT32_MAX;
+      repeat_check_texture_ = false;
       const RepeatMatch match = time_ ? kRepeatNo : MatchRepeat(p, r);
       if (match == kRepeatSame) {
         const uint64_t n = ++repeat_matches_;
@@ -3229,15 +3237,17 @@ class VulkanDrawsImpl final : public VulkanDraws {
         } else if (DrawRepeat(p, r)) {
           return true;
         }
-      } else if (match == kRepeatGeometry) {
-        const uint64_t n = repeat_geometry_matches_ + 1;
+      } else if (match == kRepeatGeometry || match == kRepeatTexture) {
+        const bool textures = match == kRepeatTexture;
+        uint64_t& matches = textures ? repeat_texture_matches_ : repeat_geometry_matches_;
+        const uint64_t n = matches + 1;
         const bool check = n <= kRepeatChecks || (n & 1023) == 0;
-        if (DrawRepeatGeometry(p, r, check)) {
-          ++repeat_geometry_matches_;
+        if (DrawRepeatGeometry(p, r, check, textures)) {
+          ++matches;
           return true;
         }
         if (check && repeat_check_count_ != UINT32_MAX) {  // it fit: the full path below is compared with it
-          ++repeat_geometry_matches_;
+          ++matches;
           repeat_check_ = true;
         }
       }
@@ -4170,34 +4180,9 @@ class VulkanDrawsImpl final : public VulkanDraws {
      * waste; if almost all do, the double memcpy is. They are two different fixes, and counting costs one
      * increment.
      */
-    ++shared_observed_;
     const auto t_shared =
         time_ ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
-    uint32_t* const shared_previous = shared_buffers_[shared_buffer_ ^ 1];
-    if (shared_epoch_ == epoch_upload_ && SameBytes<kSharedBytes>(shared, shared_previous)) {
-      offset_shared = shared_offset_;  // the same as the previous draw
-    } else {
-      ++shared_changed_;
-      if (shared_separate_ && use_ubo_) {
-        // To the separate CPU-cached buffer; binding 2 of set 4 points to it.
-        offset_shared = (shared_used_ + alignment_ubo_ - 1) & ~(alignment_ubo_ - 1);
-        shared_used_ = offset_shared + kUboBytesShared;
-        std::memcpy(shared_data_ + offset_shared, shared, kSharedBytes);
-      } else {
-        Reserve(use_ubo_ ? kUboBytesShared : kWordsShared * 4, use_ubo_ ? alignment_ubo_ : 16,
-                 offset_shared);
-        std::memcpy(upload_data_ + offset_shared, shared, kSharedBytes);
-      }
-      // mw2mp_native_shared_swap: this buffer becomes the previous one and the next draw builds in the
-      // other, instead of copying the block.
-      if (shared_swap_) {
-        shared_buffer_ ^= 1;
-      } else {
-        std::memcpy(shared_previous, shared, kSharedBytes);
-      }
-      shared_offset_ = offset_shared;
-      shared_epoch_ = epoch_upload_;
-    }
+    offset_shared = UploadShared(shared);
     if (time_) {
       sub_ns_[12] += uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
                                   std::chrono::steady_clock::now() - t_shared)
@@ -4880,6 +4865,7 @@ class VulkanDrawsImpl final : public VulkanDraws {
     kRepeatMissBound,     // the GPU state the previous draw left is not bound any more
     kRepeatMissRoom,      // no room for the constants in the upload buffer
     kRepeatMissGeometry,  // only the index range differs, but the geometry variant does not fit (or is off)
+    kRepeatMissTexture,   // only textures (and geometry) differ, but the texture variant does not fit
     kRepeatMissCount,
   };
   struct RepeatDraw {
@@ -4918,7 +4904,8 @@ class VulkanDrawsImpl final : public VulkanDraws {
     VulkanDrawsImpl* self;
     ~RepeatCheckGuard() {
       if (self->repeat_check_) {
-        self->MismatchRepeat("the full path did not record the draw", self->repeat_check_count_ != UINT32_MAX);
+        self->MismatchRepeat("the full path did not record the draw", self->repeat_check_count_ != UINT32_MAX,
+                             self->repeat_check_texture_);
       }
     }
   };
@@ -4928,6 +4915,7 @@ class VulkanDrawsImpl final : public VulkanDraws {
     kRepeatNo,        // take the full path
     kRepeatSame,      // a repeat of the previous draw (DrawRepeat)
     kRepeatGeometry,  // a repeat but for its index range: count, VGT_DMA_BASE, VGT_DMA_SIZE (DrawRepeatGeometry)
+    kRepeatTexture,   // the geometry variant plus other pixel shader textures (DrawRepeatGeometry with textures)
   };
   // The registers a geometry variant may change; of VGT_DRAW_INITIATOR only the count (bits 16-31): the
   // primitive type, the index source and the index size stay.
@@ -4976,26 +4964,27 @@ class VulkanDrawsImpl final : public VulkanDraws {
       return kRepeatNo;
     }
     bool fetch_geometry = false;  // only vertex fetch words differ: another vertex buffer (geometry variant)
+    bool fetch_texture = false;   // sampler words differ too: other textures (texture variant)
     if (p.generation_fetch != d.generation_fetch) {
       if (!SameBytes<kRepeatFetchWords * 4>(d.fetch.data(), r + kRegFetch)) {
         // Run mw2sp_029: once the index range could differ, 35-51 % of draws missed here, on the vertex fetch
         // words: the next piece also comes from another vertex buffer. SourcesOf reads those words again.
-        fetch_geometry = repeat_geometry_on_ && d.with_indices && d.indices_16 && d.input;
-        for (uint32_t w = 0; fetch_geometry && w < kRepeatFetchWords; ++w) {
-          fetch_geometry = r[kRegFetch + w] == d.fetch[w] || ((d.fetch_vertex[w >> 6] >> (w & 63)) & 1);
-        }
-        if (!fetch_geometry) {
-          ++repeat_misses_[kRepeatMissFetch];
-          // Measurement (run mw2sp_034, boneyard: 20 % of draws missed here, Estate 1-2 %): a word a sampler
-          // reads differs (another texture), or only words neither shader reads, or only vertex words but the
-          // reference cannot take the geometry variant (not 16-bit indexed).
-          bool sampler = false, unread = false;
-          for (uint32_t w = 0; !sampler && w < kRepeatFetchWords; ++w) {
-            if (r[kRegFetch + w] != d.fetch[w]) {
-              sampler = (d.fetch_sampler[w >> 6] >> (w & 63)) & 1;
-              unread |= !sampler && !((d.fetch_vertex[w >> 6] >> (w & 63)) & 1);
+        // Run mw2sp_035: the rest were sampler words (another texture), never unread or vertex-only ones.
+        bool sampler = false, unread = false;
+        for (uint32_t w = 0; w < kRepeatFetchWords; ++w) {
+          if (r[kRegFetch + w] != d.fetch[w]) {
+            if ((d.fetch_sampler[w >> 6] >> (w & 63)) & 1) {
+              sampler = true;
+            } else if (!((d.fetch_vertex[w >> 6] >> (w & 63)) & 1)) {
+              unread = true;
             }
           }
+        }
+        const bool capable = repeat_geometry_on_ && d.with_indices && d.indices_16 && d.input;
+        fetch_geometry = capable && !sampler && !unread;
+        fetch_texture = capable && repeat_textures_on_ && sampler && !unread && d.ps;
+        if (!fetch_geometry && !fetch_texture) {
+          ++repeat_misses_[kRepeatMissFetch];
           ++(sampler ? repeat_fetch_texture_ : unread ? repeat_fetch_unread_ : repeat_fetch_vertex_);
           return kRepeatNo;
         }
@@ -5016,6 +5005,9 @@ class VulkanDrawsImpl final : public VulkanDraws {
     if (upload_used_ + room > kSizeUpload) {
       ++repeat_misses_[kRepeatMissRoom];
       return kRepeatNo;
+    }
+    if (fetch_texture) {
+      return kRepeatTexture;
     }
     return geometry == SIZE_MAX && !fetch_geometry ? kRepeatSame : kRepeatGeometry;
   }
@@ -5060,8 +5052,17 @@ class VulkanDrawsImpl final : public VulkanDraws {
    * depends on: anything that does not fit returns false before the first upload and the full path runs. With
    * check set (the guard) it stops there too, and CheckRepeat compares what the full path records.
    */
-  bool DrawRepeatGeometry(const DrawRequest& p, const uint32_t* r, bool check) {
+  /*
+   * The texture variant (mw2mp_native_repeat_textures, textures set): also other pixel shader textures. Only when
+   * every sampler finds its texture in the sampler caches (TexturesFromCache), so nothing goes through
+   * PrepareTexture: no upload is queued and no C2 resolve can end the pass. The texture words are rebuilt on a copy of
+   * the reference's shared block (everything else in it depends only on what the match compared) and uploaded like
+   * the full path's (UploadShared). Not for a sampler that reads the reflection or the shadow overlay (the full path
+   * adds a query or a pipeline bit there). The guard also compares the shared block the full path built.
+   */
+  bool DrawRepeatGeometry(const DrawRequest& p, const uint32_t* r, bool check, bool textures) {
     RepeatDraw& d = repeat_;
+    const RepeatMiss miss_kind = textures ? kRepeatMissTexture : kRepeatMissGeometry;
     const VertexInput& input = *d.input;
     const uint32_t count = r[gr::XE_GPU_REG_VGT_DRAW_INITIATOR] >> 16;
     const uint32_t size = r[gr::XE_GPU_REG_VGT_DMA_SIZE];
@@ -5069,7 +5070,7 @@ class VulkanDrawsImpl final : public VulkanDraws {
     const uint32_t base = r[gr::XE_GPU_REG_VGT_DMA_BASE] & ~uint32_t(1);
     if ((order != xenos::Endian::k8in16 && order != xenos::Endian::kNone) || count > (size & 0xFFFFFF) ||
         uint64_t(base & 0x1FFFFFFF) + uint64_t(count) * 2 > kMemoryPhysical) {
-      ++repeat_misses_[kRepeatMissGeometry];
+      ++repeat_misses_[miss_kind];
       return false;
     }
     indices_.clear();
@@ -5080,7 +5081,7 @@ class VulkanDrawsImpl final : public VulkanDraws {
     const auto give_up = [&](bool miss) {
       indices_known_ = nullptr;  // as the full path leaves them (it sets them again anyway)
       indices_scanned_ = true;
-      repeat_misses_[kRepeatMissGeometry] += miss ? 1 : 0;
+      repeat_misses_[miss_kind] += miss ? 1 : 0;
       return false;
     };
     std::array<VertexSource, 16> sources;
@@ -5090,14 +5091,24 @@ class VulkanDrawsImpl final : public VulkanDraws {
     const VkDeviceSize room =
         (vertices_base_cero_ && input.bindings.size() == 1 ? VkDeviceSize(input.bindings[0].stride) : 0) +
         bytes_indices + 4 + 64 * 8 +
-        (use_ubo_ ? kUboBytesVs + kUboBytesPs + 2 * alignment_ubo_ : 2 * VkDeviceSize(kRegistersConstants) * 4 + 32);
+        (use_ubo_ ? kUboBytesVs + kUboBytesPs + 2 * alignment_ubo_ : 2 * VkDeviceSize(kRegistersConstants) * 4 + 32) +
+        (textures ? (use_ubo_ ? kUboBytesShared + alignment_ubo_ : VkDeviceSize(kWordsShared) * 4 + 16) : 0);
     if (vmin > vmax || vmax - vmin >= kMaxVerticesPerDraw ||
         SourcesOf(input, r, vmin, vmax - vmin + 1, false, sources, bytes_vertices) ||
         upload_used_ + room + bytes_vertices > kSizeUpload) {
       return give_up(true);
     }
+    uint32_t* const shared = shared_buffers_[shared_buffer_];  // scratch until uploaded (the full path rebuilds it)
+    if (textures && ((shared_separate_ && use_ubo_ && shared_used_ + kUboBytesShared + alignment_ubo_ > kSizeShared) ||
+                     !TexturesFromCache(p, d.ps, r, shared))) {
+      return give_up(true);
+    }
     if (check) {
       repeat_check_count_ = count;  // what the shortcut would have drawn (CheckRepeat)
+      if (textures) {
+        repeat_check_texture_ = true;
+        std::memcpy(repeat_check_shared_, shared, kSharedBytes);
+      }
       return give_up(false);
     }
     const VkCommandBuffer cmd = pass_commands_;
@@ -5108,7 +5119,8 @@ class VulkanDrawsImpl final : public VulkanDraws {
     UploadVertices(input, sources, offsets_vertices);
     const VkDeviceSize offset_indices = UploadIndices(true, true, bytes_indices, vmin, vmax);
     UploadConstants(p, d.ps, r);
-    BindSet4(cmd, d.offset_shared);
+    const VkDeviceSize offset_shared = textures ? UploadShared(shared) : d.offset_shared;
+    BindSet4(cmd, offset_shared);
     bool base_cero = false;
     uint32_t first_vertex = 0;
     BindVertices(cmd, input, offsets_vertices, input.bindings.size() == 1 ? sources[0].bytes : 0, vmin, base_cero,
@@ -5120,7 +5132,8 @@ class VulkanDrawsImpl final : public VulkanDraws {
     triangles_per_category_[d.category] += count / 3;
     ++drawn_;
     ++draws_in_pass_;
-    ++repeat_geometry_hits_;
+    ++(textures ? repeat_texture_hits_ : repeat_geometry_hits_);
+    d.offset_shared = offset_shared;
     // The next draw compares with this one: the reference but for its geometry.
     for (size_t i = 0; i < kRepeatRegisterCount; ++i) {
       d.registers[i] = r[kRepeatRegisters[i]];
@@ -5135,6 +5148,92 @@ class VulkanDrawsImpl final : public VulkanDraws {
     d.vmin = vmin;
     d.triangles = count / 3;
     return true;
+  }
+
+  // The texture variant's texture words: the pixel shader's samplers from the sampler caches only (the full path's
+  // two lookups, without PrepareTexture), written over the reference's block in shared. false = a sampler is not in
+  // the caches, or reads the reflection or the shadow overlay: take the full path (shared is scratch).
+  bool TexturesFromCache(const DrawRequest& p, const ShaderInput* ps, const uint32_t* r, uint32_t* shared) {
+    const uint32_t mip_min = mw2mp::native::TextureMipFloor(
+        p.vs->fetch_full ? p.vs->hash_no_fetch : p.vs->hash,
+        r[gr::XE_GPU_REG_RB_DEPTHCONTROL], preset_mip_min_, diag_mip_min_);
+    const uint32_t dir_overlay = context_->AddressShadowOverlay();
+    // The previous buffer holds the last block uploaded: the reference's, unless something else uploaded since.
+    if (shared_epoch_ != epoch_upload_ || shared_offset_ != repeat_.offset_shared) {
+      return false;
+    }
+    std::memcpy(shared, shared_buffers_[shared_buffer_ ^ 1], kSharedBytes);  // the reference's block
+    for (const SamplerShader& sampler : ps->samplers) {
+      if (sampler.reg_index >= 16) {
+        continue;
+      }
+      const uint32_t* fetch = r + kRegFetch + uint32_t(sampler.reg_index) * 6;
+      if ((fetch[0] & 0x3) == uint32_t(xenos::FetchConstantType::kTexture)) {
+        const uint32_t dir = (fetch[1] & 0xFFFFF000u) & 0x1FFFFFFFu;
+        if ((measure_visibility_ && dir == mw2mp::reflection_demand::kAddress) ||
+            (dir_overlay && dir == dir_overlay)) {
+          return false;
+        }
+      }
+      const auto valid = [&](CacheSampler& c) {
+        return (cache_between_frames_ ? frame_ <= c.valid_until : c.frame == frame_) &&
+               c.generation == generation_textures_ && c.mip_min == mip_min && SlotCurrent(c) &&
+               SameBytes<sizeof(c.fetch)>(c.fetch.data(), fetch) && StampsQuiet(c);
+      };
+      CacheSampler* hit = &cache_samplers_[sampler.reg_index];
+      if (!valid(*hit)) {
+        const size_t set = (XXH3_64bits(fetch, sizeof(uint32_t) * 6) ^ (uint64_t(mip_min) << 1)) &
+                           (cache_fetch_.size() - 2);
+        hit = &cache_fetch_[set];
+        if (!valid(*hit)) {
+          hit = &cache_fetch_[set + 1];
+          if (!valid(*hit)) {
+            return false;
+          }
+        }
+      }
+      const uint32_t reg = sampler.reg_index;
+      shared[reg] = 0;
+      shared[16 + reg] = 0;
+      shared[32 + reg] = 0;
+      shared[hit->heap * 16 + reg] = hit->slot;
+      shared[48 + reg] = hit->sampler;
+      WriteInvSize(shared, reg, hit->width, hit->height);
+      WriteScale(shared, reg, fetch);
+      WriteScaleCoords(shared, reg, fetch, hit->width, hit->height);
+    }
+    return true;
+  }
+
+  // The shared block's upload (Draw's pipeline stage and the texture variant): the previous offset when the block is
+  // the same as the previous draw's in this upload epoch, else a new copy (mw2mp_native_shared_swap: the buffers swap).
+  VkDeviceSize UploadShared(uint32_t* shared) {
+    ++shared_observed_;
+    uint32_t* const shared_previous = shared_buffers_[shared_buffer_ ^ 1];
+    if (shared_epoch_ == epoch_upload_ && SameBytes<kSharedBytes>(shared, shared_previous)) {
+      return shared_offset_;  // the same as the previous draw
+    }
+    ++shared_changed_;
+    VkDeviceSize offset_shared;
+    if (shared_separate_ && use_ubo_) {
+      // To the separate CPU-cached buffer; binding 2 of set 4 points to it.
+      offset_shared = (shared_used_ + alignment_ubo_ - 1) & ~(alignment_ubo_ - 1);
+      shared_used_ = offset_shared + kUboBytesShared;
+      std::memcpy(shared_data_ + offset_shared, shared, kSharedBytes);
+    } else {
+      Reserve(use_ubo_ ? kUboBytesShared : kWordsShared * 4, use_ubo_ ? alignment_ubo_ : 16, offset_shared);
+      std::memcpy(upload_data_ + offset_shared, shared, kSharedBytes);
+    }
+    // mw2mp_native_shared_swap: this buffer becomes the previous one and the next draw builds in the other, instead
+    // of copying the block.
+    if (shared_swap_) {
+      shared_buffer_ ^= 1;
+    } else {
+      std::memcpy(shared_previous, shared, kSharedBytes);
+    }
+    shared_offset_ = offset_shared;
+    shared_epoch_ = epoch_upload_;
+    return offset_shared;
   }
 
   // --- Draw's geometry stages, shared with the geometry variant ---------------------------------------------
@@ -5506,7 +5605,9 @@ class VulkanDrawsImpl final : public VulkanDraws {
     const RepeatDraw& d = repeat_;
     const uint32_t count_geometry = repeat_check_count_;  // the index count the geometry variant would draw
     const bool geometry = count_geometry != UINT32_MAX;     // a geometry variant's check (DrawRepeatGeometry)
+    const bool texture = repeat_check_texture_;             // a texture variant's (geometry is set too)
     repeat_check_count_ = UINT32_MAX;
+    repeat_check_texture_ = false;
     const char* what = nullptr;
     if (full.pipeline != d.pipeline) {
       what = "pipeline";
@@ -5527,9 +5628,11 @@ class VulkanDrawsImpl final : public VulkanDraws {
       what = "dynamic state";
     } else if (full.category != d.category) {
       what = "target category";
+    } else if (texture && std::memcmp(shared_buffers_[shared_buffer_ ^ 1], repeat_check_shared_, kSharedBytes) != 0) {
+      what = "texture words";  // the full path's shared block (the previous buffer once uploaded) against ours
     }
     if (what) {
-      MismatchRepeat(what, geometry);
+      MismatchRepeat(what, geometry, texture);
       return;
     }
     if (!geometry && full.first_index != d.first_index || full.vertex_offset != d.vertex_offset ||
@@ -5538,15 +5641,17 @@ class VulkanDrawsImpl final : public VulkanDraws {
     }
   }
 
-  // A geometry variant's check switches off only the variant (mw2mp_native_repeat_geometry).
-  void MismatchRepeat(const char* what, bool geometry) {
+  // A geometry (texture) variant's check switches off only that variant (mw2mp_native_repeat_geometry, _textures).
+  void MismatchRepeat(const char* what, bool geometry, bool texture = false) {
     repeat_check_ = false;
     repeat_check_count_ = UINT32_MAX;
-    (geometry ? repeat_geometry_on_ : repeat_on_) = false;
+    repeat_check_texture_ = false;
+    (texture ? repeat_textures_on_ : geometry ? repeat_geometry_on_ : repeat_on_) = false;
     repeat_.valid = false;
     REXLOG_ERROR("[native] C6 repeat shortcut{}: MISMATCH ({}) after {} matches and {} checks: switched OFF for the "
                  "rest of the session. VS n{} PS n{} count {} index count {}",
-                 geometry ? " (geometry variant)" : "", what, geometry ? repeat_geometry_matches_ : repeat_matches_,
+                 texture ? " (texture variant)" : geometry ? " (geometry variant)" : "", what,
+                 texture ? repeat_texture_matches_ : geometry ? repeat_geometry_matches_ : repeat_matches_,
                  repeat_checks_, repeat_.vs ? int(repeat_.vs->number) : -1, repeat_.ps ? int(repeat_.ps->number) : -1,
                  repeat_.count, repeat_.index_count);
   }
@@ -5565,7 +5670,7 @@ class VulkanDrawsImpl final : public VulkanDraws {
     for (uint64_t m : repeat_misses_) {
       misses += m;
     }
-    const uint64_t draws = repeat_hits_ + repeat_geometry_hits_ + misses;
+    const uint64_t draws = repeat_hits_ + repeat_geometry_hits_ + repeat_texture_hits_ + misses;
     if (!first && draws) {
       // The three registers that most often broke a match.
       std::array<size_t, kRepeatRegisterCount> order;
@@ -5585,17 +5690,22 @@ class VulkanDrawsImpl final : public VulkanDraws {
           "({:.1f} %); not a repeat: previous no reference {:.1f} %, shaders {:.1f} %, frame {:.1f} %, sync {:.1f} %, "
           "registers {:.1f} % ({}), fetch {:.1f} % (sampler words {:.1f} %, unread words {:.1f} %, vertex words only {:.1f} %), bound state {:.1f} %, room {:.1f} %; {} checked against the full "
           "path in total, {} of them with other upload offsets (fine) | geometry variant "
-          "(mw2mp_native_repeat_geometry {}): {} draws ({:.1f} %), {:.1f} % that did not fit; {} matches in total",
+          "(mw2mp_native_repeat_geometry {}): {} draws ({:.1f} %), {:.1f} % that did not fit; {} matches in total | "
+          "texture variant (mw2mp_native_repeat_textures {}): {} draws ({:.1f} %), {:.1f} % that did not fit; {} "
+          "matches in total",
           repeat_on_ ? "on" : "OFF", repeat_hits_, draws, pct(repeat_hits_), pct(repeat_misses_[kRepeatMissPrevious]),
           pct(repeat_misses_[kRepeatMissShaders]), pct(repeat_misses_[kRepeatMissFrame]),
           pct(repeat_misses_[kRepeatMissSync]), pct(repeat_misses_[kRepeatMissRegister]),
           registers.empty() ? std::string("none") : registers, pct(repeat_misses_[kRepeatMissFetch]),
           pct(repeat_fetch_texture_), pct(repeat_fetch_unread_), pct(repeat_fetch_vertex_), pct(repeat_misses_[kRepeatMissBound]), pct(repeat_misses_[kRepeatMissRoom]), repeat_checks_,
           repeat_offsets_moved_, repeat_geometry_on_ ? "on" : "off", repeat_geometry_hits_, pct(repeat_geometry_hits_),
-          pct(repeat_misses_[kRepeatMissGeometry]), repeat_geometry_matches_);
+          pct(repeat_misses_[kRepeatMissGeometry]), repeat_geometry_matches_, repeat_textures_on_ ? "on" : "off",
+          repeat_texture_hits_, pct(repeat_texture_hits_), pct(repeat_misses_[kRepeatMissTexture]),
+          repeat_texture_matches_);
     }
     repeat_hits_ = 0;
     repeat_geometry_hits_ = 0;
+    repeat_texture_hits_ = 0;
     repeat_misses_ = {};
     repeat_misses_register_ = {};
     repeat_fetch_texture_ = 0;
@@ -14287,6 +14397,12 @@ class VulkanDrawsImpl final : public VulkanDraws {
   uint32_t repeat_check_count_ = UINT32_MAX;  // a geometry check: the index count the variant would draw
   uint64_t repeat_geometry_matches_ = 0;     // since start
   uint64_t repeat_geometry_hits_ = 0;        // report interval
+  // The texture variant (mw2mp_native_repeat_textures; see DrawRepeatGeometry).
+  bool repeat_textures_on_ = REXCVAR_GET(mw2mp_native_repeat_textures);
+  bool repeat_check_texture_ = false;        // the check draw is a texture variant's: compare the shared block too
+  uint32_t repeat_check_shared_[kWordsShared] = {};  // the block the texture variant would have uploaded
+  uint64_t repeat_texture_matches_ = 0;      // since start
+  uint64_t repeat_texture_hits_ = 0;         // report interval
   RepeatDraw repeat_;
   uint64_t repeat_matches_ = 0, repeat_checks_ = 0, repeat_offsets_moved_ = 0;  // since start
   uint64_t repeat_hits_ = 0;                                                  // report interval
