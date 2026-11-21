@@ -1,8 +1,8 @@
 # Symbolizes the console profiler's log: replaces each "image+0xNNN" (the SDK profiler's own format) in
-# logs/rex/rex_profile.log with the function (and file) from the ELF of the same build (app/out/switch/bo2zm, the
-# unstripped executable the build leaves beside the NRO; mw2nx: mw2mp/out/switch/mw2mp; an ELF of a different build
+# logs/rex/rex_profile.log with the function (and file) from the ELF of the same build (mw2mp/out/switch/mw2mp or
+# mw2sp/out/switch/mw2sp, the unstripped executable the build leaves beside the NRO; an ELF of a different build
 # gives wrong names).
-# usage: python tools/profile_sym.py rex_profile.log bo2zm_<commit>.elf out.txt
+# usage: python tools/profile_sym.py rex_profile.log mw2sp_<commit>.elf out.txt
 import os, re, subprocess, sys
 
 ADDR_RE = r"image\+0x([0-9a-f]+)"
@@ -24,7 +24,7 @@ for i in range(0, len(addrs), CHUNK):
         loc = out[2 * k + 1] if 2 * k + 1 < len(out) else "?"
         loc = re.sub(r".*[/\\]", "", loc).split(" ")[0]
         func = re.sub(r"\(anonymous namespace\)::", "", func)
-        func = re.sub(r"(bo2zm|mw2mp)::native::", "", func)
+        func = re.sub(r"mw2mp::native::", "", func)
         func = re.sub(r"\(.*", "", func)  # drop the parameter list
         names[a] = "%s@%s" % (func[-70:], loc)
 

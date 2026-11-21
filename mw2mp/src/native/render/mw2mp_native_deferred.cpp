@@ -52,25 +52,25 @@
 #include <immintrin.h>
 #endif
 
-REXCVAR_DEFINE_BOOL(mw2mp_native_deferred_recording, true, "BO2",
+REXCVAR_DEFINE_BOOL(mw2mp_native_deferred_recording, true, "MW2",
                     "Native renderer: the work command buffer's Vulkan calls are made by a recorder thread, in order, "
                     "while the ring thread goes on decoding (mw2mp_native_deferred.h). false = all on the ring thread")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
-REXCVAR_DEFINE_INT32(mw2mp_native_recorder_priority, 0x2D, "BO2",
+REXCVAR_DEFINE_INT32(mw2mp_native_recorder_priority, 0x2D, "MW2",
                      "Switch: Horizon priority of the recorder thread (0x1C-0x3B); the ring thread's by default")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
-REXCVAR_DEFINE_INT32(mw2mp_native_recorder_core, -2, "BO2",
+REXCVAR_DEFINE_INT32(mw2mp_native_recorder_core, -2, "MW2",
                      "Switch: preferred core of the recorder thread. -2 = the one neither the ring nor the vertex copy "
                      "thread prefers; -1 = no preference; 0-2 = that one")
     .range(-2, 2)
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
-REXCVAR_DEFINE_INT32(mw2mp_native_recorder_priority_b, -1, "BO2",
+REXCVAR_DEFINE_INT32(mw2mp_native_recorder_priority_b, -1, "MW2",
                      "Test (Switch), with mw2mp_benchmark_ab_s: the recorder's Horizon priority (0x1C-0x3B) in the A/B "
                      "arms with factor 1 on; 0x3B is the game threads' band, where it shares the cores with Main "
                      "instead of preempting it. -1 = not part of the A/B")
     .range(-1, 0x3B)
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
-REXCVAR_DEFINE_INT32(mw2mp_native_recorder_core_b, -3, "BO2",
+REXCVAR_DEFINE_INT32(mw2mp_native_recorder_core_b, -3, "MW2",
                      "Test (Switch), with mw2mp_benchmark_ab_s: the recorder's preferred core (0-2, -1 = none) in the "
                      "A/B arms with factor 1 on. -3 = not part of the A/B")
     .range(-3, 2)

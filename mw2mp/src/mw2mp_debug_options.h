@@ -6,8 +6,8 @@
 
 namespace mw2mp::debug {
 
-// The DEBUG page (app/src/ui/menus.lua, Extras): switches that help find the cause of a bug, kept between runs by the
-// settings in mw2mp_extras.cpp. See mw2mp_debug_options.cpp.
+// Switches that help find the cause of a bug. In bo2-360-nx they were the DEBUG page of its Extras menu (menus.lua);
+// MW2 has no such page, and mw2mp_native_stubs.cpp answers with the defaults.
 
 // The renderer shortcuts the page can turn off (any thread). Off falls back to the full path, the one the benchmark's
 // A/B "off" arms run.

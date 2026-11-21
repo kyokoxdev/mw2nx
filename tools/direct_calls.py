@@ -1,22 +1,22 @@
 """Direct calls between game functions that have no hook.
 
-DEFINE_REX_FUNC (app/generated/default_mp/bo2zm_pch.h) makes every recompiled function sub_X a *weak* alias of
-__imp__sub_X, so a hook (REX_HOOK_RAW(sub_X) in app/src) can replace it at link time. The codegen always calls sub_X,
+DEFINE_REX_FUNC (the generated code's mw2mp_pch.h / mw2sp_pch.h) makes every recompiled function sub_X a *weak* alias of
+__imp__sub_X, so a hook (REX_HOOK_RAW(sub_X) in mw2mp/src) can replace it at link time. The codegen always calls sub_X,
 and a compiler never inlines a call through a weak alias (a hook might replace it), in the same file or with LTO. This
-tool rewrites `sub_X(ctx, base);` into `__imp__sub_X(ctx, base);` in bo2zm_recomp.*.cpp when sub_X has no hook: the
-same function, but now one the compiler may inline. bo2zm_init.cpp and bo2zm_register.cpp are not touched, so indirect
-calls (function pointers, vtables, the dispatch table) still go through sub_X and still reach every hook.
+tool rewrites `sub_X(ctx, base);` into `__imp__sub_X(ctx, base);` in *_recomp.*.cpp when sub_X has no hook: the
+same function, but now one the compiler may inline. The *_init.cpp and *_register.cpp files are not touched, so
+indirect calls (function pointers, vtables, the dispatch table) still go through sub_X and still reach every hook.
 
-A function counts as hooked if its address (82xxxxxx) appears in the code of app/src, app/CMakeLists.txt or the SDK
-(sdk/src, include): hooks are sometimes built from pieces (REX_HOOK_RAW(sub_##a) in bo2zm_d3d_trace.cpp,
-with the addresses in bo2zm_d3d_trace_list.inc), so looking for REX_HOOK_RAW(sub_...) is not enough. Comments (after
-//) and lines marked "call only" (functions the port calls through the dispatch table, app/src/bo2zm_guest.h) do not
+A function counts as hooked if its address (82xxxxxx) appears in the code of mw2mp/src, mw2mp/CMakeLists.txt or the
+SDK (sdk/src, include), plus mw2sp/src and mw2sp/CMakeLists.txt for the Campaign's generated code: hooks are sometimes
+built from pieces (REX_HOOK_RAW(sub_##a) with the addresses in a list), so looking for REX_HOOK_RAW(sub_...) is not
+enough. Comments (after //) and lines marked "call only" (functions the port calls through the dispatch table) do not
 count. That still over-counts a little (data addresses), which only costs some direct calls. --objects checks the other direction: every
-strong sub_ symbol the compiled app objects define must be on the list.
+strong sub_ symbol the compiled program objects define must be on the list.
 
 The rewrite goes both ways and is idempotent: hooked -> sub_X, not hooked -> __imp__sub_X. Run it after every codegen
-(tools/codegen.sh does) and whenever a hook is added or removed; the build scripts run --check, which fails when a
-hooked function is called directly (its hook would only see indirect calls).
+(tools/codegen_mw2mp.sh and tools/codegen_mw2sp.sh do) and whenever a hook is added or removed; the build scripts run
+--check, which fails when a hooked function is called directly (its hook would only see indirect calls).
 
 usage: python tools/direct_calls.py [--gen DIR] [--undo | --check] [--objects BUILD_DIR [--nm NM]]
 """
@@ -27,14 +27,9 @@ import subprocess
 import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-GEN = os.path.join(ROOT, "app", "generated", "default_mp")
-SOURCES = [os.path.join(ROOT, "app", "src"), os.path.join(ROOT, "app", "CMakeLists.txt"),
-           os.path.join(ROOT, "sdk", "src"), os.path.join(ROOT, "sdk", "include")]
-# The campaign build (bo2cp, campaign/generated) also has hooks of its own in campaign/src, among them the app/src hooks
-# renamed to its addresses (campaign/src/native/bo2cp_game_remap.h); they count only for its generated code.
-CAMPAIGN_SOURCES = [os.path.join(ROOT, "campaign", "src"), os.path.join(ROOT, "campaign", "CMakeLists.txt")]
-# mw2nx: mw2mp's hooks are in mw2mp/src; the campaign (mw2sp) builds those same sources with its own remap header, so
-# its generated code counts mw2mp/src's addresses and mw2sp/src's.
+GEN = os.path.join(ROOT, "mw2mp", "generated", "default_mp")
+# mw2mp's hooks are in mw2mp/src; the campaign (mw2sp) builds those same sources with its own remap header, so its
+# generated code counts mw2mp/src's addresses and mw2sp/src's.
 MW2MP_SOURCES = [os.path.join(ROOT, "mw2mp", "src"), os.path.join(ROOT, "mw2mp", "CMakeLists.txt"),
                  os.path.join(ROOT, "sdk", "src"), os.path.join(ROOT, "sdk", "include")]
 MW2SP_SOURCES = MW2MP_SOURCES + [os.path.join(ROOT, "mw2sp", "src"), os.path.join(ROOT, "mw2sp", "CMakeLists.txt")]
@@ -47,12 +42,7 @@ CALL = re.compile(r"(?<![\w])(__imp__)?sub_([0-9A-F]{8})\(ctx, base\);")
 def hooked(gen=GEN):
     names = set()
     parts = os.path.normpath(os.path.abspath(gen)).split(os.sep)
-    if "mw2sp" in parts:
-        sources = MW2SP_SOURCES
-    elif "mw2mp" in parts:
-        sources = MW2MP_SOURCES
-    else:
-        sources = SOURCES + (CAMPAIGN_SOURCES if "campaign" in parts else [])
+    sources = MW2SP_SOURCES if "mw2sp" in parts else MW2MP_SOURCES
     for root in sources:
         if os.path.isfile(root):
             paths = [root]
@@ -105,7 +95,7 @@ def rewrite(gen, with_hook, undo, check_only):
 
 
 def defined_hooks(build_dir, nm):
-    """Strong sub_ symbols defined by the app's own objects (not the generated code)."""
+    """Strong sub_ symbols defined by the program's own objects (not the generated code)."""
     found = {}
     for d, _, fs in os.walk(build_dir):
         if "generated" in d.replace("\\", "/").split("/") or "sdk-out" in d:
@@ -127,7 +117,7 @@ def main():
     ap.add_argument("--gen", default=GEN)
     ap.add_argument("--undo", action="store_true", help="every call back to sub_X")
     ap.add_argument("--check", action="store_true", help="change nothing; fail if a hooked function is called directly")
-    ap.add_argument("--objects", help="build folder whose app objects are checked against the hooked list")
+    ap.add_argument("--objects", help="build folder whose program objects are checked against the hooked list")
     ap.add_argument("--nm", default="llvm-nm")
     a = ap.parse_args()
     with_hook = hooked(a.gen)

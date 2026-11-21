@@ -2,7 +2,7 @@
 # Builds mw2mp_shaders.spvpack (+ .spvidx), the native renderer's shader library, from the multiplayer's fastfiles:
 #   1. inflate each zone (a signed fastfile interleaves 8 KB of hashes every 2 MB of its zlib stream);
 #   2. zone_containers: every shader as container + physical part (mw2-recompiled's zone walker);
-#   3. bo2zm_hlsl (tools/xenosrecomp): XenosRecomp to HLSL; 4. dxc to SPIR-V, spirv-val; 5. bo2zm_pack.
+#   3. mw2_hlsl (tools/xenosrecomp): XenosRecomp to HLSL; 4. dxc to SPIR-V, spirv-val; 5. mw2_pack.
 # Game-derived output: never commit it. Copy both files next to mw2mp.nro.
 # MW2_SP=1: the campaign's library instead, mw2sp_shaders.spvpack (+ .spvidx) from every zone that is not the
 # multiplayer's (mw2sp/src/mw2sp_game_remap.h names it); same folder.
@@ -60,9 +60,9 @@ for path in sys.argv[2:]:
     open(os.path.join(out, os.path.basename(path)[:-3] + ".zone"), "wb").write(zone)
 EOF
 "$WORK/tools/zone_containers" "$WORK/containers" "$WORK"/zones/*.zone | tail -1
-"$WORK/tools/bo2zm_hlsl.exe" "$WORK/containers" "$WORK/hlsl" "$ROOT/tools/xenosrecomp/translator/shader_common.h" | tail -1
+"$WORK/tools/mw2_hlsl.exe" "$WORK/containers" "$WORK/hlsl" "$ROOT/tools/xenosrecomp/translator/shader_common.h" | tail -1
 
-# dxc as bo2's tools/build_mp_shaders.py runs it; a shader that fails is left out of the pack and listed.
+# dxc: a shader that fails is left out of the pack and listed.
 export DXC SPIRV_VAL WORK
 find "$WORK/hlsl" -name '*.hlsl' -printf '%f\n' | xargs -P "$JOBS" -I{} bash -c '
   f={}; b=${f%.hlsl}
@@ -77,7 +77,7 @@ find "$WORK/hlsl" -name '*.hlsl' -printf '%f\n' | xargs -P "$JOBS" -I{} bash -c 
 echo "dxc: $(find "$WORK/spirv" -name '*.spv' | wc -l) compiled, $(wc -l < "$WORK/compile_failed.txt") failed (compile_failed.txt)"
 
 rm -f "$WORK/$PACK.spvpack" "$WORK/$PACK.spvidx"
-"$WORK/tools/bo2zm_pack.exe" "$WORK/containers" "$WORK/spirv" "$WORK/$PACK.spvpack" > "$WORK/pack.log"
-"$WORK/tools/bo2zm_pack.exe" --index "$WORK/$PACK.spvpack" "$WORK/$PACK.spvidx" >> "$WORK/pack.log"
+"$WORK/tools/mw2_pack.exe" "$WORK/containers" "$WORK/spirv" "$WORK/$PACK.spvpack" > "$WORK/pack.log"
+"$WORK/tools/mw2_pack.exe" --index "$WORK/$PACK.spvpack" "$WORK/$PACK.spvidx" >> "$WORK/pack.log"
 tail -2 "$WORK/pack.log"
 ls -la "$WORK/$PACK.spvpack" "$WORK/$PACK.spvidx"

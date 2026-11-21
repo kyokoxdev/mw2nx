@@ -104,12 +104,12 @@ std::filesystem::path GetExecutablePath() {
 #elif defined(__SWITCH__)
   // Horizon has no /proc. The Linux branch would compile anyway and silently return
   // empty. hbloader passes the NRO path as argv[0], for example
-  // sdmc:/switch/bo2zm/bo2zm.nro, and libnx stores it in __system_argv.
+  // sdmc:/switch/mw2mp/mw2mp.nro, and libnx stores it in __system_argv.
   //
   // It is returned without the "sdmc:". libstdc++ does not know newlib's devices:
-  // to it, "sdmc:/switch/bo2zm" has no root, so it is relative, and
+  // to it, "sdmc:/switch/mw2mp" has no root, so it is relative, and
   // std::filesystem::absolute prepends the current directory. The result is
-  // "sdmc:/switch/bo2zm/sdmc:/switch/bo2zm/game_root", stat fails with an error
+  // "sdmc:/switch/mw2mp/sdmc:/switch/mw2mp/game_root", stat fails with an error
   // other than "does not exist" and exists() throws filesystem_error: the boot then dies
   // in Runtime::SetupVfs, with nothing in the log.
   // "/switch/..." does have a root, and newlib resolves it on the default device,

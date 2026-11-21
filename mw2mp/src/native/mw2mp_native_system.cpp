@@ -40,27 +40,27 @@
 #include <rex/ui/vulkan/provider.h>
 #include <rex/ui/windowed_app_context.h>
 
-REXCVAR_DEFINE_STRING(mw2mp_renderer, "native", "BO2",
+REXCVAR_DEFINE_STRING(mw2mp_renderer, "native", "MW2",
                       "Graphics path: \"xenos\" (GPU emulation plugin), \"native\" (the native renderer) "
                       "or \"skeleton\" (keeps the game running, draws a test color)")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 
-REXCVAR_DEFINE_BOOL(mw2mp_native_log_vs_misses, false, "BO2",
+REXCVAR_DEFINE_BOOL(mw2mp_native_log_vs_misses, false, "MW2",
                     "Native renderer: log vertex shaders from the ring that the library cannot identify");
 
-REXCVAR_DEFINE_BOOL(mw2mp_native_debug_no_depth, false, "BO2",
+REXCVAR_DEFINE_BOOL(mw2mp_native_debug_no_depth, false, "MW2",
                     "Native renderer diagnostics: draw everything without depth or stencil testing")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 
-REXCVAR_DEFINE_BOOL(mw2mp_native_debug_magenta, false, "BO2",
+REXCVAR_DEFINE_BOOL(mw2mp_native_debug_magenta, false, "MW2",
                     "Native renderer diagnostics: replace every pixel shader with solid magenta")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 
-REXCVAR_DEFINE_BOOL(mw2mp_native_clear_quads, true, "BO2",
+REXCVAR_DEFINE_BOOL(mw2mp_native_clear_quads, true, "MW2",
                     "Native renderer: run Direct3D's Clear() rectangles as clears (off = drop them, as before)")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 
-REXCVAR_DEFINE_INT32(mw2mp_native_report_s, 10, "BO2",
+REXCVAR_DEFINE_INT32(mw2mp_native_report_s, 10, "MW2",
                      "Native renderer: seconds between ring reports in the log (0 = off)");
 
 namespace mw2mp::native {

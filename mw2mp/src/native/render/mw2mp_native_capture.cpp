@@ -26,21 +26,21 @@
 #include <thread>
 #include <vector>
 
-REXCVAR_DEFINE_INT32(mw2mp_capture_every_s, 0, "BO2",
+REXCVAR_DEFINE_INT32(mw2mp_capture_every_s, 0, "MW2",
                      "Save a PNG capture of the game image every N seconds in captures/ next to the executable (0 = "
                      "never; tests only)")
     .range(0, 3600);
-REXCVAR_DEFINE_INT32(mw2mp_capture_max, 20, "BO2", "Maximum captures per run")
+REXCVAR_DEFINE_INT32(mw2mp_capture_max, 20, "MW2", "Maximum captures per run")
     .range(1, 1000);
 // Lets a test capture only the match itself (a match is usually loaded about 40 s after start), for example one
 // capture every 2 s while the camera turns.
-REXCVAR_DEFINE_INT32(mw2mp_capture_from_s, 0, "BO2",
+REXCVAR_DEFINE_INT32(mw2mp_capture_from_s, 0, "MW2",
                      "Test captures (mw2mp_capture_every_s): seconds before the first one counts down")
     .range(0, 3600);
 
 // A quick run of captures for what changes from frame to frame (blinking models, popping): "S:N:MS" takes N of
 // them MS milliseconds apart from S seconds after start-up, named burst_00.png and on.
-REXCVAR_DEFINE_STRING(mw2mp_capture_burst, "", "BO2",
+REXCVAR_DEFINE_STRING(mw2mp_capture_burst, "", "MW2",
                       "Test captures: \"S:N:MS\", N captures MS milliseconds apart from S seconds after start-up "
                       "(captures/burst_NN.png; empty = none)")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);

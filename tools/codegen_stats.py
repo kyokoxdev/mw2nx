@@ -1,8 +1,8 @@
 """Counts what makes the generated C++ slow, so codegen changes can be compared before/after.
 
-usage: python tools/codegen_stats.py [generated folder]   (default: app/generated/default_mp)
+usage: python tools/codegen_stats.py [generated folder]   (default: mw2mp/generated/default_mp)
 
-Counts, over bo2zm_recomp.*.cpp:
+Counts, over *_recomp.*.cpp:
   - calls to the register save/restore helpers (__savegprlr_N, __restgprlr_N, __savefpr_N, ...);
   - uses of ctx.xer, ctx.ctr, ctx.cr0-7 and of the non-volatile registers r14-r31 / f14-f31 kept in ctx;
   - calls between game functions: through the weak name (sub_X(ctx, base);) and direct (__imp__sub_X(ctx, base););
@@ -15,7 +15,7 @@ import re
 import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-GEN = sys.argv[1] if len(sys.argv) > 1 else os.path.join(ROOT, "app", "generated", "default_mp")
+GEN = sys.argv[1] if len(sys.argv) > 1 else os.path.join(ROOT, "mw2mp", "generated", "default_mp")
 
 PATTERNS = {
     "helper calls (__save*/__rest*)": re.compile(r"\b__(?:save|rest)(?:gprlr|fpr|vmx)_\d+\(ctx"),

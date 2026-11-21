@@ -2,7 +2,7 @@
 # Builds a static libzstd.a for the Switch and installs it into the Mesa SDK
 # folder: the ReXGlue SDK's Switch link line (rexglue_switch.cmake, rex::nvk)
 # links "zstd", and devkitPro has no switch-zstd package.
-# Run after tools/build_mesa.sh.
+# Run after tools/build_mesa_linux.sh.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SRC="${ZSTD_DIR:-$(bash "$ROOT/tools/data_dir.sh")/zstd}"

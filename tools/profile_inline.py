@@ -1,9 +1,9 @@
-# Sums one thread's samples in the console profiler's log (logs/rex/rex_profile.log, with bo2zm_profile_stacks = 1)
-# by the outermost function of each sample's inline chain (addr2line -i), and with --lines by its file:line, so the
-# samples inside one big function with everything inlined (the native renderer's Draw) split by the line that called
-# the inlined code. Needs an ELF with line tables: a BO2_DEBUG_LINES=1 build of the same commit (app/build_switch.sh;
-# its .text is the same as the normal build's). Kernel waits (svc) are left out of the busy total.
-# usage: python tools/profile_inline.py rex_profile.log bo2zm_<commit>_lines.elf [--thread NAME] [--top N] [--lines]
+# Sums one thread's samples in the console profiler's log (logs/rex/rex_profile.log, with profile stacks on: see
+# sdk/src/ui/switch_perf.cpp) by the outermost function of each sample's inline chain (addr2line -i), and with --lines
+# by its file:line, so the samples inside one big function with everything inlined (the native renderer's Draw) split
+# by the line that called the inlined code. Needs an ELF with line tables of the same commit (its .text the same as
+# the normal build's). Kernel waits (svc) are left out of the busy total.
+# usage: python tools/profile_inline.py rex_profile.log mw2sp_<commit>_lines.elf [--thread NAME] [--top N] [--lines]
 #        [--only SUBSTRING]
 import argparse, re, subprocess
 from collections import Counter
@@ -55,7 +55,7 @@ for i in range(0, len(addrs), 500):
 
 
 def clean(name):
-    name = name.replace("(anonymous namespace)::", "").replace("bo2zm::native::", "")
+    name = name.replace("(anonymous namespace)::", "").replace("mw2mp::native::", "")
     return re.sub(r"\(.*", "", name)[-60:]
 
 

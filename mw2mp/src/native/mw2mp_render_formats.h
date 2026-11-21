@@ -36,7 +36,7 @@ inline bool ColorApprox(uint32_t format) {
       static bool warned[16] = {};
       if (!warned[format & 0xF]) {
         warned[format & 0xF] = true;
-        REXLOG_INFO("[native] BO2: color target with format {} stored as RGBA8 (approximate)", format);
+        REXLOG_INFO("[native] color target with format {} stored as RGBA8 (approximate)", format);
       }
       return true;
     }
@@ -64,7 +64,7 @@ inline bool CopyApprox(uint32_t format) {
       static bool warned[64] = {};
       if (!warned[format & 0x3F]) {
         warned[format & 0x3F] = true;
-        REXLOG_INFO("[native] BO2: copy to a texture with format {} stored as RGBA8 (approximate)", format);
+        REXLOG_INFO("[native] copy to a texture with format {} stored as RGBA8 (approximate)", format);
       }
       return true;
     }

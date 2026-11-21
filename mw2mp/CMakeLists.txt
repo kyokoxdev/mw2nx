@@ -13,7 +13,8 @@ include(generated/rexglue.cmake)
 
 # The native renderer (milestone 4): bo2-360-nx's app/src/native (GPL-3.0, THIRD_PARTY_NOTICES.md), renamed. It reads
 # the PM4 ring the game's own D3D layer writes and draws with Vulkan; mw2mp_renderer=native selects it, xenos stays the
-# reference. BO2-only pieces it calls into are answered "feature off" in src/mw2mp_native_stubs.cpp.
+# reference. Upstream pieces it calls into that MW2 has no counterpart for are answered "feature off" in
+# src/mw2mp_native_stubs.cpp.
 include(mw2mp_sources.cmake)
 # Script mods (GSC loader, bot functions): multiplayer only, its addresses are TU6 default_mp's.
 add_executable(mw2mp src/main.cpp src/mw2mp_gsc.cpp ${MW2MP_SOURCES})
@@ -28,12 +29,12 @@ if(TARGET Vulkan::Headers)
     target_link_libraries(mw2mp PRIVATE Vulkan::Headers)
 endif()
 
-# REX_GUEST_BARRIER() for the lines tools/guest_barriers.py adds; empty unless MW2MP_GUEST_MEMORY_PLAIN (bo2's header,
-# game-agnostic).
+# REX_GUEST_BARRIER() for the lines tools/guest_barriers.py adds; empty unless MW2MP_GUEST_MEMORY_PLAIN
+# (src/mw2mp_guest_memory.h).
 option(MW2MP_GUEST_MEMORY_PLAIN "Generated code: plain guest loads and stores, with compiler barriers" OFF)
-target_precompile_headers(mw2mp_recomp PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../app/src/bo2zm_guest_memory.h")
+target_precompile_headers(mw2mp_recomp PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src/mw2mp_guest_memory.h")
 if(MW2MP_GUEST_MEMORY_PLAIN)
-    target_compile_definitions(mw2mp_recomp PRIVATE BO2ZM_GUEST_MEMORY_PLAIN=1)
+    target_compile_definitions(mw2mp_recomp PRIVATE MW2MP_GUEST_MEMORY_PLAIN=1)
 endif()
 
 # Profile-guided optimization (mw2mp/build_switch.sh, MW2_PGO; bo2-360-nx's recipe): the generated code and the app's

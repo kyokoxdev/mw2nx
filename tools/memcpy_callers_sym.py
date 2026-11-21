@@ -1,7 +1,7 @@
-# Sums the "[memcpy_callers]" lines of a BO2_MEMCPY_CALLERS test build's log (app/src/bo2zm_memcpy_callers.cpp) by
-# call site and names each one with addr2line -i: the inlined function the call is in, and the outermost function's
-# file:line (an ELF with line tables of the same commit: a BO2_DEBUG_LINES=1 build).
-# usage: python tools/memcpy_callers_sym.py bo2zm_NNN.log bo2zm_<commit>_lines.elf [--top N]
+# Sums the "[memcpy_callers]" lines of a MW2_MEMCPY_CALLERS=1 test build's log (mw2mp/src/mw2mp_memcpy_callers.cpp)
+# by call site and names each one with addr2line -i: the inlined function the call is in, and the outermost function's
+# file:line (an ELF with line tables of the same commit).
+# usage: python tools/memcpy_callers_sym.py mw2sp_NNN.log mw2sp_<commit>_lines.elf [--top N]
 import argparse, re, subprocess
 from collections import defaultdict
 
@@ -46,7 +46,7 @@ for i in range(0, len(addrs), 500):
 
 
 def clean(name):
-    name = name.replace("(anonymous namespace)::", "").replace("bo2zm::native::", "")
+    name = name.replace("(anonymous namespace)::", "").replace("mw2mp::native::", "")
     return re.sub(r"\(.*", "", name)[-44:]
 
 

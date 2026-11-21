@@ -1,8 +1,8 @@
 """Prewarm lists for the native renderer.
 
-The renderer saves its pipeline cache and its prewarm list together in cache/bo2zm_native_pipelines.bin (beside the
-NRO or the exe). At start-up it also reads every list in cache/prewarm/*.bin and prewarms their pipelines in the
-menus (bo2zm_native_draws.cpp, LoadExtraListsPipelines), so a map's pipelines can be compiled before its first visit.
+The renderer saves its pipeline cache and its prewarm list together in cache/mw2mp_native_pipelines.bin (beside the
+program). At start-up it also reads every list in cache/prewarm/*.bin and prewarms their pipelines in the
+menus (mw2mp_native_draws.cpp, LoadExtraListsPipelines), so a map's pipelines can be compiled before its first visit.
 
 This tool makes such lists. A list holds shader hashes and pipeline states derived from the game's shaders: it is
 the player's own data, like the cache. (The per-level lists in mw2sp/pipelines/, recorded with

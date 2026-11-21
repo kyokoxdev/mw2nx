@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Linux (x86_64 / WSL2) twin of tools/build_host.sh: builds the ReXGlue codegen (rexglue) and xexdump.
+# Builds the ReXGlue codegen (rexglue) and xexdump on the Linux (x86_64 / WSL2) host.
 #
 # Needs: clang >= 20 with lld, CMake, Ninja, Python, git. CLANG_DIR points at a clang bin folder
 # (default ~/tools/clang/usr/lib/llvm-21/bin, a user-space extract of Ubuntu's clang-21/lld-21 debs).
@@ -22,7 +22,7 @@ fi
 # Always: resumable and cached in out/rexglue-sdk-src, and a partial earlier copy must be completed.
 (cd "$ROOT" && python3 tools/fetch_thirdparty.py)
 
-# Same as build_host.sh step 2: the SDK wants a .git entry in each vendored submodule.
+# The SDK wants a .git entry in each vendored submodule.
 for d in "$SDK"/thirdparty/*/; do [ -e "$d.git" ] || mkdir "$d.git"; done
 
 cmake -S "$SDK" -B "$ROOT/out/host-linux" -G Ninja \

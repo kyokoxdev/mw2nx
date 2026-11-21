@@ -1,7 +1,7 @@
-// Every shader of the fastfiles given, as the input of tools/xenosrecomp's bo2zm_hlsl: one file per shader, the D3D
+// Every shader of the fastfiles given, as the input of tools/xenosrecomp's mw2_hlsl: one file per shader, the D3D
 // shader container (the object's header, 0x102A11xx, container[+0x04] bytes) followed by the physical part
 // (container[+0x08] bytes: literal constants, then the microcode at Shader.physicalOffset), the layout XenosRecomp
-// reads. Written as <out>/<ps|vs>_<xxh3 of the blob>.bin (the names bo2zm_pack expects).
+// reads. Written as <out>/<ps|vs>_<xxh3 of the blob>.bin (the names mw2_pack expects).
 //
 // The zone is walked by mw2-recompiled's fastfile reader (launcher/zone, GPL-3.0; built by build_zone_containers.sh),
 // so each part is found where the loading rules put it: a scan of the zone for container tags cannot tell which

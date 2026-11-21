@@ -19,8 +19,8 @@
 #include <vector>
 
 REXCVAR_DEFINE_STRING(mw2mp_internal_resolution, "auto", "Graphics",
-                      "Video mode passed to the game. It does nothing in BO2: nothing applies it, and the game draws "
-                      "its 3D view at 880x720 at every setting and stretches it to 1280x720 itself. auto: 1920x1080 "
+                      "Video mode passed to the game. It does nothing at present: nothing applies it "
+                      "(ApplySettingsGraphics is not called). auto: 1920x1080 "
                       "docked and 1280x720 handheld, switching on the fly when the console goes in and out of the "
                       "dock, and also following Reverse-NX. 1280x720 is the Xbox 360's output. 1920x1080 always forces "
                       "it. 1024x576 (asks for a restart), 640x360 and 640x480 are lower modes")
@@ -72,7 +72,7 @@ REXCVAR_DEFINE_BOOL(mw2mp_switch_clocks_reverse, false, "Graphics",
                     "drops to the handheld column and, if yours is empty, to the stock clocks (GPU 307.2 MHz and memory "
                     "1331.2). It is released when they match again and on exit");
 /*
- * The FPS limit (applied only by ApplySettingsGraphics, which BO2 does not call).
+ * The FPS limit (applied only by ApplySettingsGraphics, which nothing calls at present).
  *
  * mw2mp_fps_limit ends up in video_mode_refresh_rate, and LoopVblank (mw2mp_native_render.cpp) reads it from there
  * to know how often to fire the guest's vblank interrupt; at "60" the vblank thread ticks at a steady 60.1 Hz. The
@@ -87,8 +87,8 @@ REXCVAR_DEFINE_STRING(mw2mp_fps_limit, "60", "Graphics",
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 
 /*
- * The presentation interval, also applied only by ApplySettingsGraphics. (BO2's
- * own VSYNC option sets the interval through RexSwitchPerfSwapIntervalForce instead.)
+ * The presentation interval, also applied only by ApplySettingsGraphics. (A game VSYNC option sets the interval
+ * through RexSwitchPerfSwapIntervalForce instead.)
  *
  * The FPS limit above does not limit presentation: it sets the rate of the guest's vblank interrupt, and a game that
  * paces itself by counting vblanks then runs on two free-running 30 Hz clocks (the process timer and the panel) that
@@ -152,23 +152,23 @@ REXCVAR_DEFINE_STRING(mw2mp_antialiasing, MW2MP_ANTIALIASING_DEFAULT, "Graphics"
     .allowed({"off", "fxaa"});
 
 // Sky glow, applied live, to the bright pass the renderer recognizes by hash (kHashBrightPass in
-// mw2mp_native_draws.cpp; no BO2 shader has that hash, so in BO2 this changes nothing). That pass subtracts its
+// mw2mp_native_draws.cpp; an upstream hash: it changes nothing unless the game has that shader). That pass subtracts its
 // threshold per channel, so with an intense blue sky only the blue channel passes and leaves blue edges. "natural"
 // keeps the same glow energy with the hue of the source color; "soft" applies the threshold to luminance, with much
 // less halo. natural is the default: compared on the console, the original still showed a noticeable blue halo.
 REXCVAR_DEFINE_STRING(mw2mp_sky_glow, "natural", "Graphics",
-                      "Sky glow, for a bright pass the renderer recognizes by hash (no BO2 shader has it, so this "
-                      "does nothing in BO2). natural (default): the glow without the saturated blue that leaves edges "
+                      "Sky glow, for a bright pass the renderer recognizes by hash (it does "
+                      "nothing unless the game has that shader). natural (default): the glow without the saturated blue that leaves edges "
                       "against the sky; colored lights unchanged. original: like the Xbox 360, with those blue edges. "
                       "soft: almost no sky halo; single-color lights glow less. No cost")
     .allowed({"original", "natural", "soft"});
 
 // A color filter, applied live: the "visual treatment" (the color curves, the desaturation and the vignette) of a
-// final composite the renderer recognizes by hash (kHashComposite in mw2mp_native_draws.cpp; no BO2 shader has that
-// hash, so in BO2 this changes nothing).
+// final composite the renderer recognizes by hash (kHashComposite in mw2mp_native_draws.cpp; an upstream hash: it
+// changes nothing unless the game has that shader).
 REXCVAR_DEFINE_STRING(mw2mp_visual_treatment, "original", "Graphics",
                       "Color filter of a final composite the renderer recognizes by hash (color curves, desaturation "
-                      "and vignette); no BO2 shader has it, so this does nothing in BO2. original (default): like the "
+                      "and vignette); it does nothing unless the game has that shader. original (default): like the "
                       "Xbox 360. soft: at half strength. off: no filter; the glow and the fades stay the same. No cost")
     .allowed({"original", "soft", "off"});
 

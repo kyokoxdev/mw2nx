@@ -1,19 +1,20 @@
 # Third-party notices
 
 mw2nx (Call of Duty: Modern Warfare 2 for the Nintendo Switch) is licensed under the GNU General Public License v3.0
-(`LICENSE`). That license covers everything this project wrote: `app/`, its changes in `sdk/`, `tools/`, the Mesa patch
-and the documentation. The port is built on the work of the projects and libraries below. Their code keeps its own
+(`LICENSE`). That license covers everything this project wrote: `mw2mp/`, `mw2sp/`, its changes in `sdk/`, `tools/`, the
+Mesa patch and the documentation. The port is built on the work of the projects and libraries below. Their code keeps its own
 copyright and license notices, exactly as they are, and every one of those licenses is compatible with GPL-3.0.
 
 ## Projects this port is derived from
 
 | Project | Used for | License |
 |---|---|---|
+| [bo2-360-nx](https://github.com/AlvaroEPena/bo2-360-nx) by AlvaroEPena | The Switch runtime, the native renderer (`mw2mp/src/native`), the SDK's Switch layer and much of `tools/`, renamed and adapted to MW2 | GPL-3.0 |
 | [ReXGlue SDK](https://github.com/rexglue/rexglue-sdk) v0.10.0 (commit `c94f5eb`) by Tom Clay, with portions from [Xenia](https://xenia.jp) (Ben Vanik and the Xenia contributors) | `sdk/`: code generator, Xbox 360 kernel and runtime, GPU command processing. See `sdk/README.md` for which files are the official release and which are changed | BSD-3-Clause (`sdk/LICENSE`) |
 | [XenosRecomp](https://github.com/hedge-dev/XenosRecomp) by hedge-dev and contributors | `tools/xenosrecomp/translator/`: Xenos microcode to HLSL translator | MIT (`tools/xenosrecomp/translator/LICENSE.md`) |
-| [mesa-switch](https://github.com/danfromtico/mesa-switch) by danfromtico (commit `1a8c1a66d6f`), on top of [Mesa](https://mesa3d.org) | The Vulkan driver (NVK) and shader compiler (NAK) for Horizon, linked into the NRO. The official base is fetched by `tools/build_mesa.sh`; this project's changes are the patch in `patches/` | MIT (Mesa's licenses per file) |
+| [mesa-switch](https://github.com/danfromtico/mesa-switch) by danfromtico (commit `1a8c1a66d6f`), on top of [Mesa](https://mesa3d.org) | The Vulkan driver (NVK) and shader compiler (NAK) for Horizon, linked into the NRO. The official base is fetched by `tools/build_mesa_linux.sh`; this project's changes are the patch in `patches/` | MIT (Mesa's licenses per file) |
 
-Parts of `app/` and `tools/` are derived from GPL-3.0 code, so GPL-3.0 would apply to them in any case; each such file
+Parts of `mw2mp/`, `mw2sp/` and `tools/` are derived from GPL-3.0 code, so GPL-3.0 would apply to them in any case; each such file
 says so in its header. The upstream code in this repository keeps its own license: the ReXGlue SDK with its Xenia
 portions and the Switch layer in `sdk/` under BSD-3-Clause (`sdk/LICENSE`), the translator under MIT
 (`tools/xenosrecomp/translator/LICENSE.md`), and Mesa with the changes to it under its per-file licenses (MIT).
@@ -55,15 +56,6 @@ These files of the SDK's third-party tree are modified; the modified copies are 
 
 The rest of FFmpeg and libmspack is the unmodified upstream source at the commits pinned by ReXGlue SDK v0.10.0.
 
-## Artwork in the program
-
-The home screen's credits line (`app/src/ui/credits`, drawn by `tools/make_credits.py`; details in its README):
-
-| Part | Source | License / terms |
-|---|---|---|
-| GitHub's mark | The `mark-github` path of [Octicons](https://github.com/primer/octicons) by GitHub | MIT License (Octicons). The mark is GitHub's trademark, used as [GitHub's logo guidelines](https://github.com/logos) allow (pointing to a GitHub profile, unmodified) |
-| Roboto Medium (the text's glyphs) | Google, as Dear ImGui carries it in `misc/fonts` | Apache License 2.0 |
-
 ## Script mods shipped with the port
 
 | Mod | Source | Terms |
@@ -74,7 +66,7 @@ The home screen's credits line (`app/src/ui/credits`, drawn by `tools/make_credi
 
 The shader library is built on the user's machine from their own game data. The setup kit
 (`mw2nx-setup-<version>.zip`, `tools/make_setup_zip.py`) ships the tools for it as static programs: the translator
-above, the packer (`tools/xenosrecomp/bo2zm_pack.cpp`) and `zone_containers`, which is built from
+above, the packer (`tools/xenosrecomp/mw2_pack.cpp`) and `zone_containers`, which is built from
 [mw2-recompiled](https://github.com/PaulCombal/mw2-recompiled)'s fastfile reader (`launcher/zone`, commit `b3aa7d8`,
 GPL-3.0), with fmt and xxHash from `sdk/thirdparty`. The setup script downloads
 [DirectXShaderCompiler](https://github.com/microsoft/DirectXShaderCompiler) v1.9.2609 from Microsoft's release
@@ -83,4 +75,4 @@ GPL-3.0), with fmt and xxHash from `sdk/thirdparty`. The setup script downloads
 ## Trademarks
 
 Call of Duty and Modern Warfare are trademarks of Activision Publishing, Inc. Nintendo Switch is a
-trademark of Nintendo. Xbox 360 is a trademark of Microsoft. GitHub and the GitHub mark are trademarks of GitHub, Inc. This project is not affiliated with or endorsed by any of them.
+trademark of Nintendo. Xbox 360 is a trademark of Microsoft. This project is not affiliated with or endorsed by any of them.

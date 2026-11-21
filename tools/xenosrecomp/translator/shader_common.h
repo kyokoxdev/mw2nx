@@ -3,7 +3,7 @@
 
 #define SPEC_CONSTANT_R11G11B10_NORMAL  (1 << 0)
 #define SPEC_CONSTANT_ALPHA_TEST        (1 << 1)
-// BO2ZM: constants arrive through a dynamic UBO (a constant bank on Maxwell) instead of being read
+// bo2-360-nx: constants arrive through a dynamic UBO (a constant bank on Maxwell) instead of being read
 // through a 64-bit pointer. High bit so as not to clash with the UNLEASHED_RECOMP ones.
 #define SPEC_CONSTANT_CONSTANTS_UBO    (1 << 8)
 // The tfetch offset is scaled with 1/size taken from the shared constants instead of querying the
@@ -39,7 +39,7 @@
  */
 #define SPEC_CONSTANT_NO_BLUR    (1 << 19)
 /*
- * The world shadow map as the minimum of two textures (bo2zm_native_shadow_min).
+ * The world shadow map as the minimum of two textures (mw2mp_native_shadow_min).
  *
  * A shadow pass can resolve the same map twice: without its overlay (sampled by the overlay's own
  * materials) and with the overlay drawn on top (sampled by the world). With this option the renderer
@@ -55,7 +55,7 @@
  * shaders that use it (OpConstant) and nowhere else. The specialization constant never reaches this
  * value (bits 24-30).
  */
-#define BO2ZM_SHADOW_MIN_MARKER       0x5E3B1A84u
+#define MW2_SHADOW_MIN_MARKER       0x5E3B1A84u
 /*
  * mw2nx: the bound color target is k_8_8_8_8_GAMMA. Xenos stores such a target's color through its piecewise-linear
  * gamma (10-bit segments: x4, x2 + 128, + 256, x0.5 + 512); readers (resolves, the final composite) get those bytes.
@@ -86,45 +86,45 @@ struct PushConstants
 
 [[vk::push_constant]] ConstantBuffer<PushConstants> g_PushConstants;
 
-// BO2ZM: the same blocks of the upload buffer, also as dynamic UBOs in set 4. With
+// bo2-360-nx: the same blocks of the upload buffer, also as dynamic UBOs in set 4. With
 // -fvk-use-dx-layout each float4 takes 16 contiguous bytes, so any 4-byte word of the shared block is
 // a component: v[B / 16][(B % 16) / 4], and asuint reads it without changing a bit.
 struct Bo2zmBlockVs { float4 v[256]; };
-// BO2ZM_RECOMP: BO2's post-processing reads pixel constants up to c250 (the color-grading table and the
+// MW2_RECOMP: BO2's post-processing reads pixel constants up to c250 (the color-grading table and the
 // tonemap). With 224, everything above read as zero and the in-game image was black.
 struct Bo2zmBlockPs { float4 v[256]; };
-// BO2ZM_RECOMP: 35, not 23. The renderer fills 31 (1/size of the 16 slots ends at byte 488) and BO2 adds the
+// MW2_RECOMP: 35, not 23. The renderer fills 31 (1/size of the 16 slots ends at byte 488) and BO2 adds the
 // slots' fetch scales (bytes 488-551). With 23, slot 2 and up read 1/size past the end of the array.
 // mw2nx: 45: the renderer adds all 256 boolean constants at bytes 688-719 (g_BooleanBit).
 struct Bo2zmBlockShared { float4 v[45]; };
 [[vk::binding(0, 4)]] ConstantBuffer<Bo2zmBlockVs> g_UboVertex;
 [[vk::binding(1, 4)]] ConstantBuffer<Bo2zmBlockPs> g_UboPixel;
 [[vk::binding(2, 4)]] ConstantBuffer<Bo2zmBlockShared> g_UboShared;
-#define BO2ZM_UBO ((g_SpecConstants & SPEC_CONSTANT_CONSTANTS_UBO) != 0)
-#define BO2ZM_SHARED_UINT(B)  asuint(g_UboShared.v[(B) / 16][((B) % 16) / 4])
-#define BO2ZM_SHARED_FLOAT(B) g_UboShared.v[(B) / 16][((B) % 16) / 4]
+#define MW2_UBO ((g_SpecConstants & SPEC_CONSTANT_CONSTANTS_UBO) != 0)
+#define MW2_SHARED_UINT(B)  asuint(g_UboShared.v[(B) / 16][((B) % 16) / 4])
+#define MW2_SHARED_FLOAT(B) g_UboShared.v[(B) / 16][((B) % 16) / 4]
 
-#define g_Booleans                 (BO2ZM_UBO ? BO2ZM_SHARED_UINT(256) : vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 256))
+#define g_Booleans                 (MW2_UBO ? MW2_SHARED_UINT(256) : vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 256))
 // mw2nx: float constant INDEX of a stage's constant file (0-255; outside it reads 0, as the declared arrays do), for
 // constants the CTAB does not declare and relative reads past a declared one.
-#define g_VsC(INDEX) select(uint(INDEX) < 256u, (BO2ZM_UBO ? g_UboVertex.v[min(uint(INDEX), 255u)] : vk::RawBufferLoad<float4>(g_PushConstants.VertexShaderConstants + min(uint(INDEX), 255u) * 16, 0x10)), 0.0)
-#define g_PsC(INDEX) select(uint(INDEX) < 256u, (BO2ZM_UBO ? g_UboPixel.v[min(uint(INDEX), 255u)] : vk::RawBufferLoad<float4>(g_PushConstants.PixelShaderConstants + min(uint(INDEX), 255u) * 16, 0x10)), 0.0)
+#define g_VsC(INDEX) select(uint(INDEX) < 256u, (MW2_UBO ? g_UboVertex.v[min(uint(INDEX), 255u)] : vk::RawBufferLoad<float4>(g_PushConstants.VertexShaderConstants + min(uint(INDEX), 255u) * 16, 0x10)), 0.0)
+#define g_PsC(INDEX) select(uint(INDEX) < 256u, (MW2_UBO ? g_UboPixel.v[min(uint(INDEX), 255u)] : vk::RawBufferLoad<float4>(g_PushConstants.PixelShaderConstants + min(uint(INDEX), 255u) * 16, 0x10)), 0.0)
 // mw2nx: boolean constant N (0-255, as the control flow numbers it) from the registers' full copy at byte 688.
-#define g_BooleanBit(N)            (((BO2ZM_UBO ? BO2ZM_SHARED_UINT(688 + ((N) >> 5) * 4) : vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 688 + ((N) >> 5) * 4)) >> ((N) & 31)) & 1u)
-#define g_SwappedTexcoords         (BO2ZM_UBO ? BO2ZM_SHARED_UINT(260) : vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 260))
-#define g_HalfPixelOffset          (BO2ZM_UBO ? float2(BO2ZM_SHARED_FLOAT(264), BO2ZM_SHARED_FLOAT(268)) : vk::RawBufferLoad<float2>(g_PushConstants.SharedConstants + 264))
-#define g_AlphaThreshold           (BO2ZM_UBO ? BO2ZM_SHARED_FLOAT(272) : vk::RawBufferLoad<float>(g_PushConstants.SharedConstants + 272))
-// BO2ZM: alpha test function (RB_COLORCONTROL.alpha_func): 0 never, 1 <, 2 ==, 3 <=,
+#define g_BooleanBit(N)            (((MW2_UBO ? MW2_SHARED_UINT(688 + ((N) >> 5) * 4) : vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 688 + ((N) >> 5) * 4)) >> ((N) & 31)) & 1u)
+#define g_SwappedTexcoords         (MW2_UBO ? MW2_SHARED_UINT(260) : vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 260))
+#define g_HalfPixelOffset          (MW2_UBO ? float2(MW2_SHARED_FLOAT(264), MW2_SHARED_FLOAT(268)) : vk::RawBufferLoad<float2>(g_PushConstants.SharedConstants + 264))
+#define g_AlphaThreshold           (MW2_UBO ? MW2_SHARED_FLOAT(272) : vk::RawBufferLoad<float>(g_PushConstants.SharedConstants + 272))
+// bo2-360-nx: alpha test function (RB_COLORCONTROL.alpha_func): 0 never, 1 <, 2 ==, 3 <=,
 // 4 >, 5 !=, 6 >=, 7 always.
-#define g_AlphaFunction            (BO2ZM_UBO ? BO2ZM_SHARED_UINT(276) : vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 276))
-// BO2ZM: position to host clip space, like ndc_scale/ndc_offset in the
+#define g_AlphaFunction            (MW2_UBO ? MW2_SHARED_UINT(276) : vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 276))
+// bo2-360-nx: position to host clip space, like ndc_scale/ndc_offset in the
 // emulation (graphics/util/draw.cpp). (1, 1) and (0, 0) for normal draws;
 // with Xenos clipping disabled it converts from pixels to NDC.
-#define g_NdcScale                 (BO2ZM_UBO ? float2(BO2ZM_SHARED_FLOAT(280), BO2ZM_SHARED_FLOAT(284)) : vk::RawBufferLoad<float2>(g_PushConstants.SharedConstants + 280))
-#define g_NdcOffset                (BO2ZM_UBO ? float2(BO2ZM_SHARED_FLOAT(288), BO2ZM_SHARED_FLOAT(292)) : vk::RawBufferLoad<float2>(g_PushConstants.SharedConstants + 288))
-// BO2ZM: where each component of the vertex input at that location comes from
+#define g_NdcScale                 (MW2_UBO ? float2(MW2_SHARED_FLOAT(280), MW2_SHARED_FLOAT(284)) : vk::RawBufferLoad<float2>(g_PushConstants.SharedConstants + 280))
+#define g_NdcOffset                (MW2_UBO ? float2(MW2_SHARED_FLOAT(288), MW2_SHARED_FLOAT(292)) : vk::RawBufferLoad<float2>(g_PushConstants.SharedConstants + 288))
+// bo2-360-nx: where each component of the vertex input at that location comes from
 // (D3D patches the fetch swizzle according to the declaration). 0xFFF = as is.
-#define g_InputRemap(LOC)          (BO2ZM_UBO ? BO2ZM_SHARED_UINT(296 + (LOC) * 4) : vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 296 + (LOC) * 4))
+#define g_InputRemap(LOC)          (MW2_UBO ? MW2_SHARED_UINT(296 + (LOC) * 4) : vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 296 + (LOC) * 4))
 
 [[vk::constant_id(0)]] const uint g_SpecConstants = 0;
 
@@ -162,7 +162,7 @@ uint2 getTexture2DDimensions(Texture2D<float4> texture)
     return dimensions;
 }
 
-// BO2ZM_RECOMP: a fetch with unnormalized (texel) coordinates: to 0..1 with the host image's size (1/size from
+// MW2_RECOMP: a fetch with unnormalized (texel) coordinates: to 0..1 with the host image's size (1/size from
 // the shared constants when the pipeline provides it).
 float2 normalize2D(uint resourceDescriptorIndex, float2 texCoord, float2 invSize)
 {
@@ -192,7 +192,7 @@ float2 getWeights2D(uint resourceDescriptorIndex, uint samplerDescriptorIndex, f
     return select(isnan(texCoord), 0.0, frac(texCoord * getTexture2DDimensions(texture) + offset - 0.5));
 }
 
-// BO2ZM_RECOMP: the translator passes 1/size to every 2D fetch, getWeights included
+// MW2_RECOMP: the translator passes 1/size to every 2D fetch, getWeights included
 // (BO2 uses GetTextureWeights in its shadow-map filters). Same
 // rule as tfetch2D: the size comes from the constant when the pipeline says so.
 float2 getWeights2D(uint resourceDescriptorIndex, uint samplerDescriptorIndex, float2 texCoord, float2 offset, float2 invSize)
@@ -257,7 +257,7 @@ float4 tfetch2DShadow(uint resourceDescriptorIndex, uint samplerDescriptorIndex,
     return tfetch2D(resourceDescriptorIndex, samplerDescriptorIndex, texCoord, offset, invSize);
 }
 
-// The shadow map with the minimum of its pair (bo2zm_native_shadow_min). The library step changes
+// The shadow map with the minimum of its pair (mw2mp_native_shadow_min). The library step changes
 // all shadow map calls to this function and passes it the 3D index of that same register, which is
 // where the app puts the pair: the world map (or the texture itself, which gives the same texel, while
 // the app is checking). Both are sampled the same way (same point sampler, same coordinates and
@@ -265,7 +265,7 @@ float4 tfetch2DShadow(uint resourceDescriptorIndex, uint samplerDescriptorIndex,
 // true and the driver removes it when specializing.
 float4 tfetch2DShadowMin(uint resourceDescriptorIndex, uint pairDescriptorIndex, uint samplerDescriptorIndex, float2 texCoord, float2 offset, float2 invSize)
 {
-    [branch] if (g_SpecConstants() == BO2ZM_SHADOW_MIN_MARKER)
+    [branch] if (g_SpecConstants() == MW2_SHADOW_MIN_MARKER)
         return float4(0.0, 0.0, 0.0, 0.0);
     float4 minSample = tfetch2DShadow(resourceDescriptorIndex, samplerDescriptorIndex, texCoord, offset, invSize);
     [branch] if (g_SpecConstants() & SPEC_CONSTANT_SHADOW_MIN)
@@ -325,7 +325,7 @@ float4 tfetch3D(uint resourceDescriptorIndex, uint samplerDescriptorIndex, float
     return g_Texture3DDescriptorHeap[resourceDescriptorIndex].Sample(g_SamplerDescriptorHeap[samplerDescriptorIndex], texCoord);
 }
 
-// BO2ZM_RECOMP: fetches without computed LOD (use_computed_lod = 0) sample at an explicit level: the LOD bias, plus
+// MW2_RECOMP: fetches without computed LOD (use_computed_lod = 0) sample at an explicit level: the LOD bias, plus
 // the SetTextureLod register with use_register_lod. The translator emits the *Level variants for them.
 float4 tfetch2DLevel(uint resourceDescriptorIndex, uint samplerDescriptorIndex, float2 texCoord, float2 offset, float2 invSize, float lod)
 {
@@ -354,7 +354,7 @@ float4 tfetchCube(uint resourceDescriptorIndex, uint samplerDescriptorIndex, flo
     return g_TextureCubeDescriptorHeap[resourceDescriptorIndex].Sample(g_SamplerDescriptorHeap[samplerDescriptorIndex], cubeMapData.cubeMapDirections[texCoord.z]);
 }
 
-// BO2ZM_RECOMP: see tfetch2DLevel.
+// MW2_RECOMP: see tfetch2DLevel.
 float4 tfetchCubeLevel(uint resourceDescriptorIndex, uint samplerDescriptorIndex, float3 texCoord, inout CubeMapData cubeMapData, float lod)
 {
     return g_TextureCubeDescriptorHeap[resourceDescriptorIndex].SampleLevel(g_SamplerDescriptorHeap[samplerDescriptorIndex], cubeMapData.cubeMapDirections[texCoord.z], lod);
@@ -381,7 +381,7 @@ float4 tfetchTexcoord(uint swappedTexcoords, float4 value, uint semanticIndex)
     return (swappedTexcoords & (1ull << semanticIndex)) != 0 ? value.yxwz : value;
 }
 
-// BO2ZM: 3 bits per component: 0-3 = data component, 4 = 0, 5 = 1, 7 = unchanged.
+// bo2-360-nx: 3 bits per component: 0-3 = data component, 4 = 0, 5 = 1, 7 = unchanged.
 float4 remapInput(float4 value, uint code)
 {
     if (code == 0xFFF)
@@ -401,7 +401,7 @@ float4 remapInput(float4 value, uint code)
     return result;
 }
 
-// BO2ZM: Xenos alpha test with its comparison function. Positive if the pixel passes.
+// bo2-360-nx: Xenos alpha test with its comparison function. Positive if the pixel passes.
 float alphaTestValue(float alpha)
 {
     bool pass = true;

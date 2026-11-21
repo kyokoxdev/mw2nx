@@ -1,4 +1,4 @@
-"""Index the generated C++ (app/generated/default_mp) by function.
+"""Index the generated C++ (mw2mp/generated/default_mp) by function.
 
 The recompiler keeps each PowerPC instruction as a comment ("// bl 0x82161700"),
 so the call graph and the constants each function builds can be read back
@@ -20,7 +20,7 @@ import re
 import sys
 
 ROOT = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", ".."))
-GEN = os.path.join(ROOT, "app", "generated", "default_mp")
+GEN = os.path.join(ROOT, "mw2mp", "generated", "default_mp")
 INDEX = os.path.join(ROOT, "work", "gen_index.json")
 
 RE_FN = re.compile(r"^DEFINE_REX_FUNC\(sub_([0-9A-F]{8})\)")
@@ -30,7 +30,7 @@ RE_IMPORT = re.compile(r"__imp__([A-Za-z_][A-Za-z0-9_]*)\(ctx, base\)")
 
 def build():
     fns = {}
-    for path in sorted(glob.glob(os.path.join(GEN, "bo2zm_recomp.*.cpp"))):
+    for path in sorted(glob.glob(os.path.join(GEN, "*_recomp.*.cpp"))):
         cur = None
         with open(path, encoding="utf-8", errors="replace") as f:
             for line in f:

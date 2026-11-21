@@ -136,7 +136,7 @@ extern "C" uint32_t romfsMountSelf(const char* name);
 /*
  * The final composite the renderer recognizes by hash (kHashComposite) is a single full-screen quad with
  * twelve texture samples, seven of them a radial blur. Turning it off removes them and leaves the center
- * tap. No BO2 shader has that hash, so in BO2 this does nothing.
+ * tap. The hash comes from the upstream port (bo2-360-nx): it only acts if one of MW2's shaders has it.
  */
 /*
  * Vegetation in the shadow map.
@@ -156,7 +156,7 @@ extern "C" uint32_t romfsMountSelf(const char* name);
  * On by default: an improvement that depends on a line in a local toml is silently lost when the file is
  * missing.
  */
-REXCVAR_DEFINE_BOOL(mw2mp_native_fast_tiling, true, "BO2",
+REXCVAR_DEFINE_BOOL(mw2mp_native_fast_tiling, true, "MW2",
                     "Native renderer: textures untiled 16 bytes at a time with the row computed "
                     "once. The first 2000 levels are checked against the usual path and, if one differs, it turns "
                     "itself off. false = the usual path, block by block");
@@ -169,11 +169,11 @@ REXCVAR_DEFINE_BOOL(mw2mp_native_fast_tiling, true, "BO2",
  * one. Destroy therefore notifies through ForgetView, and the framebuffers that use the view are destroyed.
  * false = nothing is forgotten until the destructor.
  */
-REXCVAR_DEFINE_BOOL(mw2mp_native_framebuffers_forget_views, true, "BO2",
+REXCVAR_DEFINE_BOOL(mw2mp_native_framebuffers_forget_views, true, "MW2",
                     "Native renderer: when a C2 image is destroyed, the framebuffers that use its "
                     "view are destroyed too, so a reused handle does not return an old one. false = as before");
 
-REXCVAR_DEFINE_INT32(mw2mp_native_hash_kb_per_frame, 6144, "BO2",
+REXCVAR_DEFINE_INT32(mw2mp_native_hash_kb_per_frame, 6144, "MW2",
                      "Native renderer: KB of STABLE textures the ring checks again at most in one "
                      "frame; the ones that do not fit wait 1-2 frames (8 times in a row at most). Spreads out the "
                      "checks that used to fall on the same frame. 0 = no limit, as before");
@@ -182,7 +182,7 @@ REXCVAR_DEFINE_INT32(mw2mp_native_hash_kb_per_frame, 6144, "BO2",
  * Sampled recheck of stable textures. See PrepareTexture and HashSample.
  * Enabled by default: its guard verifies itself and switches off at the first mismatch.
  */
-REXCVAR_DEFINE_INT32(mw2mp_native_hash_sampling, 8, "BO2",
+REXCVAR_DEFINE_INT32(mw2mp_native_hash_sampling, 8, "MW2",
                      "Native renderer: STABLE textures are rechecked with the hash of a sample "
                      "(first and last 4 KB block and 1 in 8, base and mips) instead of all their bytes; if the sample "
                      "changes, the full path follows. N = 1 in N rechecks of each texture is still full, and the first "
@@ -190,7 +190,7 @@ REXCVAR_DEFINE_INT32(mw2mp_native_hash_sampling, 8, "BO2",
                      "before")
     .range(0, 64);
 
-REXCVAR_DEFINE_BOOL(mw2mp_shadows_without_vegetation, true, "BO2",
+REXCVAR_DEFINE_BOOL(mw2mp_shadows_without_vegetation, true, "MW2",
                     "Do not draw alpha-tested geometry into the shadow map: trees, bushes and fences. They are many "
                     "of the pass's draws but few of its triangles, so it saves little GPU time and some CPU time. "
                     "Trees stop casting shadows");
@@ -201,46 +201,47 @@ REXCVAR_DEFINE_BOOL(mw2mp_shadows_without_vegetation, true, "BO2",
  * The Xbox 360 blurs the screen edges, and without it the image looks sharper. Restoring it together with
  * the 9-sample PCF made the GPU the bottleneck again, with twice as many long frames, and the difference is
  * hard to notice next to the 360 footage, so it stays removed. It only acts on the composite kHashComposite
- * names, which no BO2 shader has. false = keep the blur, as on the Xbox 360.
+ * names (an upstream hash: it only acts if one of MW2's shaders has it). false = keep the blur, as on the
+ * Xbox 360.
  */
-REXCVAR_DEFINE_BOOL(mw2mp_native_no_blur, true, "BO2",
-                    "Remove the radial blur from a final composite the renderer recognizes by hash (no BO2 shader "
-                    "has it, so this does nothing in BO2). You lose the blur at the edges of the screen: the image is "
+REXCVAR_DEFINE_BOOL(mw2mp_native_no_blur, true, "MW2",
+                    "Remove the radial blur from a final composite the renderer recognizes by hash (it does "
+                    "nothing unless the game has that shader). You lose the blur at the edges of the screen: the image is "
                     "sharper");
 
-REXCVAR_DEFINE_BOOL(mw2mp_native_skip_shadows, false, "BO2",
+REXCVAR_DEFINE_BOOL(mw2mp_native_skip_shadows, false, "MW2",
                     "Native renderer (FPS test): does not record the draws into a depth-only target with a pitch of "
-                    "1600 or more (BO2's 560-wide shadow target is not one); visible clipping");
+                    "1600 or more (the shadow map); visible clipping");
 // Enabled by default. On the console (A and B alternating every 30 s), the UBO intervals run 18-23 %
 // faster than the neighbouring pointer intervals at the same draw load.
 // Diagnostics: write one texture's fetch constant and the guest bytes of its base level (and the start of
 // its mips) to dump_<address>.bin next to the executable, the first time a draw uses it. For checking a decoding
 // against the bytes the game holds (a lightmap, for instance). Physical address in hex, e.g. 09544000.
-REXCVAR_DEFINE_STRING(mw2mp_native_dump_texture, "", "BO2",
+REXCVAR_DEFINE_STRING(mw2mp_native_dump_texture, "", "MW2",
                       "Diagnostics: dump the guest bytes of the texture at this physical address (hex) once")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 // The address and size the texture dump used, for mw2mp_native_dump_memory="auto@SECONDS" (same texture, later).
 std::atomic<uint64_t> g_mw2mp_dump_texture{0};
-REXCVAR_DEFINE_INT32(mw2mp_native_dump_texture_after_s, 0, "BO2",
+REXCVAR_DEFINE_INT32(mw2mp_native_dump_texture_after_s, 0, "MW2",
                      "Diagnostics: mw2mp_native_dump_texture waits this many seconds after startup")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 
-REXCVAR_DEFINE_BOOL(mw2mp_native_incremental_volume, true, "BO2",
+REXCVAR_DEFINE_BOOL(mw2mp_native_incremental_volume, true, "MW2",
                     "Native renderer: tiled 3D textures the game rewrites piecemeal (the model lighting "
                     "volume, 512x256x4) are updated by 4 KB pages: only the rows the changed pages touch are untiled "
                     "and uploaded. Checked against the whole read and turns itself off at the first disagreement. false "
                     "= read and upload the whole texture every time");
-REXCVAR_DEFINE_INT32(mw2mp_native_volume_by_hash, 1, "BO2",
+REXCVAR_DEFINE_INT32(mw2mp_native_volume_by_hash, 1, "MW2",
                      "Native renderer: how mw2mp_native_incremental_volume finds the pages that changed. "
                      "1 = each page's hash against the one of its last read copy (reads the 2 MB once); 0 = compares "
                      "them with that copy (reads 4 MB); 2 = alternates update by update, to measure both in the same "
                      "run (the C3 line gives the time of each)")
     .range(0, 2);
-REXCVAR_DEFINE_BOOL(mw2mp_native_constants_ubo, true, "BO2",
+REXCVAR_DEFINE_BOOL(mw2mp_native_constants_ubo, true, "MW2",
                     "Native renderer: shaders read their constants from dynamic UBOs (a constant bank on Maxwell) "
                     "instead of through a 64-bit pointer. Same bytes: the image does not change. Needs the shader "
                     "library with SPEC_CONSTANT_CONSTANTS_UBO; false goes back to the pointer");
-REXCVAR_DEFINE_INT32(mw2mp_native_constants_ubo_alternate_s, 0, "BO2",
+REXCVAR_DEFINE_INT32(mw2mp_native_constants_ubo_alternate_s, 0, "MW2",
                      "Native renderer (test): with N > 0 alternates the constants between the pointer (even spans) and "
                      "UBO (odd spans) every N seconds and logs each switch, to compare captures of a still scene in the "
                      "same run");
@@ -263,11 +264,11 @@ REXCVAR_DEFINE_INT32(mw2mp_native_constants_ubo_alternate_s, 0, "BO2",
 // single difference, and the Draw rebound 38-45 % fewer cbufs. The guard samples with a process-wide count
 // (p03 in patches/mesa-mw2mp.patch): sampling "1 in 4,096 draws of the buffer" would check nothing, since no
 // buffer reaches 4,096 draws.
-REXCVAR_DEFINE_BOOL(mw2mp_native_set4_by_differences, true, "BO2",
+REXCVAR_DEFINE_BOOL(mw2mp_native_set4_by_differences, true, "MW2",
                     "Native renderer: set 4 (constants by UBO) by differences in NVK: only the "
                     "descriptors that change are sent and rebound. Same result (checks itself). Needs the Mesa with "
                     "nvk_switch_set4; false = as always");
-REXCVAR_DEFINE_INT32(mw2mp_native_set4_by_differences_alternate_s, 0, "BO2",
+REXCVAR_DEFINE_INT32(mw2mp_native_set4_by_differences_alternate_s, 0, "MW2",
                      "Native renderer (test): with N > 0 alternates set 4 by differences (odd spans) and as "
                      "always (even spans) every N seconds and logs each switch, to compare C6 substages in the same "
                      "run. 0 = does not alternate");
@@ -287,23 +288,23 @@ REXCVAR_DEFINE_INT32(mw2mp_native_set4_by_differences_alternate_s, 0, "BO2",
  * per-part measurement (CNTPCT clock, 1 in N calls) gives the real breakdown in "C6 NVK by parts".
  * With an unpatched Mesa (or on PC) none of this does anything.
  */
-REXCVAR_DEFINE_INT32(mw2mp_native_nvk_measure, 64, "BO2",
+REXCVAR_DEFINE_INT32(mw2mp_native_nvk_measure, 64, "MW2",
                      "Native renderer: measures by parts inside NVK 1 in N calls (power of 2; C6 NVK "
                      "by parts every 10 s). 0 = does not measure")
     .range(0, 4096);
-REXCVAR_DEFINE_BOOL(mw2mp_native_nvk_measure_misses, false, "BO2",
+REXCVAR_DEFINE_BOOL(mw2mp_native_nvk_measure_misses, false, "MW2",
                     "Native renderer (test): reads ahead what the pipeline bind and the shader flush will "
                     "use and measures it separately (how much is cache misses). Does extra work: measurement only");
-REXCVAR_DEFINE_BOOL(mw2mp_native_nvk_emission, true, "BO2",
+REXCVAR_DEFINE_BOOL(mw2mp_native_nvk_emission, true, "MW2",
                     "Native renderer: NVK writes each draw command in one go, with the same bytes "
                     "(checks itself). false = as always");
-REXCVAR_DEFINE_BOOL(mw2mp_native_nvk_cbufs, true, "BO2",
+REXCVAR_DEFINE_BOOL(mw2mp_native_nvk_cbufs, true, "MW2",
                     "Native renderer: NVK only looks at the cbuf slots that can get dirty and skips "
                     "the cbuf flush when nothing is dirty (checks itself). false = as always");
-REXCVAR_DEFINE_BOOL(mw2mp_native_nvk_dynamic, true, "BO2",
+REXCVAR_DEFINE_BOOL(mw2mp_native_nvk_dynamic, true, "MW2",
                     "Native renderer: NVK only emits the dynamic state groups with dirty bits "
                     "(checks itself). false = as always");
-REXCVAR_DEFINE_BOOL(mw2mp_native_nvk_prefetch, true, "BO2",
+REXCVAR_DEFINE_BOOL(mw2mp_native_nvk_prefetch, true, "MW2",
                     "Native renderer: cache hints (PRFM) for the pipeline and the shaders before "
                     "they are used, and the pipeline requested after PipelineOf. Changes nothing. false = no hints");
 /*
@@ -326,14 +327,14 @@ REXCVAR_DEFINE_BOOL(mw2mp_native_nvk_prefetch, true, "BO2",
  *     for copy engine work); through vk_meta, with those barriers, the bursts are smooth. Image-to-image copies on the
  *     copy engine show no such drop.
  */
-REXCVAR_DEFINE_BOOL(mw2mp_native_nvk_fingerprint_copy, true, "BO2",
+REXCVAR_DEFINE_BOOL(mw2mp_native_nvk_fingerprint_copy, true, "MW2",
                     "Native renderer: when a pipeline is bound, NVK copies only the fixed-state groups "
                     "whose fingerprint changes (checks itself). false = the usual copy");
-REXCVAR_DEFINE_INT32(mw2mp_native_nvk_copy_engine, 2, "BO2",
+REXCVAR_DEFINE_INT32(mw2mp_native_nvk_copy_engine, 2, "MW2",
                      "Native renderer: NVK copies on the copy engine instead of vk_meta. Bit 0 = texture "
                      "uploads (buffer to image); bit 1 = image-to-image copies. 0 = everything as before")
     .range(0, 3);
-REXCVAR_DEFINE_INT32(mw2mp_native_nvk_copy_engine_b, -1, "BO2",
+REXCVAR_DEFINE_INT32(mw2mp_native_nvk_copy_engine_b, -1, "MW2",
                      "Test (Switch), with mw2mp_benchmark_ab_s: mw2mp_native_nvk_copy_engine's value in the A/B arms "
                      "with factor 2 on. -1 = not part of the A/B")
     .range(-1, 3);
@@ -347,10 +348,10 @@ REXCVAR_DEFINE_INT32(mw2mp_native_nvk_copy_engine_b, -1, "BO2",
  * is mapped once per kind, at the first texture of that kind, and every texture of that kind in it takes its address
  * from there: the same pages, one mapping.
  */
-REXCVAR_DEFINE_BOOL(mw2mp_native_nvk_kind_views, true, "BO2",
+REXCVAR_DEFINE_BOOL(mw2mp_native_nvk_kind_views, true, "MW2",
                     "Native renderer: textures in the texture pool share one GPU mapping per pool block "
                     "(and memory kind) instead of a mapping each. false = a mapping per texture, as before");
-REXCVAR_DEFINE_BOOL(mw2mp_native_nvk_kind_views_ab, false, "BO2",
+REXCVAR_DEFINE_BOOL(mw2mp_native_nvk_kind_views_ab, false, "MW2",
                     "Test (Switch), with mw2mp_benchmark_ab_s: A/B factor 1 is mw2mp_native_nvk_kind_views for the "
                     "textures bound in each arm (on = shared mappings)");
 /*
@@ -360,11 +361,11 @@ REXCVAR_DEFINE_BOOL(mw2mp_native_nvk_kind_views_ab, false, "BO2",
  * kColdScanEvery frames into a short list (re-checked when used) and released by key, their views found through
  * views_per_image_ (as ForgetImage does).
  */
-REXCVAR_DEFINE_BOOL(mw2mp_native_evict_by_key, true, "BO2",
+REXCVAR_DEFINE_BOOL(mw2mp_native_evict_by_key, true, "MW2",
                     "Native renderer: near the texture limit, cold textures are picked from a list "
                     "refreshed every 16 frames and released by key, without walking the whole cache every frame. "
                     "false = the full walks, as before");
-REXCVAR_DEFINE_BOOL(mw2mp_native_evict_by_key_ab, false, "BO2",
+REXCVAR_DEFINE_BOOL(mw2mp_native_evict_by_key_ab, false, "MW2",
                     "Test, with mw2mp_benchmark_ab_s: A/B factor 1 is mw2mp_native_evict_by_key");
 /*
  * The vertex copies in 64-byte steps with the source prefetched. In gameplay CopyVertices is the largest
@@ -374,14 +375,14 @@ REXCVAR_DEFINE_BOOL(mw2mp_native_evict_by_key_ab, false, "BO2",
  * step and asks for the source 512 bytes ahead (the first lines at once). It is checked at start against the plain
  * loop on every byte order, size and offset; any difference keeps the plain loop.
  */
-REXCVAR_DEFINE_BOOL(mw2mp_native_copy_neon, true, "BO2",
+REXCVAR_DEFINE_BOOL(mw2mp_native_copy_neon, true, "MW2",
                     "Native renderer (Switch): vertex copies in 64-byte NEON steps with the source "
                     "prefetched ahead. false = the plain loop");
-REXCVAR_DEFINE_INT32(mw2mp_native_copy_neon_ab, 0, "BO2",
+REXCVAR_DEFINE_INT32(mw2mp_native_copy_neon_ab, 0, "MW2",
                      "Test, with mw2mp_benchmark_ab_s: the A/B factor (1 or 2) that switches mw2mp_native_copy_neon "
                      "(on in the arms with that factor on). 0 = not part of the A/B")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
-REXCVAR_DEFINE_INT32(mw2mp_native_nvk_alternate_s, 0, "BO2",
+REXCVAR_DEFINE_INT32(mw2mp_native_nvk_alternate_s, 0, "MW2",
                      "Native renderer (test): with N > 0 alternates the four NVK improvements (on in odd "
                      "spans, off in even ones) every N seconds, to compare in the same run. 0 = does not alternate");
 
@@ -515,14 +516,14 @@ static_assert(sizeof(NvkBo2KindViews) == 8 + 6 * 8, "NvkBo2KindViews: the same s
  * What to check, in motion (not paused): HUD panels the game rewrites every frame, the HUD and the
  * reflections. If anything looks blurry or delayed, disable this cvar in the toml.
  */
-REXCVAR_DEFINE_BOOL(mw2mp_native_texture_cache_across_frames, true, "BO2",
+REXCVAR_DEFINE_BOOL(mw2mp_native_texture_cache_across_frames, true, "MW2",
                     "Native renderer: the sampler caches stay valid across frames as long as the texture "
                     "content is not due for a check. false: they expire every frame, as before")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 // Uploads the game's mip levels. With only the base level of each texture, distant surfaces looked grainy
 // compared with the Xbox 360. This also fixes the base level of small textures with packed mips, which
 // does not start at the base address.
-REXCVAR_DEFINE_BOOL(mw2mp_native_mipmaps, true, "BO2",
+REXCVAR_DEFINE_BOOL(mw2mp_native_mipmaps, true, "MW2",
                     "Native renderer: uploads the mip levels the game provides (as on the Xbox 360). false: only the "
                     "base level, as before")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
@@ -549,7 +550,7 @@ constexpr int32_t kDefaultTexturesMbMax = 512;
 #else
 constexpr int32_t kDefaultTexturesMbMax = 384;
 #endif
-REXCVAR_DEFINE_INT32(mw2mp_native_textures_mb_max, kDefaultTexturesMbMax, "BO2",
+REXCVAR_DEFINE_INT32(mw2mp_native_textures_mb_max, kDefaultTexturesMbMax, "MW2",
                      "Native renderer: MB of textures above which the ones unused the longest (at least 120 frames) are "
                      "released, down to 75 %. If the game asks for them again, they are uploaded again. 0 = no limit, "
                      "as before")
@@ -568,12 +569,12 @@ REXCVAR_DEFINE_INT32(mw2mp_native_textures_mb_max, kDefaultTexturesMbMax, "BO2",
  * barrier and the copy in that same buffer. The GPU receives the same thing in the same submission: no
  * placeholder textures and no lower mips.
  */
-REXCVAR_DEFINE_BOOL(mw2mp_native_texture_bind_thread, true, "BO2",
+REXCVAR_DEFINE_BOOL(mw2mp_native_texture_bind_thread, true, "MW2",
                     "Native renderer: the vkBindImageMemory of new textures (address reservation and "
                     "mapping on Horizon, ~0.6 ms each) runs on a separate thread and the ring keeps recording; before "
                     "submitting, whatever is missing is waited for. Same result (checks itself). false = on the ring")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
-REXCVAR_DEFINE_INT32(mw2mp_native_texture_bind_thread_priority, 0x2D, "BO2",
+REXCVAR_DEFINE_INT32(mw2mp_native_texture_bind_thread_priority, 0x2D, "MW2",
                      "Native renderer: priority of the texture bind thread. 0x2D, the ring's: above the "
                      "guest (0x3B) so a finished ioctl does not wait for a core, and outside the audio (0x2B) and "
                      "presentation (0x2C) bands. It sleeps in the ioctl almost all the time")
@@ -595,24 +596,24 @@ REXCVAR_DEFINE_INT32(mw2mp_native_texture_bind_thread_priority, 0x2D, "BO2",
 // Off by default. Its guard trips at start-up (3 jobs not collected when switching upload buffers) and switches
 // it off, and texture creation turned out not to cause gameplay stutters (56 us per texture on the ring); the
 // zone-change stutter is limited by the game itself.
-REXCVAR_DEFINE_BOOL(mw2mp_native_texture_hash_thread, false, "BO2",
+REXCVAR_DEFINE_BOOL(mw2mp_native_texture_hash_thread, false, "MW2",
                     "Native renderer: the hash (XXH3), the untiling and the byte order of new "
                     "textures are done by a separate thread on a copy of guest memory taken on the ring; before "
                     "submitting, whatever is missing is collected. Same result (checks itself). false = on the ring, as "
                     "before")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
-REXCVAR_DEFINE_INT32(mw2mp_native_texture_hash_thread_priority, 0x2E, "BO2",
+REXCVAR_DEFINE_INT32(mw2mp_native_texture_hash_thread_priority, 0x2E, "MW2",
                      "Native renderer: priority of the texture hash thread. 0x2E: below the ring (0x2D), "
                      "which preempts it as soon as it has work, and above the guest (0x3B), so the guest does not "
                      "starve it; outside the audio (0x2B) and presentation (0x2C) bands")
     .range(0x2C, 0x3B)
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
-REXCVAR_DEFINE_INT32(mw2mp_native_texture_hash_thread_core, -2, "BO2",
+REXCVAR_DEFINE_INT32(mw2mp_native_texture_hash_thread_core, -2, "MW2",
                      "Native renderer: preferred core of the hash thread. -2 = automatic: core 2, or 1 if "
                      "the ring runs on 2 (on the ring's core, which is busy, it would barely run); -1 = the process "
                      "default; 0-2 = that one. Not exclusive")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
-REXCVAR_DEFINE_INT32(mw2mp_native_texture_hash_thread_mb, 16, "BO2",
+REXCVAR_DEFINE_INT32(mw2mp_native_texture_hash_thread_mb, 16, "MW2",
                      "Native renderer: MB for the guest memory copies of a submission's new textures. "
                      "Whatever does not fit is prepared on the ring, as before")
     .range(4, 64)
@@ -622,7 +623,7 @@ REXCVAR_DEFINE_INT32(mw2mp_native_texture_hash_thread_mb, 16, "BO2",
  * no decision of the ring: it only counts, and reports every 10 s in the "C3 reuse by content"
  * line.
  */
-REXCVAR_DEFINE_BOOL(mw2mp_native_diag_reuse, true, "BO2",
+REXCVAR_DEFINE_BOOL(mw2mp_native_diag_reuse, true, "MW2",
                     "Native renderer (measurement only): counts how many new textures have the same "
                     "content and shape as another live one in the cache (the game reloads the packs at another address) "
                     "and how many of those others have gone unused for more than 120 frames. Changes nothing. false = "
@@ -634,7 +635,7 @@ REXCVAR_DEFINE_BOOL(mw2mp_native_diag_reuse, true, "BO2",
  * the first time after any change to the shader library, the driver or the key, and on a fresh install. See
  * LoopPrewarm and the precompile at start (mw2mp_native_precompile.h).
  */
-REXCVAR_DEFINE_BOOL(mw2mp_native_async_pipelines, true, "BO2",
+REXCVAR_DEFINE_BOOL(mw2mp_native_async_pipelines, true, "MW2",
                     "Native renderer: a pipeline the driver has not compiled yet is compiled on a thread "
                     "of its own, and its draws are skipped until it is ready (a few frames), instead of the ring "
                     "stopping for it: switching to HIGH for the first time froze the game for 7.5 s, dozens of "
@@ -645,7 +646,7 @@ REXCVAR_DEFINE_BOOL(mw2mp_native_async_pipelines, true, "BO2",
 // frames came out black (run 033: 200 shaders, 1,175 draws skipped). Outside a match and for this many seconds after
 // cl_ingame turns on, the ring reads a missing shader at once and draws it, as a slightly longer load; after that it
 // reads them on the SPIR-V thread, so a burst mid-match cannot stop the game (~250 ms, run 029).
-REXCVAR_DEFINE_INT32(mw2mp_native_load_wait_s, 5, "BO2",
+REXCVAR_DEFINE_INT32(mw2mp_native_load_wait_s, 5, "MW2",
                      "Native renderer: outside a match and for this many seconds after entering one, a shader that "
                      "is not in memory yet is read at once and drawn, instead of its draws being skipped (black) "
                      "until the SPIR-V thread has it. 0 = always skipped while read, as before")
@@ -655,7 +656,7 @@ REXCVAR_DEFINE_INT32(mw2mp_native_load_wait_s, 5, "BO2",
 // draws per 10 s), leaving black surfaces. Freezing the ring until they compile would stop the game too (online, a
 // drop). Instead, once cl_ingame turns on, a frame with skipped draws is submitted but not shown, so the screen keeps
 // the loading image while the game runs, until the first complete frame or this many seconds.
-REXCVAR_DEFINE_INT32(mw2mp_native_load_hold_s, 60, "BO2",
+REXCVAR_DEFINE_INT32(mw2mp_native_load_hold_s, 60, "MW2",
                      "Native renderer: after a match starts, frames with draws skipped (pipelines compiling, shaders "
                      "being read) are not shown, so the loading image stays until the first complete frame or this "
                      "many seconds. 0 = shown with the missing surfaces black, as before")
@@ -670,7 +671,7 @@ REXCVAR_DEFINE_INT32(mw2mp_native_load_hold_s, 60, "BO2",
 #else
 #define MW2MP_HOLD_INCOMPLETE_DEFAULT 0
 #endif
-REXCVAR_DEFINE_INT32(mw2mp_native_hold_incomplete_frames, MW2MP_HOLD_INCOMPLETE_DEFAULT, "BO2",
+REXCVAR_DEFINE_INT32(mw2mp_native_hold_incomplete_frames, MW2MP_HOLD_INCOMPLETE_DEFAULT, "MW2",
                      "Native renderer: after the load hold, a frame with draws skipped (pipeline compiling, shader "
                      "being read) repeats the last frame shown instead of showing the missing surfaces, up to this "
                      "many frames in a row. 0 = shown with holes, as before")
@@ -686,7 +687,7 @@ REXCVAR_DEFINE_INT32(mw2mp_native_hold_incomplete_frames, MW2MP_HOLD_INCOMPLETE_
 #else
 #define MW2MP_COMPILE_THREADS_DEFAULT 1
 #endif
-REXCVAR_DEFINE_INT32(mw2mp_native_compile_threads, MW2MP_COMPILE_THREADS_DEFAULT, "BO2",
+REXCVAR_DEFINE_INT32(mw2mp_native_compile_threads, MW2MP_COMPILE_THREADS_DEFAULT, "MW2",
                      "Native renderer, with mw2mp_native_async_pipelines: how many threads compile pipelines. The "
                      "second only takes one outside a match (loading screens, menus) while two or more wait, so in a "
                      "match and with nothing queued it sleeps. 1 = one thread, as before")
@@ -700,11 +701,11 @@ REXCVAR_DEFINE_INT32(mw2mp_native_compile_threads, MW2MP_COMPILE_THREADS_DEFAULT
 #else
 #define MW2MP_COMPILE_HELP_IN_MATCH_DEFAULT false
 #endif
-REXCVAR_DEFINE_BOOL(mw2mp_native_compile_help_in_match, MW2MP_COMPILE_HELP_IN_MATCH_DEFAULT, "BO2",
+REXCVAR_DEFINE_BOOL(mw2mp_native_compile_help_in_match, MW2MP_COMPILE_HELP_IN_MATCH_DEFAULT, "MW2",
                     "With mw2mp_native_compile_threads 2: the second thread also compiles in a level (not only in "
                     "menus and loading screens) while two or more pipelines wait. Clears the black areas of a "
                     "first visit about twice as fast, at the cost of a core while it works");
-REXCVAR_DEFINE_BOOL(mw2mp_native_test_async_all, false, "BO2",
+REXCVAR_DEFINE_BOOL(mw2mp_native_test_async_all, false, "MW2",
                     "Test helper, with mw2mp_native_async_pipelines: every pipeline the session creates goes to the "
                     "compile thread, those in the driver's cache too, as on a console that never compiled them (the "
                     "draws wait a frame or more). false = only those that need compiling")
@@ -716,7 +717,7 @@ REXCVAR_DEFINE_BOOL(mw2mp_native_test_async_all, false, "BO2",
 // the world then appeared at once. The passes without a depth target (post-processing, the
 // output copy, the HUD) need fewer than ten pipelines; compiled first, the picture is there in a few seconds and the
 // models come in around it.
-REXCVAR_DEFINE_INT32(mw2mp_native_compile_first, 1, "BO2",
+REXCVAR_DEFINE_INT32(mw2mp_native_compile_first, 1, "MW2",
                      "Native renderer, with mw2mp_native_async_pipelines: which pipelines go ahead in the compile "
                      "thread's queue (bits): 1 = draws in a pass without a depth target (post-processing, the copy of "
                      "the scene to the screen, the HUD), 2 = draws into a target 1280 or more wide, 4 = draws of 6 "
@@ -724,13 +725,13 @@ REXCVAR_DEFINE_INT32(mw2mp_native_compile_first, 1, "BO2",
                      "them")
     .range(0, 15)
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
-REXCVAR_DEFINE_INT32(mw2mp_native_test_compile_delay_ms, 0, "BO2",
+REXCVAR_DEFINE_INT32(mw2mp_native_test_compile_delay_ms, 0, "MW2",
                      "Test helper, with mw2mp_native_async_pipelines: the compile thread waits this long after each "
                      "pipeline it compiles with a shader it has not compiled before, so a fast PC compiles at a "
                      "console's pace (300-500 ms each on a first visit; with mw2mp_native_test_async_all the others "
                      "pass at once, as the console's driver answers them from the shaders it keeps). 0 = no wait")
     .range(0, 5000);
-REXCVAR_DEFINE_BOOL(mw2mp_native_test_compile_log, false, "BO2",
+REXCVAR_DEFINE_BOOL(mw2mp_native_test_compile_log, false, "MW2",
                     "Test helper, with mw2mp_native_async_pipelines: a log line for each pipeline sent to the compile "
                     "thread (its pass, target, draw size and place in the queue) and for each one collected (how long "
                     "it waited and how many draws were skipped meanwhile)");
@@ -740,32 +741,32 @@ REXCVAR_DEFINE_BOOL(mw2mp_native_test_compile_log, false, "BO2",
 // 742-1,006 ms with the ring working throughout, while the writer took the 51 MB cache from the driver), probably
 // because Mesa's cache lock, held while the cache is serialized, blocks the ring's pipeline lookups. So by default
 // the file is never saved in a match.
-REXCVAR_DEFINE_INT32(mw2mp_native_pipelines_save_in_match, 0, "BO2",
+REXCVAR_DEFINE_INT32(mw2mp_native_pipelines_save_in_match, 0, "MW2",
                      "Native renderer: when the pipeline file is saved in a match. 0 = never (only in menus and "
                      "loading screens); 1 = once no new pipeline has come for 30 s, and only if the cache grew (a new "
                      "prewarm record alone waits for the next menu); 2 = as outside a match (after 64 new pipelines or "
                      "a minute with any). The writer thread takes the cache from the driver, and writes the file in "
                      "slices with pauses so the SD card stays free for the game's reads")
     .range(0, 2);
-REXCVAR_DEFINE_INT32(mw2mp_native_test_pipelines_resave_s, 0, "BO2",
+REXCVAR_DEFINE_INT32(mw2mp_native_test_pipelines_resave_s, 0, "MW2",
                      "Test helper: in a match, every this many seconds the whole pipeline file is taken from the "
                      "driver and written again, the odd ones at once and the even ones in slices (the [native] C6 "
                      "pipelines saved line says which), to see what a save costs. 0 = off")
     .range(0, 3600);
-REXCVAR_DEFINE_BOOL(mw2mp_native_test_fresh_pipelines, false, "BO2",
+REXCVAR_DEFINE_BOOL(mw2mp_native_test_fresh_pipelines, false, "MW2",
                     "Test helper: the session starts with an empty pipeline cache and no prewarm list, as a fresh "
                     "install does, and saves neither (cache/mw2mp_native_pipelines.bin is left as it is); on the "
                     "Switch Mesa's own shader cache is off too (mw2mp_switch.cpp): every pipeline is really compiled, "
                     "to measure the first visit to a map")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 REXCVAR_DECLARE(bool, mw2mp_native_test_cold_pipelines);  // mw2mp_native_precompile.cpp
-REXCVAR_DEFINE_INT32(mw2mp_native_prewarm_threads, 2, "BO2",
+REXCVAR_DEFINE_INT32(mw2mp_native_prewarm_threads, 2, "MW2",
                      "Native renderer, with mw2mp_native_prewarm_pipelines: 2 = a second prewarm thread walks the "
                      "list from its end, only while no match is on (menus, loading screens), until it meets the "
                      "first; what it compiles the first then finds in the driver's cache. 1 = one thread, as before")
     .range(1, 2)
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
-REXCVAR_DEFINE_STRING(mw2mp_native_prewarm_lists, "cache/prewarm", "BO2",
+REXCVAR_DEFINE_STRING(mw2mp_native_prewarm_lists, "cache/prewarm", "MW2",
                       "Native renderer: the folder, beside the NRO or the exe, whose *.bin prewarm lists are read at "
                       "start-up besides the pipelines file's own (tools/pipelines_list.py makes them)")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
@@ -773,16 +774,16 @@ REXCVAR_DEFINE_STRING(mw2mp_native_prewarm_lists, "cache/prewarm", "BO2",
 // fingerprints, no game data). At each level's load its listed pipelines are compiled on every core while the loading
 // image stays up (the load hold waits for them), so a first visit has no in-game compiles: a longer load instead of
 // black spots and stutter.
-REXCVAR_DEFINE_BOOL(mw2mp_native_record_map_lists, false, "BO2",
+REXCVAR_DEFINE_BOOL(mw2mp_native_record_map_lists, false, "MW2",
                     "Native renderer: every pipeline a level draws is added to pipelines/<mapname>.bin (merged with "
                     "what the file already has) when the level ends or the game goes back to the menu. To make the "
                     "lists the port ships: play each level to its end. false = the lists are only read")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
-REXCVAR_DEFINE_BOOL(mw2mp_native_test_export_list, false, "BO2",
+REXCVAR_DEFINE_BOOL(mw2mp_native_test_export_list, false, "MW2",
                     "Test helper: the session's prewarm list is also written to logs/mw2mp_prewarm_list.bin (at most "
                     "every 20 s while it grows), so a test can bring it back with the logs")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
-REXCVAR_DEFINE_BOOL(mw2mp_native_prewarm_pipelines, true, "BO2",
+REXCVAR_DEFINE_BOOL(mw2mp_native_prewarm_pipelines, true, "MW2",
                     "Native renderer: at boot, a lowest-priority thread recreates in the Vulkan "
                     "cache the pipelines the ring created in earlier sessions (their list is in "
                     "cache/mw2mp_native_pipelines.bin), with the same function as the ring, and destroys them: when the "
@@ -793,26 +794,26 @@ REXCVAR_DEFINE_BOOL(mw2mp_native_prewarm_pipelines, true, "BO2",
 // Testing only. Pretends the GPU runs out of memory on one in N texture allocations, to check that the
 // emergency path (stop the GPU, release half the cache and retry) really works. 0 does nothing, which is the
 // normal setting.
-REXCVAR_DEFINE_INT32(mw2mp_native_test_out_of_memory_every, 0, "BO2",
+REXCVAR_DEFINE_INT32(mw2mp_native_test_out_of_memory_every, 0, "MW2",
                      "Native renderer (tests only): fakes running out of GPU memory on one in N texture allocations, to "
                      "exercise the recovery. 0 = off")
     .range(0, 100000)
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
-REXCVAR_DEFINE_BOOL(mw2mp_native_diag_mips, false, "BO2",
+REXCVAR_DEFINE_BOOL(mw2mp_native_diag_mips, false, "MW2",
                     "Native renderer (diagnostic): compares the average color of each mip level with the base's in "
                     "DXT1/3/5 and 8888 textures and logs the ones that do not look alike (a level read from somewhere "
                     "else). Does not change the image")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
-REXCVAR_DEFINE_BOOL(mw2mp_native_test_depth_clamp, false, "BO2",
+REXCVAR_DEFINE_BOOL(mw2mp_native_test_depth_clamp, false, "MW2",
                     "Native renderer (tests only): depthClampEnable on every pipeline. Imitates what "
                     "NVK seems to do on the console with whatever is behind the far plane (the sun of the scene's "
                     "occlusion queries)")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
-REXCVAR_DEFINE_INT32(mw2mp_native_smooth_glow_alternate_s, 0, "BO2",
+REXCVAR_DEFINE_INT32(mw2mp_native_smooth_glow_alternate_s, 0, "MW2",
                      "Native renderer (test): with N > 0 cycles the sky glow through original, natural and "
                      "soft (mw2mp_sky_glow) every N seconds and logs each switch, to compare captures of the same "
                      "place");
-REXCVAR_DEFINE_BOOL(mw2mp_native_test_occlusion_always, false, "BO2",
+REXCVAR_DEFINE_BOOL(mw2mp_native_test_occlusion_always, false, "MW2",
                     "Native renderer (tests only): colorless draws of an occlusion query on a target "
                     "of 640 or more always pass the depth test. Tells apart a sun that covers no pixels from one hidden "
                     "by depth. Changes what the game sees")
@@ -835,27 +836,26 @@ REXCVAR_DEFINE_BOOL(mw2mp_native_test_occlusion_always, false, "BO2",
  * the map, the renderArea has to span the whole map: the ZCULL region comes from render->area, not from the
  * image size.
  *
- * This only acts on a depth-only target 1600 or more wide (the same test as mw2mp_native_skip_shadows), and
- * BO2's 560x720 shadow target is not one.
+ * This only acts on a depth-only target 1600 or more wide (the same test as mw2mp_native_skip_shadows).
  */
 /*
  * On by default: an improvement that depends on a line in a local toml is silently lost when the file is
  * missing.
  */
-REXCVAR_DEFINE_BOOL(mw2mp_native_shadow_pass_without_load, true, "BO2",
+REXCVAR_DEFINE_BOOL(mw2mp_native_shadow_pass_without_load, true, "MW2",
                     "Native renderer (FPS test): opens the shadow map pass (a depth-only target 1600 or more wide, "
-                    "which BO2's is not) without loading its previous contents (loadOp = DONT_CARE). Measured: nothing "
+                    "the shadow map) without loading its previous contents (loadOp = DONT_CARE). Measured: nothing "
                     "to gain, the depth loadOp is not paid on this GPU (the pass with 0 triangles costs almost "
                     "nothing)");
-REXCVAR_DEFINE_INT32(mw2mp_native_skip_shadows_alternate_s, 0, "BO2",
+REXCVAR_DEFINE_INT32(mw2mp_native_skip_shadows_alternate_s, 0, "MW2",
                      "Native renderer (test): with N > 0 skips the shadows in the odd N-second spans and logs each "
                      "switch, to compare captures of the same place");
-REXCVAR_DEFINE_BOOL(mw2mp_native_diag_repeated_vertices, false, "BO2",
+REXCVAR_DEFINE_BOOL(mw2mp_native_diag_repeated_vertices, false, "MW2",
                     "Native renderer (diagnostic): counts the vertex bytes that repeat address, size and content within "
                     "the same frame or against an earlier one");
 // On the console, the vertex copy was ~3 of the ring thread's ~9 us per draw ("uploads" stage), and with the
 // game's busy-waits removed there are free cores.
-REXCVAR_DEFINE_BOOL(mw2mp_native_upload_thread, true, "BO2",
+REXCVAR_DEFINE_BOOL(mw2mp_native_upload_thread, true, "MW2",
                     "Native renderer: the vertex copies into the upload buffer are done by a separate thread while the "
                     "ring thread keeps recording; they are waited for before submitting the work to the GPU and before "
                     "returning the read pointer to the game")
@@ -874,7 +874,7 @@ REXCVAR_DEFINE_BOOL(mw2mp_native_upload_thread, true, "BO2",
  * another core; the ring (0x2D) preempts it if they share a core, and the help path only handles what is
  * left when the ring has to wait.
  */
-REXCVAR_DEFINE_INT32(mw2mp_native_upload_thread_priority, 0x2E, "BO2",
+REXCVAR_DEFINE_INT32(mw2mp_native_upload_thread_priority, 0x2E, "MW2",
                      "Native renderer: priority of the vertex copy thread. 0x2E: below the ring "
                      "(0x2D) and above the guest (0x3A-0x3B), so it copies while the ring records. 0x3B = as up to 186")
     .range(0x2C, 0x3B)
@@ -886,7 +886,7 @@ REXCVAR_DEFINE_INT32(mw2mp_native_upload_thread_priority, 0x2E, "BO2",
  * game threads (0x3A, lower priority), which spend 97 % of their time waiting for the ring. Only the preferred
  * core is set: the affinity mask is untouched and the kernel can still move it (same as the hash thread).
  */
-REXCVAR_DEFINE_INT32(mw2mp_native_upload_thread_core, -2, "BO2",
+REXCVAR_DEFINE_INT32(mw2mp_native_upload_thread_core, -2, "MW2",
                      "Native renderer: preferred core of the vertex copy thread. -2 = one different "
                      "from the ring's; -1 = no preference (as up to 190); 0-2 = that one")
     .range(-2, 2)
@@ -898,25 +898,25 @@ REXCVAR_DEFINE_INT32(mw2mp_native_upload_thread_core, -2, "BO2",
  * 20,000 draws, then 1 in 4,096, are compared with the plain loop; on a MISMATCH the plain loop is kept for
  * the rest of the run.
  */
-REXCVAR_DEFINE_BOOL(mw2mp_native_reuse_textures, true, "BO2",
+REXCVAR_DEFINE_BOOL(mw2mp_native_reuse_textures, true, "MW2",
                     "Native renderer: a draw whose pixel shader, fetch constants and texture caches did not change since "
                     "the previous draw reuses that draw's texture words instead of running the sampler loop (guarded: "
                     "checked against the loop, off for the session on any difference)")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
-REXCVAR_DEFINE_BOOL(mw2mp_native_indices_neon, true, "BO2",
+REXCVAR_DEFINE_BOOL(mw2mp_native_indices_neon, true, "MW2",
                     "Native renderer: 16-bit indices are copied and measured (min and max) with "
                     "NEON, 16 per loop. Same result (checks itself). false = the usual loop")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
-REXCVAR_DEFINE_BOOL(mw2mp_native_upload_help, true, "BO2",
+REXCVAR_DEFINE_BOOL(mw2mp_native_upload_help, true, "MW2",
                     "Native renderer: when the ring thread has to wait for the vertex copies, it "
                     "copies itself the ones the copy thread has not started yet and waits for the one in progress with "
                     "priority inheritance. Same data (checks itself). false = waits as before")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 
-REXCVAR_DEFINE_BOOL(mw2mp_native_diag_gray_empties, false, "BO2",
+REXCVAR_DEFINE_BOOL(mw2mp_native_diag_gray_empties, false, "MW2",
                     "Native renderer: textures not supported yet (cube, 3D, pending formats) sample gray instead of "
                     "zero (tests only)");
-REXCVAR_DEFINE_BOOL(mw2mp_native_inv_tex_size, true, "BO2",
+REXCVAR_DEFINE_BOOL(mw2mp_native_inv_tex_size, true, "MW2",
                     "Native renderer: shaders take 1/texture size from the constants instead of "
                     "asking the texture for it on each offset sample. Same arithmetic with the same number: the image "
                     "does not change. Needs a shader library regenerated with the new helper");
@@ -933,7 +933,7 @@ REXCVAR_DEFINE_BOOL(mw2mp_native_inv_tex_size, true, "BO2",
  * only cost GPU time: together with the blur, they made the GPU the bottleneck again. So the cheap PCF is
  * enabled by default again.
  */
-REXCVAR_DEFINE_BOOL(mw2mp_native_cheap_pcf, true, "BO2",
+REXCVAR_DEFINE_BOOL(mw2mp_native_cheap_pcf, true, "MW2",
                     "Native renderer: a single shadow map sample instead of the 3x3 half-texel pattern. The "
                     "shadow edge is a little less smooth (true by default: the bands on the "
                     "walls were acne and the depth bias removes them). Needs the regenerated shader library");
@@ -951,7 +951,7 @@ REXCVAR_DEFINE_BOOL(mw2mp_native_cheap_pcf, true, "BO2",
  */
 // 0 by default. At 8x it did not remove the streaks on the alley doors, and the scene went up ~2 ms of GPU
 // time together with the 9 shadow samples.
-REXCVAR_DEFINE_INT32(mw2mp_native_anisotropic, 0, "BO2",
+REXCVAR_DEFINE_INT32(mw2mp_native_anisotropic, 0, "MW2",
                      "Native renderer: anisotropic filtering of the world textures (linear samplers "
                      "with mips). 0 = like the Xbox 360 (trilinear, blurry at an angle and in the distance); 2, 4, 8 or "
                      "16 = sharper, at a GPU cost")
@@ -981,17 +981,17 @@ REXCVAR_DEFINE_INT32(mw2mp_native_anisotropic, 0, "BO2",
  * objects casting them. Both values can be changed at runtime from the settings menu. 0 and 0 = previous
  * behaviour.
  */
-REXCVAR_DEFINE_INT32(mw2mp_native_shadow_bias_slope, 20, "BO2",
+REXCVAR_DEFINE_INT32(mw2mp_native_shadow_bias_slope, 20, "MW2",
                      "Native renderer: slope-scaled depth bias in the shadow map, in tenths (20 = "
                      "2.0). Removes the acne (a diagonal dot grid on walls and doors). Too high lifts the "
                      "shadows off the objects. 0 = as before. Changes on the fly")
     .range(0, 100);
-REXCVAR_DEFINE_INT32(mw2mp_native_shadow_bias_constant, 0, "BO2",
+REXCVAR_DEFINE_INT32(mw2mp_native_shadow_bias_constant, 0, "MW2",
                      "Native renderer: constant depth bias in the shadow map, in thousands of 24-bit "
                      "units (1 = 1000). 0 = no constant. Changes on the fly")
     .range(0, 100);
 
-REXCVAR_DEFINE_INT32(mw2mp_native_diag_min_mip, 0, "BO2",
+REXCVAR_DEFINE_INT32(mw2mp_native_diag_min_mip, 0, "MW2",
                      "Diagnostic: textures with mips start N levels lower, also up close, to see "
                      "whether their mip levels are right. 0 = normal; 1, 2 or 3 to look. Changes on the fly")
     .range(0, 4);
@@ -1012,26 +1012,26 @@ REXCVAR_DEFINE_INT32(mw2mp_native_diag_min_mip, 0, "BO2",
  * follows the measurement: what helps ships enabled and what makes things worse ships disabled. The setting
  * stays so the test can be repeated.
  */
-REXCVAR_DEFINE_BOOL(mw2mp_native_submit_after_shadows, false, "BO2",
+REXCVAR_DEFINE_BOOL(mw2mp_native_submit_after_shadows, false, "MW2",
                     "Native renderer: submit the work to the GPU as soon as the shadow pass closes, instead of "
                     "all together at the end of the frame. The GPU stops sitting idle waiting for the CPU to finish "
                     "recording");
-REXCVAR_DEFINE_INT32(mw2mp_native_cheap_pcf_alternate_s, 0, "BO2",
+REXCVAR_DEFINE_INT32(mw2mp_native_cheap_pcf_alternate_s, 0, "MW2",
                      "Native renderer: with N > 0 alternates every N seconds the shadow map sampling between "
                      "the 3x3 pattern and a single texel, and logs it. For A/B in the SAME session: comparing "
                      "between different sessions does not work because the stretch changes");
-REXCVAR_DEFINE_INT32(mw2mp_native_inv_tex_size_alternate_s, 0, "BO2",
+REXCVAR_DEFINE_INT32(mw2mp_native_inv_tex_size_alternate_s, 0, "MW2",
                      "Native renderer (test): with N > 0 alternates every N seconds between taking 1/size "
                      "from the constants and asking the texture for it");
-REXCVAR_DEFINE_INT32(mw2mp_native_per_draw_stats_s, 0, "BO2",
+REXCVAR_DEFINE_INT32(mw2mp_native_per_draw_stats_s, 0, "MW2",
                      "Native renderer (diagnostic): with N > 0 measures one frame every N seconds with one "
                      "query per draw and splits the fragments by pixel shader");
-REXCVAR_DEFINE_INT32(mw2mp_native_test_scissor, 0, "BO2",
+REXCVAR_DEFINE_INT32(mw2mp_native_test_scissor, 0, "MW2",
                      "Native renderer (test): clips the draws of one category to 1x1 (1 shadows, 2 scene, 3 "
                      "cube, 4 postprocess, 5 the 'reflection' category: the scene at the internal resolutions below "
                      "1280, e.g. very low's). All the state and all the draws are sent but nothing is shaded: the time "
                      "difference is the per-draw floor. BREAKS THE IMAGE while it is set: measurement only");
-REXCVAR_DEFINE_INT32(mw2mp_native_test_scissor_alternate_s, 0, "BO2",
+REXCVAR_DEFINE_INT32(mw2mp_native_test_scissor_alternate_s, 0, "MW2",
                      "Native renderer (test): with N > 0 alternates mw2mp_native_test_scissor's scissor "
                      "every N seconds");
 /*
@@ -1043,12 +1043,12 @@ REXCVAR_DEFINE_INT32(mw2mp_native_test_scissor_alternate_s, 0, "BO2",
  * which of the two dominates the 18.94 ms of the scene. The jump between mip levels is visible when moving
  * away: for measurement only.
  */
-REXCVAR_DEFINE_BOOL(mw2mp_native_test_point_mip, false, "BO2",
+REXCVAR_DEFINE_BOOL(mw2mp_native_test_point_mip, false, "MW2",
                     "Native renderer (test): the filter BETWEEN mip levels goes from linear to point (trilinear "
                     "-> bilinear). The TMU does half the work and the ALU does not change: if the scene gets faster, "
                     "sampling is the limit; if it does not move, the ALU is. The mip step shows when moving away: "
                     "measurement only");
-REXCVAR_DEFINE_INT32(mw2mp_native_test_point_mip_alternate_s, 0, "BO2",
+REXCVAR_DEFINE_INT32(mw2mp_native_test_point_mip_alternate_s, 0, "MW2",
                      "Native renderer (test): with N > 0 alternates mw2mp_native_test_point_mip every N seconds "
                      "(both samplers live in the cache, no stalls when switching)");
 /*
@@ -1069,11 +1069,11 @@ REXCVAR_DEFINE_INT32(mw2mp_native_test_point_mip_alternate_s, 0, "BO2",
  *
  * If geometry ever looks stuck or stretched, this is the first thing to disable.
  */
-REXCVAR_DEFINE_BOOL(mw2mp_native_dedupe_indices, true, "BO2",
+REXCVAR_DEFINE_BOOL(mw2mp_native_dedupe_indices, true, "MW2",
                     "Native renderer: if two draws of the same frame use the same 16-bit index range, it is scanned "
                     "and uploaded only once (DedupeIndices in mw2mp_native_vertex_dedupe.h); checked against a fresh "
                     "scan for the first 20,000 reuses");
-REXCVAR_DEFINE_BOOL(mw2mp_native_dedupe_keep_on_flush_waits, true, "BO2",
+REXCVAR_DEFINE_BOOL(mw2mp_native_dedupe_keep_on_flush_waits, true, "MW2",
                     "Native renderer: the upload dedupe (vertices and indices) keeps what it recorded across the "
                     "GPU's cache flush waits (g_syncs_on_flush_waits); checked by hash on the first 20,000 reuses and "
                     "every 512th frame. false = forget at every WAIT_REG_MEM, as before")
@@ -1108,13 +1108,13 @@ namespace mw2mp::native {
 std::atomic<uint32_t> g_probe_vertex_address{0};
 }
 
-REXCVAR_DEFINE_BOOL(mw2mp_native_vertex_cache, true, "BO2",
+REXCVAR_DEFINE_BOOL(mw2mp_native_vertex_cache, true, "MW2",
                     "Native renderer: vertex ranges whose guest bytes did not change since they were "
                     "last drawn are copied once into a persistent buffer and bound from there, instead of being "
                     "copied into every frame's upload buffer. With mw2mp_native_vertex_cache_by_writes (the default) "
                     "unchanged means no write stamped on their pages: +5.4 % on the console; with "
                     "hashes it cost about what it saved (#83, #88). false = copied every frame");
-REXCVAR_DEFINE_INT32(mw2mp_native_vertex_cache_mb, 96, "BO2",
+REXCVAR_DEFINE_INT32(mw2mp_native_vertex_cache_mb, 96, "MW2",
                      "Native renderer: size in MB of each of the vertex cache's two persistent buffers")
     .range(4, 256)
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
@@ -1123,7 +1123,7 @@ REXCVAR_DEFINE_INT32(mw2mp_native_vertex_cache_mb, 96, "BO2",
 // Run mw2sp_033 (boneyard, 32768): far worse than 256. Pool copies 3-4.8 GB per 10 s for 27-30 MB distinct, ~40
 // switches per 10 s, ring 120 ms a frame: the same memory comes with many fetch constants (another base and size per
 // surface of one buffer), so each "whole buffer" was another overlapping slice. Bigger buffers go by chunks (below).
-REXCVAR_DEFINE_INT32(mw2mp_native_vertex_cache_whole_kb, 256, "BO2",
+REXCVAR_DEFINE_INT32(mw2mp_native_vertex_cache_whole_kb, 256, "MW2",
                      "Native renderer: with the vertex cache by writes, a vertex buffer of at most this many KB is "
                      "cached whole (one copy for all its draws' sub-ranges). 0 = per draw range")
     .range(0, 4096)
@@ -1139,21 +1139,21 @@ REXCVAR_DEFINE_INT32(mw2mp_native_vertex_cache_whole_kb, 256, "BO2",
 // times, 654 MB of pool copies per 10 s for 18 MB distinct, ring 950 ms/s. The 014 chunks were counted from the fetch
 // constant's base, which differs between draws of the same memory (033), so they did not line up. Chunks now line up
 // with guest physical addresses: every draw whose range falls in the same chunks shares one copy, whatever its base.
-REXCVAR_DEFINE_INT32(mw2mp_native_vertex_cache_chunk_kb, 256, "BO2",
+REXCVAR_DEFINE_INT32(mw2mp_native_vertex_cache_chunk_kb, 256, "MW2",
                      "Native renderer: with the vertex cache by writes, a draw's range in a buffer bigger than "
                      "mw2mp_native_vertex_cache_whole_kb is cached rounded out to the chunks of this many KB of guest "
                      "physical memory it touches, so ranges that shift inside the same chunks share one copy, whatever "
                      "their fetch constant. 0 = the draw's own range")
     .range(0, 1024)
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
-REXCVAR_DEFINE_BOOL(mw2mp_native_vertex_cache_sum, true, "BO2",
+REXCVAR_DEFINE_BOOL(mw2mp_native_vertex_cache_sum, true, "MW2",
                     "Native renderer: the vertex cache checks a range with Fletcher sums of its 16-byte blocks "
                     "(ChangeSum, no multiplies) instead of XXH3 (~2 GB/s on the console). false = XXH3");
-REXCVAR_DEFINE_BOOL(mw2mp_native_vertex_cache_sum_ab, false, "BO2",
+REXCVAR_DEFINE_BOOL(mw2mp_native_vertex_cache_sum_ab, false, "MW2",
                     "Test, with mw2mp_benchmark_ab_s: A/B factor 2 is mw2mp_native_vertex_cache_sum (on = ChangeSum, "
                     "off = XXH3)")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
-REXCVAR_DEFINE_BOOL(mw2mp_native_vertex_cache_ab, false, "BO2",
+REXCVAR_DEFINE_BOOL(mw2mp_native_vertex_cache_ab, false, "MW2",
                     "Test, with mw2mp_benchmark_ab_s: A/B factor 1 is mw2mp_native_vertex_cache (on = the cache, off "
                     "= copied every frame)")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
@@ -1165,7 +1165,7 @@ REXCVAR_DEFINE_BOOL(mw2mp_native_vertex_cache_ab, false, "BO2",
  * they write), so its bytes are never read again. A sample of the hits is read back (the first 5,000, then 1 in
  * 128): a range whose bytes changed without a stamp marks its pages as always written.
  */
-REXCVAR_DEFINE_BOOL(mw2mp_native_vertex_cache_by_writes, true, "BO2",
+REXCVAR_DEFINE_BOOL(mw2mp_native_vertex_cache_by_writes, true, "MW2",
                     "Native renderer: with mw2mp_native_vertex_cache, a persistent vertex copy stays "
                     "valid while no write was stamped on its pages since (no hashing). false = the hash checks")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
@@ -1178,12 +1178,12 @@ REXCVAR_DEFINE_BOOL(mw2mp_native_vertex_cache_by_writes, true, "BO2",
  * hits per 10 s, and a handful of ranges that change without a stamp at match start, which the guard catches. On by
  * default.
  */
-REXCVAR_DEFINE_BOOL(mw2mp_native_index_cache, true, "BO2",
+REXCVAR_DEFINE_BOOL(mw2mp_native_index_cache, true, "MW2",
                     "Native renderer: with the vertex cache's pools and write stamps, a 16-bit index "
                     "range is converted once and bound from there while its pages are not written (no scan, no "
                     "upload). false = scanned and uploaded every draw")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
-REXCVAR_DEFINE_BOOL(mw2mp_native_index_cache_ab, false, "BO2",
+REXCVAR_DEFINE_BOOL(mw2mp_native_index_cache_ab, false, "MW2",
                     "Test, with mw2mp_benchmark_ab_s: A/B factor 1 is mw2mp_native_index_cache (on = cached, off = "
                     "scanned every draw)")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
@@ -1198,34 +1198,34 @@ REXCVAR_DEFINE_BOOL(mw2mp_native_index_cache_ab, false, "BO2",
 // The ring thread's cache misses. Measured on the OLED: the recorder queue in batches, +0.5 % and 1.2 % of
 // a core less on the ring thread; vertex inputs by VS generation, +0.3 % and 0.6 % of a core less. Both on by default.
 // (Smaller dedupe tables gained nothing, and searching the vertex caches by set heads cost 0.2 %.)
-REXCVAR_DEFINE_BOOL(mw2mp_native_deferred_batch, true, "BO2",
+REXCVAR_DEFINE_BOOL(mw2mp_native_deferred_batch, true, "MW2",
                     "Native renderer: the ring thread hands its queued Vulkan calls to the recorder in "
                     "512-byte batches and reads the recorder's progress only when out of room")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
-REXCVAR_DEFINE_BOOL(mw2mp_native_deferred_batch_ab, false, "BO2",
+REXCVAR_DEFINE_BOOL(mw2mp_native_deferred_batch_ab, false, "MW2",
                     "Test, with mw2mp_benchmark_ab_s: A/B factor 2 is mw2mp_native_deferred_batch")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 // The ring thread's memset, memcpy and memcmp of a draw's 688-byte shared words. Measured on the OLED over
 // 15 minutes: fewer copies +0.2 % (0.6 % of a core less on the ring), the double buffer +0.1 % (0.3 % less); both on.
-REXCVAR_DEFINE_BOOL(mw2mp_native_fewer_copies, true, "BO2",
+REXCVAR_DEFINE_BOOL(mw2mp_native_fewer_copies, true, "MW2",
                     "Native renderer: a draw that reuses the previous one's texture words skips their "
                     "zeroing, copy back and fetch snapshot, and the vertex sources are not zeroed")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
-REXCVAR_DEFINE_BOOL(mw2mp_native_fewer_copies_ab, false, "BO2",
+REXCVAR_DEFINE_BOOL(mw2mp_native_fewer_copies_ab, false, "MW2",
                     "Test, with mw2mp_benchmark_ab_s: A/B factor 1 is mw2mp_native_fewer_copies")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
-REXCVAR_DEFINE_BOOL(mw2mp_native_shared_swap, true, "BO2",
+REXCVAR_DEFINE_BOOL(mw2mp_native_shared_swap, true, "MW2",
                     "Native renderer: a draw's shared words are built in one of two buffers and a change "
                     "swaps them, instead of copying the block to the previous draw's")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
-REXCVAR_DEFINE_BOOL(mw2mp_native_shared_swap_ab, false, "BO2",
+REXCVAR_DEFINE_BOOL(mw2mp_native_shared_swap_ab, false, "MW2",
                     "Test, with mw2mp_benchmark_ab_s: A/B factor 2 is mw2mp_native_shared_swap")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
-REXCVAR_DEFINE_BOOL(mw2mp_native_input_front, true, "BO2",
+REXCVAR_DEFINE_BOOL(mw2mp_native_input_front, true, "MW2",
                     "Native renderer: a draw's vertex input found by its VS microcode's generation in a "
                     "small table first (no gather, hash and map walk when a VS comes back)")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
-REXCVAR_DEFINE_BOOL(mw2mp_native_input_front_ab, false, "BO2",
+REXCVAR_DEFINE_BOOL(mw2mp_native_input_front_ab, false, "MW2",
                     "Test, with mw2mp_benchmark_ab_s: A/B factor 1 is mw2mp_native_input_front")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 REXCVAR_DEFINE_BOOL(mw2mp_native_draw_census, false, "MW2",
@@ -1249,11 +1249,11 @@ REXCVAR_DEFINE_BOOL(mw2mp_native_repeat_textures, true, "MW2",
                     "for its constants, index range and textures (all already in the sampler caches) takes the "
                     "geometry variant plus new texture words. Self-checking like the repeat. false = off")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
-REXCVAR_DEFINE_BOOL(mw2mp_native_prefetch_cache_lines, true, "BO2",
+REXCVAR_DEFINE_BOOL(mw2mp_native_prefetch_cache_lines, true, "MW2",
                     "Native renderer: prefetch the vertex and index caches' table lines and write stamps "
                     "of each draw early. false = looked up cold")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
-REXCVAR_DEFINE_BOOL(mw2mp_native_prefetch_cache_lines_ab, false, "BO2",
+REXCVAR_DEFINE_BOOL(mw2mp_native_prefetch_cache_lines_ab, false, "MW2",
                     "Test, with mw2mp_benchmark_ab_s: A/B factor 1 is mw2mp_native_prefetch_cache_lines")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 /*
@@ -1261,19 +1261,19 @@ REXCVAR_DEFINE_BOOL(mw2mp_native_prefetch_cache_lines_ab, false, "BO2",
  * analysis). Shaders that address constants dynamically still get the whole block. On the console: +2.2 %, and the
  * VS constant traffic falls from 1.42 to ~0.8 GB per 10 s. On by default.
  */
-REXCVAR_DEFINE_BOOL(mw2mp_native_constants_used, true, "BO2",
+REXCVAR_DEFINE_BOOL(mw2mp_native_constants_used, true, "MW2",
                     "Native renderer: a draw copies only the float constants its shaders read (not "
                     "dynamically addressed ones). false = the whole block up to the highest register")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
-REXCVAR_DEFINE_BOOL(mw2mp_native_constants_used_ab, false, "BO2",
+REXCVAR_DEFINE_BOOL(mw2mp_native_constants_used_ab, false, "MW2",
                     "Test, with mw2mp_benchmark_ab_s: A/B factor 1 is mw2mp_native_constants_used")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 // The write stamps' 64 KB region summary (mw2mp_page_writes.h).
-REXCVAR_DEFINE_BOOL(mw2mp_native_stamp_regions, false, "BO2",
+REXCVAR_DEFINE_BOOL(mw2mp_native_stamp_regions, false, "MW2",
                     "Native renderer: the vertex, index and texture caches check a range's write stamps by "
                     "64 KB region first. false = page by page")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
-REXCVAR_DEFINE_BOOL(mw2mp_native_stamp_regions_ab, false, "BO2",
+REXCVAR_DEFINE_BOOL(mw2mp_native_stamp_regions_ab, false, "MW2",
                     "Test, with mw2mp_benchmark_ab_s: A/B factor 1 is mw2mp_native_stamp_regions")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 /*
@@ -1284,11 +1284,11 @@ REXCVAR_DEFINE_BOOL(mw2mp_native_stamp_regions_ab, false, "BO2",
  * reads has a write stamp since its last check (TextureUnwritten). On the console: +2.3 % in an A/B, ~2,200 rechecks
  * skipped per 10 s, and no change missed by the stamps.
  */
-REXCVAR_DEFINE_BOOL(mw2mp_native_texture_by_writes, true, "BO2",
+REXCVAR_DEFINE_BOOL(mw2mp_native_texture_by_writes, true, "MW2",
                     "Native renderer: a stable texture's periodic recheck is skipped (no hashing) while "
                     "no write was stamped on its pages since its last check. false = always hashed")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
-REXCVAR_DEFINE_BOOL(mw2mp_native_texture_by_writes_ab, false, "BO2",
+REXCVAR_DEFINE_BOOL(mw2mp_native_texture_by_writes_ab, false, "MW2",
                     "Test, with mw2mp_benchmark_ab_s: A/B factor 1 is mw2mp_native_texture_by_writes (on = skipped "
                     "by stamps, off = hashed)")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
@@ -1300,11 +1300,11 @@ REXCVAR_DEFINE_BOOL(mw2mp_native_texture_by_writes_ab, false, "BO2",
  * texture that changes every frame (a video) never gets there. On the console: ~1,150 young skips per 10 s, +0.4 %
  * (inside the noise), no change missed by the stamps. On by default, since it only removes work.
  */
-REXCVAR_DEFINE_BOOL(mw2mp_native_texture_by_writes_young, true, "BO2",
+REXCVAR_DEFINE_BOOL(mw2mp_native_texture_by_writes_young, true, "MW2",
                     "Native renderer: with mw2mp_native_texture_by_writes, the skips start after one "
                     "recheck that finds the texture unchanged (interval 2) instead of three (interval 8)")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
-REXCVAR_DEFINE_BOOL(mw2mp_native_texture_by_writes_young_ab, false, "BO2",
+REXCVAR_DEFINE_BOOL(mw2mp_native_texture_by_writes_young_ab, false, "MW2",
                     "Test, with mw2mp_benchmark_ab_s: A/B factor 1 is mw2mp_native_texture_by_writes_young (on = from "
                     "interval 2, off = from interval 8)")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
@@ -1323,16 +1323,16 @@ REXCVAR_DEFINE_BOOL(mw2mp_native_texture_by_writes_young_ab, false, "BO2",
 #else
 #define MW2MP_TEXTURE_REUSE_DEFAULT false
 #endif
-REXCVAR_DEFINE_BOOL(mw2mp_native_texture_reuse, MW2MP_TEXTURE_REUSE_DEFAULT, "BO2",
+REXCVAR_DEFINE_BOOL(mw2mp_native_texture_reuse, MW2MP_TEXTURE_REUSE_DEFAULT, "MW2",
                     "Native renderer: a new texture with the same guest bytes and shape as a texture "
                     "unused for 120 frames takes that one's image (nothing created, read or uploaded). false = always "
                     "a new image")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
-REXCVAR_DEFINE_BOOL(mw2mp_native_texture_reuse_ab, false, "BO2",
+REXCVAR_DEFINE_BOOL(mw2mp_native_texture_reuse_ab, false, "MW2",
                     "Test, with mw2mp_benchmark_ab_s: A/B factor 1 is mw2mp_native_texture_reuse (on = reused, off = "
                     "a new image)")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
-REXCVAR_DEFINE_BOOL(mw2mp_native_dedupe_vertices, true, "BO2",
+REXCVAR_DEFINE_BOOL(mw2mp_native_dedupe_vertices, true, "MW2",
                     "Native renderer: if two draws of the same frame ask for the same vertex range, it is "
                     "uploaded only once. The C6 report logs hits and MB saved");
 
@@ -1360,16 +1360,16 @@ REXCVAR_DEFINE_BOOL(mw2mp_native_dedupe_vertices, true, "BO2",
  * is written to the log and the path switches off for the rest of the run. What the guard cannot see is the GPU:
  * if anything looked wrong, mw2mp_native_zero_base_vertices = false restores the usual path.
  */
-REXCVAR_DEFINE_BOOL(mw2mp_native_zero_base_vertices, true, "BO2",
+REXCVAR_DEFINE_BOOL(mw2mp_native_zero_base_vertices, true, "MW2",
                     "Native renderer: in draws with a single vertex binding, the upload buffer stays "
                     "bound at 0 and the draw is offset with vertexOffset/firstVertex, without a vkCmdBindVertexBuffers "
                     "per draw. The GPU reads the same bytes. false = as before");
 
-REXCVAR_DEFINE_BOOL(mw2mp_native_ps_alpha_only, true, "BO2",
+REXCVAR_DEFINE_BOOL(mw2mp_native_ps_alpha_only, true, "MW2",
                     "Native renderer: in passes without a color target, compiles the pixel shader "
                     "without the color writes. The image does not change (Vulkan discards them) and the driver removes "
                     "as dead whatever only fed the color: the alpha test remains");
-REXCVAR_DEFINE_INT32(mw2mp_native_ps_alpha_only_alternate_s, 0, "BO2",
+REXCVAR_DEFINE_INT32(mw2mp_native_ps_alpha_only_alternate_s, 0, "MW2",
                      "Native renderer (test): with N > 0 alternates every N seconds compiling the pixel "
                      "shader with and without the color writes in colorless passes");
 
@@ -1399,12 +1399,12 @@ REXCVAR_DEFINE_INT32(mw2mp_native_ps_alpha_only_alternate_s, 0, "BO2",
  * The "C6 early Z" report says how many draws are fixed and how many cannot be because they write
  * depth: that second figure is the exact size of what only a depth pre-pass would solve.
  */
-REXCVAR_DEFINE_BOOL(mw2mp_native_early_z, true, "BO2",
+REXCVAR_DEFINE_BOOL(mw2mp_native_early_z, true, "MW2",
                     "Native renderer: in draws that test depth but do NOT write it (smoke, particles, glass, "
                     "decals), declare EarlyFragmentTests in the pixel shader so the GPU tests depth BEFORE shading "
                     "instead of after. Without this, any shader with an alpha test or kill shades all its fragments "
                     "even when they end up hidden. The image is identical: there is no Z write to move earlier");
-REXCVAR_DEFINE_INT32(mw2mp_native_early_z_alternate_s, 0, "BO2",
+REXCVAR_DEFINE_INT32(mw2mp_native_early_z_alternate_s, 0, "MW2",
                      "Native renderer (test): with N > 0 alternates the early depth test every N seconds, to "
                      "measure it A/B in the SAME session");
 /*
@@ -1449,7 +1449,7 @@ REXCVAR_DEFINE_INT32(mw2mp_native_early_z_alternate_s, 0, "BO2",
  * rest of the run. See kSkyFramesTest and CloseGuardSkyFrame. Enabling it cannot break the image; at worst
  * it does nothing.
  */
-REXCVAR_DEFINE_BOOL(mw2mp_native_postponed_sky, true, "BO2",
+REXCVAR_DEFINE_BOOL(mw2mp_native_postponed_sky, true, "MW2",
                     "Native renderer: postpone the sky draw until after the opaque draws of the same pass, "
                     "instead of drawing it first on an empty Z-buffer. It is a single opaque draw that tests depth and "
                     "does not write it, so the image is identical: what is overwritten today, tomorrow the depth test "
@@ -1468,7 +1468,7 @@ REXCVAR_DEFINE_BOOL(mw2mp_native_postponed_sky, true, "BO2",
  * be skipped entirely. If it writes depth, only its color write is removed (mask 0), which already saves
  * the blending and the write.
  */
-REXCVAR_DEFINE_BOOL(mw2mp_native_skip_invisible, true, "BO2",
+REXCVAR_DEFINE_BOOL(mw2mp_native_skip_invisible, true, "MW2",
                     "Native renderer: skip the draws that cannot change a single pixel (a blend that copies the "
                     "target, or an alpha test with the NEVER function). The image is identical by definition");
 /*
@@ -1476,40 +1476,40 @@ REXCVAR_DEFINE_BOOL(mw2mp_native_skip_invisible, true, "BO2",
  * guard (the first 200,000 cases, then 1 in 4,096, also go through the usual path and are compared; on a
  * difference, MISMATCH in the log and the saving is switched off).
  */
-REXCVAR_DEFINE_BOOL(mw2mp_native_framing_cache, true, "BO2",
+REXCVAR_DEFINE_BOOL(mw2mp_native_framing_cache, true, "MW2",
                     "Native renderer: a draw's viewport, ndc and scissor are reused while neither "
                     "the framing registers (their generation) nor the pass change. Checks itself. false = computed for "
                     "every draw, as before");
-REXCVAR_DEFINE_BOOL(mw2mp_native_useful_height_memo, true, "BO2",
+REXCVAR_DEFINE_BOOL(mw2mp_native_useful_height_memo, true, "MW2",
                     "Native renderer: the target's useful height is noted in the map element of the "
                     "last pitch, without looking it up for every draw. Checks itself. false = as before");
-REXCVAR_DEFINE_BOOL(mw2mp_native_fast_pass_key, true, "BO2",
+REXCVAR_DEFINE_BOOL(mw2mp_native_fast_pass_key, true, "MW2",
                     "Native renderer: if a draw's targets are the same bytes as the open pass's, "
                     "their XXH3 is not recomputed. Checks itself. false = XXH3 on every draw");
-REXCVAR_DEFINE_BOOL(mw2mp_native_cvars_per_frame, true, "BO2",
+REXCVAR_DEFINE_BOOL(mw2mp_native_cvars_per_frame, true, "MW2",
                     "Native renderer: mw2mp_native_ps_alpha_only and "
                     "mw2mp_native_no_ps_without_color (and their alternations) are read once per frame and not on every "
                     "colorless draw. false = as before");
-REXCVAR_DEFINE_INT32(mw2mp_native_no_ps_without_color_alternate_s, 0, "BO2",
+REXCVAR_DEFINE_INT32(mw2mp_native_no_ps_without_color_alternate_s, 0, "MW2",
                      "Native renderer (test): with N > 0 alternates every N seconds building the pipeline "
                      "with and without a fragment stage in colorless draws, to compare captures of the same place with "
                      "the game paused");
-REXCVAR_DEFINE_BOOL(mw2mp_native_no_ps_without_color, true, "BO2",
+REXCVAR_DEFINE_BOOL(mw2mp_native_no_ps_without_color, true, "MW2",
                     "Native renderer: in draws that write no color, builds the pipeline without a "
                     "fragment stage if the pixel shader can neither discard pixels nor write depth. The image does not "
                     "change and the GPU does not shade (shadow map)");
-REXCVAR_DEFINE_STRING(mw2mp_native_diag_skip_ps, "", "BO2",
+REXCVAR_DEFINE_STRING(mw2mp_native_diag_skip_ps, "", "MW2",
                       "Native renderer: comma-separated PS numbers whose draws are not recorded (tests only, to find a "
                       "draw)");
 // In NVK for Tegra the memory type the SDK picks for uploads (without HOST_CACHED) is an NvMap without CPU
 // caching, and writing there is slow on the console (other Switch projects measured the same). All vertex
 // copies go to this buffer, so its memory type can be chosen for an A/B test.
-REXCVAR_DEFINE_INT32(mw2mp_native_upload_memory, 0, "BO2",
+REXCVAR_DEFINE_INT32(mw2mp_native_upload_memory, 0, "MW2",
                      "Native renderer: upload buffer memory. 0 = the one the SDK chooses (on the Switch, without CPU "
                      "cache), 1 = with CPU cache (published with vkFlushMappedMemoryRanges before submitting), 2 = "
                      "without CPU cache")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
-REXCVAR_DEFINE_BOOL(mw2mp_native_shared_constants_cache, true, "BO2",
+REXCVAR_DEFINE_BOOL(mw2mp_native_shared_constants_cache, true, "MW2",
                     "Native renderer: each draw's shared constants (488 bytes) in a small buffer "
                     "WITH CPU cache, separate from the upload buffer. Measured in 155: writing them uncached cost 2.0 "
                     "us per draw and cached 0.4. Only with constants by UBO")
@@ -1530,7 +1530,7 @@ REXCVAR_DEFINE_BOOL(mw2mp_native_shared_constants_cache, true, "BO2",
  * VkPipeline; on a difference, MISMATCH in the log and it switches off for the rest of the run. false = map
  * only.
  */
-REXCVAR_DEFINE_BOOL(mw2mp_native_direct_pipelines, true, "BO2",
+REXCVAR_DEFINE_BOOL(mw2mp_native_direct_pipelines, true, "MW2",
                     "Native renderer: a direct-mapped cache of 256 pipelines in front of "
                     "PipelineOf's map. Same result as the map (checks itself). false = only the map, as before");
 /*
@@ -1540,7 +1540,7 @@ REXCVAR_DEFINE_BOOL(mw2mp_native_direct_pipelines, true, "BO2",
  * "C6 pipeline changes" lines every 20 s. false = nothing is counted.
  */
 // Disabled by default: it was only a measurement and it has already produced its data.
-REXCVAR_DEFINE_BOOL(mw2mp_native_count_pipeline_changes, false, "BO2",
+REXCVAR_DEFINE_BOOL(mw2mp_native_count_pipeline_changes, false, "MW2",
                     "Native renderer: counts what changes at each vkCmdBindPipeline (measurement "
                     "only, changes no draw). C6 pipeline changes lines every 20 s. false = not counted");
 /*
@@ -1554,7 +1554,7 @@ REXCVAR_DEFINE_BOOL(mw2mp_native_count_pipeline_changes, false, "BO2",
  * log and it switches off for the rest of the run. false = the usual key.
  */
 // Off by default. Measured: PipelineOf gets more expensive and no avoidable bind was found.
-REXCVAR_DEFINE_BOOL(mw2mp_native_canonical_key, false, "BO2",
+REXCVAR_DEFINE_BOOL(mw2mp_native_canonical_key, false, "MW2",
                     "Native renderer: the pipeline is looked up with the key in canonical form (only "
                     "what Vulkan looks at): fewer pipelines and fewer vkCmdBindPipeline. Checks itself. false = the "
                     "usual key");
@@ -1566,7 +1566,7 @@ REXCVAR_DEFINE_BOOL(mw2mp_native_canonical_key, false, "BO2",
  * nothing bound. It removes the repeated vkCmdBindPipeline of a pass's first draw (the counter's "same key
  * after starting a pass"). false = forgotten at every pass.
  */
-REXCVAR_DEFINE_BOOL(mw2mp_native_pipeline_across_passes, true, "BO2",
+REXCVAR_DEFINE_BOOL(mw2mp_native_pipeline_across_passes, true, "MW2",
                     "Native renderer: the bound pipeline is kept when a pass of the same command "
                     "buffer begins (Vulkan keeps it). false = bound again in every pass, as before");
 /*
@@ -1582,7 +1582,7 @@ REXCVAR_DEFINE_BOOL(mw2mp_native_pipeline_across_passes, true, "BO2",
  */
 // Off by default. Measured: each BindPipeline goes from 2.95 to 4.36 us and PipelineOf from 0.21 to 0.47 us per
 // draw, for only 13 % fewer binds: a net loss of ~1 ms of ring time per frame.
-REXCVAR_DEFINE_BOOL(mw2mp_native_dynamic_state, false, "BO2",
+REXCVAR_DEFINE_BOOL(mw2mp_native_dynamic_state, false, "MW2",
                     "Native renderer: cull mode, front face, topology, Z, stencil, bias and restart "
                     "with vkCmdSet* (Vulkan 1.3 EDS1/EDS2) instead of in the pipeline: fewer vkCmdBindPipeline. Checks "
                     "itself. false = everything in the pipeline, as before");
@@ -1594,11 +1594,11 @@ REXCVAR_DEFINE_BOOL(mw2mp_native_dynamic_state, false, "BO2",
  * guard as phase 1. false = blending in the pipeline.
  */
 // Off by default, for the same measured reason as mw2mp_native_dynamic_state (it goes with it).
-REXCVAR_DEFINE_BOOL(mw2mp_native_dynamic_state3, false, "BO2",
+REXCVAR_DEFINE_BOOL(mw2mp_native_dynamic_state3, false, "MW2",
                     "Native renderer: blend, equation and color mask with vkCmdSet* "
                     "(VK_EXT_extended_dynamic_state3) instead of in the pipeline. Checks itself. false = in the "
                     "pipeline, as before");
-REXCVAR_DEFINE_BOOL(mw2mp_native_diag_upload_memory, true, "BO2",
+REXCVAR_DEFINE_BOOL(mw2mp_native_diag_upload_memory, true, "MW2",
                     "Native renderer: when the upload buffer is created, measures once how many MB/s the CPU writes "
                     "into each visible memory type (8 MB) and how much publishing them costs")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
@@ -1797,7 +1797,7 @@ void ApplyTreatmentVisual(float* c, int mode) {
  * only grows, and is rounded up to a multiple of 64. Until there is data the whole pass is opened, so the
  * first frame never clips too much.
  */
-REXCVAR_DEFINE_BOOL(mw2mp_native_useful_area_pass, true, "BO2",
+REXCVAR_DEFINE_BOOL(mw2mp_native_useful_area_pass, true, "MW2",
                     "Native renderer: open each pass on the rectangle the game really uses instead of on the "
                     "whole image. The targets' height is deduced from the pitch, so the scene opens 880x880 to draw "
                     "880x720. The image is identical: Vulkan only loads and stores the renderArea");
@@ -2157,7 +2157,7 @@ static_assert([] {
 
 }  // namespace
 
-// The store watch of a diagnostic build (MW2_WATCH_STORES, app/src/bo2zm_guest_memory.h): the physical range the
+// The store watch of a diagnostic build (MW2_WATCH_STORES, mw2mp_guest_memory.h): the physical range the
 // generated code's stores are checked against (the model lighting volume, set in UpdateVolume; empty = nothing hits),
 // and who wrote into it: host return address (inside the generated function, sub_XXXXXXXX in the ELF) and guest lr
 // (its caller), with a count. Defined in every build; only the watch build calls mw2_watch_hit.
@@ -8340,7 +8340,7 @@ class VulkanDrawsImpl final : public VulkanDraws {
   // The thread: the requests' vkBindImageMemory calls, in order. It sleeps on a decision taken under the
   // lock; it never spins. It does not write to the log (the ring records the figures in ReportBindings).
   void LoopBindings() {
-    rex::thread::set_current_thread_name("BO2 texture binds");
+    rex::thread::set_current_thread_name("MW2 texture binds");
 #if REX_PLATFORM_SWITCH
     const bool priority_ok = RexSwitchSetCurrentThreadPriorityOk(int(bindings_priority_));
 #else
@@ -9383,7 +9383,7 @@ class VulkanDrawsImpl final : public VulkanDraws {
   // under the lock; it never spins. It does not write to the log (the ring records the figures when
   // collecting).
   void LoopHashes() {
-    rex::thread::set_current_thread_name("BO2 texture hashes");
+    rex::thread::set_current_thread_name("MW2 texture hashes");
 #if REX_PLATFORM_SWITCH
     const bool priority_ok = RexSwitchSetCurrentThreadPriorityOk(int(hashes_priority_));
     const bool core_ok = RexSwitchSetCurrentThreadCore(int(hashes_core_));
@@ -9823,7 +9823,7 @@ class VulkanDrawsImpl final : public VulkanDraws {
 #endif
       try {
         copies_thread_ = std::thread([this, ring_core] {
-          rex::thread::set_current_thread_name("BO2 vertex copies");
+          rex::thread::set_current_thread_name("MW2 vertex copies");
 #if REX_PLATFORM_SWITCH
           // mw2mp_native_upload_thread_priority (see the cvar).
           const int32_t priority = REXCVAR_GET(mw2mp_native_upload_thread_priority);
@@ -10522,7 +10522,7 @@ class VulkanDrawsImpl final : public VulkanDraws {
   void StartWriterCache() {
     if (!writer_cache_.joinable()) {
       writer_cache_ = std::thread([this] {
-        rex::thread::set_current_thread_name("BO2 pipeline cache");
+        rex::thread::set_current_thread_name("MW2 pipeline cache");
         WriterCacheMain();
       });
     }
@@ -12482,7 +12482,7 @@ class VulkanDrawsImpl final : public VulkanDraws {
     return &input_;
   }
 
-  // Diagnostics (mw2mp_native_dump_texture): header "BO2T", the 6 fetch words, then the base level's
+  // Diagnostics (mw2mp_native_dump_texture): header "MW2T", the 6 fetch words, then the base level's
   // bytes (`bytes`: rows and columns aligned to 32 blocks) and 1 MB from the mip address (if there is one).
   void DumpTextureMw2mp(const uint32_t* f, uint64_t address, uint64_t bytes, uint64_t dir_mips) {
     // "mips": the first DXT1 texture of 256 texels or more with a mip chain.
@@ -12503,7 +12503,7 @@ class VulkanDrawsImpl final : public VulkanDraws {
     const std::filesystem::path path =
         rex::filesystem::GetExecutableFolder() / fmt::format("dump_{:08X}.bin", uint32_t(address));
     std::ofstream output(path, std::ios::binary);
-    output.write("BO2T", 4);
+    output.write("MW2T", 4);
     output.write(reinterpret_cast<const char*>(f), sizeof(uint32_t) * 6);
     const uint64_t mips = dir_mips && dir_mips + (1u << 20) <= kMemoryPhysical ? (1u << 20) : 0;
     const uint64_t sizes[2] = {bytes, mips};
@@ -12514,7 +12514,7 @@ class VulkanDrawsImpl final : public VulkanDraws {
     }
     g_mw2mp_dump_texture.store((address << 32) | ((dir_mips ? dir_mips + mips : address + bytes) - address),
                                   std::memory_order_relaxed);
-    REXLOG_INFO("[native] BO2: texture {:08X} dumped to {} ({} bytes; fetch {:08X} {:08X} {:08X} {:08X} {:08X} {:08X})",
+    REXLOG_INFO("[native] texture {:08X} dumped to {} ({} bytes; fetch {:08X} {:08X} {:08X} {:08X} {:08X} {:08X})",
                 uint32_t(address), path.string(), bytes, f[0], f[1], f[2], f[3], f[4], f[5]);
   }
   bool dump_mw2mp_ = false;
@@ -15726,7 +15726,7 @@ class VulkanDrawsImpl final : public VulkanDraws {
   }
 
   void SpirvLoop() {
-    rex::thread::set_current_thread_name("BO2 SPIR-V reads");
+    rex::thread::set_current_thread_name("MW2 SPIR-V reads");
 #if REX_PLATFORM_SWITCH
     RexSwitchSetCurrentThreadPriorityOk(0x2E);  // as the copy thread: above the guest, below the ring
 #endif
@@ -17282,7 +17282,7 @@ class VulkanDrawsImpl final : public VulkanDraws {
     map_warm_running_.store(threads, std::memory_order_release);
     const auto start = std::chrono::steady_clock::now();
     const auto work = [this, library, start, name = map_](uint32_t index) {
-      rex::thread::set_current_thread_name("BO2 map pipelines");
+      rex::thread::set_current_thread_name("MW2 map pipelines");
 #if REX_PLATFORM_SWITCH
       RexSwitchSetCurrentThreadPriorityOk(0x2E);  // as the precompile: below the UI thread and the ring
       RexSwitchSetCurrentThreadCore(int(index % 3));
@@ -17596,7 +17596,7 @@ class VulkanDrawsImpl final : public VulkanDraws {
   // Helper, the second thread (mw2mp_native_prewarm_threads): it walks the list from its end while no
   // match is on, only into the driver's cache (it writes no state), and stops where the first thread has been.
   void LoopPrewarm(bool helper) {
-    rex::thread::set_current_thread_name(helper ? "BO2 pipeline prewarm 2" : "BO2 pipeline prewarm");
+    rex::thread::set_current_thread_name(helper ? "MW2 pipeline prewarm 2" : "MW2 pipeline prewarm");
     int32_t priority = -1;
 #if REX_PLATFORM_SWITCH
     // The lowest priority the system accepts, and never above the guest's (0x3B): compiling at the priority
@@ -17725,7 +17725,7 @@ class VulkanDrawsImpl final : public VulkanDraws {
     std::atomic<uint32_t> done{0}, compiled{0}, no_shader{0}, other_mode{0}, failed{0};
     std::atomic<uint64_t> ns_compiled{0}, ns_cached{0};
     const auto work = [&](uint32_t index) {
-      rex::thread::set_current_thread_name("BO2 pipeline precompile");
+      rex::thread::set_current_thread_name("MW2 pipeline precompile");
 #if REX_PLATFORM_SWITCH
       // Below the UI thread (0x2C), which draws the screen, and the ring (0x2D); one core each.
       RexSwitchSetCurrentThreadPriorityOk(0x2E);
@@ -18034,7 +18034,7 @@ class VulkanDrawsImpl final : public VulkanDraws {
   // helper: the second thread (mw2mp_native_compile_threads), which only takes a job outside a match and while
   // another one waits behind it, so the first thread always has one.
   void CompilePipelinesLoop(bool helper) {
-    rex::thread::set_current_thread_name(helper ? "BO2 pipeline compiles 2" : "BO2 pipeline compiles");
+    rex::thread::set_current_thread_name(helper ? "MW2 pipeline compiles 2" : "MW2 pipeline compiles");
 #if REX_PLATFORM_SWITCH
     RexSwitchSetCurrentThreadPriorityOk(0x3B);  // the guest threads' priority: it shares their cores
 #endif

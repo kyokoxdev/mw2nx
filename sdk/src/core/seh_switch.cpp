@@ -24,8 +24,8 @@
  *    would ever run: the likely outcome would be std::terminate.
  *
  * 3. Nothing uses it here. generate_exception_handlers is false by default, and
- *    it is commented out in app/overrides.toml. With that off, the SEH macros are
- *    not emitted.
+ *    neither mw2mp/overrides.toml nor mw2sp/overrides.toml sets it. With that off,
+ *    the SEH macros are not emitted.
  *
  * So a fault inside an SEH scope is treated like any other unresolved fault: a
  * fatal stop with the register dump. It is recorded in the thread's SEH state in

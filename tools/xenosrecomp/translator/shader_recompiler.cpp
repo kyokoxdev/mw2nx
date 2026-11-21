@@ -19,14 +19,14 @@ static constexpr const char* USAGE_TYPES[] =
     "float4", // POSITION
     "float4", // BLENDWEIGHT
     "uint4", // BLENDINDICES
-#ifdef BO2ZM_RECOMP
+#ifdef MW2_RECOMP
     "float4", // NORMAL: stored as 16-bit integers or as float
 #else
     "uint4", // NORMAL
 #endif
     "float4", // PSIZE
     "float4", // TEXCOORD
-#ifdef BO2ZM_RECOMP
+#ifdef MW2_RECOMP
     "float4", // TANGENT
     "float4", // BINORMAL
 #else
@@ -126,7 +126,7 @@ static constexpr std::pair<DeclUsage, size_t> INTERPOLATORS[] =
     { DeclUsage::TexCoord, 15 },
     { DeclUsage::Color, 0 },
     { DeclUsage::Color, 1 }
-#ifdef BO2ZM_RECOMP
+#ifdef MW2_RECOMP
     // Shaders can declare and consume COLOR2..5.
     , { DeclUsage::Color, 2 }
     , { DeclUsage::Color, 3 }
@@ -175,7 +175,7 @@ void ShaderRecompiler::printDstSwizzle01(uint32_t dstRegister, uint32_t dstSwizz
     }
 }
 
-// BO2ZM_RECOMP: true if a fetch writes at least one fetched component (X..W). A
+// MW2_RECOMP: true if a fetch writes at least one fetched component (X..W). A
 // mask of only constant 0/1 or "keep" components fetches nothing on Xenos; the
 // statement would print as "rN. = ...;", which is not HLSL (two of BO2's pixel
 // shaders do this).
@@ -217,7 +217,7 @@ void ShaderRecompiler::recompile(const VertexFetchInstruction& instr, uint32_t a
         closePredicate();
     const size_t predicateMark = out.size();
 
-    const size_t fetchStart = out.size();  // BO2ZM_RECOMP
+    const size_t fetchStart = out.size();  // MW2_RECOMP
     indent();
     print("r{}.", instr.dstRegister);
     printDstSwizzle(instr.dstSwizzle, false);
@@ -228,8 +228,8 @@ void ShaderRecompiler::recompile(const VertexFetchInstruction& instr, uint32_t a
     if (findResult == vertexElements.end())
         throw std::runtime_error(fmt::format("vertex FETCH without a declared element (address {})", address));
 
-#ifdef BO2ZM_RECOMP
-    // BO2ZM: D3D patches the fetch swizzle according to the vertex declaration; the
+#ifdef MW2_RECOMP
+    // bo2-360-nx: D3D patches the fetch swizzle according to the vertex declaration; the
     // native renderer passes the mapping through g_InputRemap.
     int32_t remapLocation = -1;
     for (auto& usageLocation : USAGE_LOCATIONS)
@@ -248,7 +248,7 @@ void ShaderRecompiler::recompile(const VertexFetchInstruction& instr, uint32_t a
     {
     // Normals, tangents and binormals are declared as float4 (USAGE_TYPES): the
     // native renderer supplies them already normalized through the Vulkan format.
-#ifndef BO2ZM_RECOMP
+#ifndef MW2_RECOMP
     case DeclUsage::Normal:
     case DeclUsage::Tangent:
     case DeclUsage::Binormal:
@@ -266,7 +266,7 @@ void ShaderRecompiler::recompile(const VertexFetchInstruction& instr, uint32_t a
 
     switch (findResult->second.usage)
     {
-#ifndef BO2ZM_RECOMP
+#ifndef MW2_RECOMP
     case DeclUsage::Normal:
     case DeclUsage::Tangent:
     case DeclUsage::Binormal:
@@ -279,7 +279,7 @@ void ShaderRecompiler::recompile(const VertexFetchInstruction& instr, uint32_t a
         break;
     }
 
-#ifdef BO2ZM_RECOMP
+#ifdef MW2_RECOMP
     if (remapLocation >= 0)
         print("), g_InputRemap({}))", remapLocation);
 #endif
@@ -288,7 +288,7 @@ void ShaderRecompiler::recompile(const VertexFetchInstruction& instr, uint32_t a
     printDstSwizzle(instr.dstSwizzle, true);
 
     out += ";\n";
-    if (!writesAnyComponent(instr.dstSwizzle))  // BO2ZM_RECOMP
+    if (!writesAnyComponent(instr.dstSwizzle))  // MW2_RECOMP
         out.resize(fetchStart);
 
     printDstSwizzle01(instr.dstRegister, instr.dstSwizzle);
@@ -298,7 +298,7 @@ void ShaderRecompiler::recompile(const VertexFetchInstruction& instr, uint32_t a
 
 void ShaderRecompiler::recompile(const TextureFetchInstruction& instr, bool bicubic)
 {
-    // BO2ZM_RECOMP: SetTextureLod stores the LOD that later fetches with use_register_lod read (Xenia keeps it
+    // MW2_RECOMP: SetTextureLod stores the LOD that later fetches with use_register_lod read (Xenia keeps it
     // per thread the same way). It was dropped, together with every fetch's LOD mode.
     if (instr.opcode == FetchOpcode::SetTextureLod)
     {
@@ -361,9 +361,9 @@ void ShaderRecompiler::recompile(const TextureFetchInstruction& instr, bool bicu
     }
 #endif
 
-    const size_t fetchStart = out.size();  // BO2ZM_RECOMP
-    // BO2ZM_RECOMP diagnostics: the fetch instruction's own filter and LOD fields.
-    if (getenv("BO2ZM_TFETCH_NOTES"))
+    const size_t fetchStart = out.size();  // MW2_RECOMP
+    // MW2_RECOMP diagnostics: the fetch instruction's own filter and LOD fields.
+    if (getenv("MW2_TFETCH_NOTES"))
     {
         indent();
         print("// tfetch denorm {} mip {} min {} mag {} complod {} reglod {} bias {}\n", uint32_t(instr.texCoordDenorm), uint32_t(instr.mipFilter),
@@ -384,7 +384,7 @@ void ShaderRecompiler::recompile(const TextureFetchInstruction& instr, bool bicu
             out += "1.0 - ";
     #endif
 
-        out += "(tfetch";  // BO2ZM_RECOMP: times {}_FetchScale below
+        out += "(tfetch";  // MW2_RECOMP: times {}_FetchScale below
         break;
     }
     case FetchOpcode::GetTextureWeights:
@@ -424,7 +424,7 @@ void ShaderRecompiler::recompile(const TextureFetchInstruction& instr, bool bicu
         out += "Bicubic";
 #endif
 
-    // BO2ZM_RECOMP: the fetch's own LOD mode. With use_computed_lod off the hardware does not take the LOD from
+    // MW2_RECOMP: the fetch's own LOD mode. With use_computed_lod off the hardware does not take the LOD from
     // the gradients: it samples at the LOD bias, plus the SetTextureLod register with use_register_lod (Xenia's
     // translators: SampleL). BO2 fetches most world textures this way, at level 0, and does not keep their mip
     // chains valid in memory, so sampling them with implicit LOD read other data: speckled, blotchy surfaces.
@@ -441,12 +441,12 @@ void ShaderRecompiler::recompile(const TextureFetchInstruction& instr, bool bicu
     // mw2nx: a 1D texture is read through the 2D heap (tfetch1D, shader_common.h): Xenos keeps 1D textures as one row.
     print("({0}_Texture{1}DescriptorIndex, {0}_SamplerDescriptorIndex, ", constNamePtr,
           instr.dimension == TextureDimension::Texture1D ? std::string_view("2D") : dimension);
-    // BO2ZM_RECOMP: unnormalized (texel) coordinates, used by BO2's post-processing (its luminance pass among
+    // MW2_RECOMP: unnormalized (texel) coordinates, used by BO2's post-processing (its luminance pass among
     // them). They were taken as 0..1, sampled off the image and read black: no exposure, a much too dark image.
     const bool denormalized = instr.texCoordDenorm && instr.dimension == TextureDimension::Texture2D;
     if (denormalized)
         print("normalize2D({0}_Texture2DDescriptorIndex, ", constNamePtr);
-    // BO2ZM_RECOMP: normalized 2D coordinates times guest size / host size of the slot (1 unless the host image is
+    // MW2_RECOMP: normalized 2D coordinates times guest size / host size of the slot (1 unless the host image is
     // larger than the texture, as a resolve padded to its pitch).
     const bool scaleCoords = !denormalized && instr.dimension == TextureDimension::Texture2D;
     if (scaleCoords)
@@ -468,16 +468,16 @@ void ShaderRecompiler::recompile(const TextureFetchInstruction& instr, bool bicu
         break;
     }
 
-    out += lod_text;  // BO2ZM_RECOMP
+    out += lod_text;  // MW2_RECOMP
     if (instr.opcode == FetchOpcode::TextureFetch)
-        print(") * {}_FetchScale).", constNamePtr);  // BO2ZM_RECOMP: the fetch constant's scale
+        print(") * {}_FetchScale).", constNamePtr);  // MW2_RECOMP: the fetch constant's scale
     else
         out += ").";
 
     printDstSwizzle(instr.dstSwizzle, true);
 
     out += ";\n";
-    if (!writesAnyComponent(instr.dstSwizzle))  // BO2ZM_RECOMP
+    if (!writesAnyComponent(instr.dstSwizzle))  // MW2_RECOMP
         out.resize(fetchStart);
 
     printDstSwizzle01(instr.dstRegister, instr.dstSwizzle);
@@ -1107,7 +1107,7 @@ void ShaderRecompiler::recompile(const AluInstruction& instr)
             break;
 
         case AluScalarOpcode::SetpInv:
-#ifdef BO2ZM_RECOMP
+#ifdef MW2_RECOMP
             // Xenos: with src == 1 the counter goes back to 0 (Xenia's ucode.h, kSetpInv). Without that
             // case the counter stayed at 1 and later p0 blocks did not run.
             print("p0 ? 0.0 : ({0} == 0.0 ? 1.0 : {0})", op(SCALAR_0));
@@ -1317,14 +1317,14 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
             {
                 uint32_t tailCount = (isPixelShader ? 224 : 256) - constantInfo->registerIndex;
 
-                // BO2ZM: dynamic UBO or pointer, depending on SPEC_CONSTANT_CONSTANTS_UBO.
-                println("#define {}(INDEX) select((INDEX) < {}, (BO2ZM_UBO ? g_Ubo{}.v[{} + min(INDEX, {})] : vk::RawBufferLoad<float4>(g_PushConstants.{}ShaderConstants + ({} + min(INDEX, {})) * 16, 0x10)), 0.0)",
+                // bo2-360-nx: dynamic UBO or pointer, depending on SPEC_CONSTANT_CONSTANTS_UBO.
+                println("#define {}(INDEX) select((INDEX) < {}, (MW2_UBO ? g_Ubo{}.v[{} + min(INDEX, {})] : vk::RawBufferLoad<float4>(g_PushConstants.{}ShaderConstants + ({} + min(INDEX, {})) * 16, 0x10)), 0.0)",
                     constantName, tailCount, shaderName, constantInfo->registerIndex.get(), tailCount - 1,
                     shaderName, constantInfo->registerIndex.get(), tailCount - 1);
             }
             else
             {
-                println("#define {} (BO2ZM_UBO ? g_Ubo{}.v[{}] : vk::RawBufferLoad<float4>(g_PushConstants.{}ShaderConstants + {}, 0x10))",
+                println("#define {} (MW2_UBO ? g_Ubo{}.v[{}] : vk::RawBufferLoad<float4>(g_PushConstants.{}ShaderConstants + {}, 0x10))",
                     constantName, shaderName, constantInfo->registerIndex.get(), shaderName, constantInfo->registerIndex * 16);
             }
             
@@ -1338,33 +1338,33 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
         {
             for (size_t j = 0; j < std::size(TEXTURE_DIMENSIONS); j++)
             {
-                println("#define {}_Texture{}DescriptorIndex (BO2ZM_UBO ? BO2ZM_SHARED_UINT({}) : vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + {}))",
+                println("#define {}_Texture{}DescriptorIndex (MW2_UBO ? MW2_SHARED_UINT({}) : vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + {}))",
                     constantName, TEXTURE_DIMENSIONS[j], j * 64 + constantInfo->registerIndex * 4, j * 64 + constantInfo->registerIndex * 4);
             }
 
-            println("#define {}_SamplerDescriptorIndex (BO2ZM_UBO ? BO2ZM_SHARED_UINT({}) : vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + {}))",
+            println("#define {}_SamplerDescriptorIndex (MW2_UBO ? MW2_SHARED_UINT({}) : vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + {}))",
                 constantName, std::size(TEXTURE_DIMENSIONS) * 64 + constantInfo->registerIndex * 4, std::size(TEXTURE_DIMENSIONS) * 64 + constantInfo->registerIndex * 4);
 
             // 1/size of the host image of that slot, which the renderer writes at byte
             // 360 + slot * 8 of the shared constants (right after g_InputRemap).
             {
                 const uint32_t invBase = 360 + constantInfo->registerIndex * 8;
-                println("#define {}_InvSize (BO2ZM_UBO ? float2(BO2ZM_SHARED_FLOAT({}), BO2ZM_SHARED_FLOAT({})) : vk::RawBufferLoad<float2>(g_PushConstants.SharedConstants + {}))",
+                println("#define {}_InvSize (MW2_UBO ? float2(MW2_SHARED_FLOAT({}), MW2_SHARED_FLOAT({})) : vk::RawBufferLoad<float2>(g_PushConstants.SharedConstants + {}))",
                     constantName, invBase, invBase + 4, invBase);
             }
-            // BO2ZM_RECOMP: the fetch constant's scale for that slot (2^exp_adjust, times the format's maximum when
+            // MW2_RECOMP: the fetch constant's scale for that slot (2^exp_adjust, times the format's maximum when
             // num_format is integer), which the renderer writes at byte 488 + slot * 4. BO2's tonemap samples the scene
             // with exp_adjust +1, and its luminance chain reads integer textures with exp_adjust -11.
             {
                 const uint32_t scaleBase = 488 + constantInfo->registerIndex * 4;
-                println("#define {}_FetchScale (BO2ZM_UBO ? BO2ZM_SHARED_FLOAT({}) : vk::RawBufferLoad<float>(g_PushConstants.SharedConstants + {}))",
+                println("#define {}_FetchScale (MW2_UBO ? MW2_SHARED_FLOAT({}) : vk::RawBufferLoad<float>(g_PushConstants.SharedConstants + {}))",
                     constantName, scaleBase, scaleBase);
             }
 
-            // BO2ZM_RECOMP: normalized 2D coordinate scale of the slot (guest size / host size), at byte 560 + slot * 8.
+            // MW2_RECOMP: normalized 2D coordinate scale of the slot (guest size / host size), at byte 560 + slot * 8.
             {
                 const uint32_t coordBase = 560 + constantInfo->registerIndex * 8;
-                println("#define {}_FetchScaleCoord (BO2ZM_UBO ? float2(BO2ZM_SHARED_FLOAT({}), BO2ZM_SHARED_FLOAT({})) : vk::RawBufferLoad<float2>(g_PushConstants.SharedConstants + {}))",
+                println("#define {}_FetchScaleCoord (MW2_UBO ? float2(MW2_SHARED_FLOAT({}), MW2_SHARED_FLOAT({})) : vk::RawBufferLoad<float2>(g_PushConstants.SharedConstants + {}))",
                     constantName, coordBase, coordBase + 4, coordBase);
             }
 
@@ -1445,7 +1445,7 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
             println("\t#define {} (1 << {})", constantName, constantInfo->registerIndex + (isPixelShader ? 16 : 0));
             // CTAB numbers the pixel booleans b0.. while CF uses 128..
             // The g_Booleans packing keeps its 16 bits per stage.
-#ifdef BO2ZM_RECOMP
+#ifdef MW2_RECOMP
             boolConstants.emplace(constantInfo->registerIndex + (isPixelShader ? 128 : 0), constantName);
 #else
             boolConstants.emplace(constantInfo->registerIndex, constantName);
@@ -1679,7 +1679,7 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
     out += "\tint aL = 0;\n";
     out += "\tbool p0 = false;\n";
     out += "\tfloat ps = 0.0;\n";
-    out += "\tfloat tfetchLod = 0.0;\n";  // BO2ZM_RECOMP: SetTextureLod
+    out += "\tfloat tfetchLod = 0.0;\n";  // MW2_RECOMP: SetTextureLod
     if (isPixelShader)
     {
 #ifdef UNLEASHED_RECOMP
@@ -2042,8 +2042,8 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
                     out += '{';
 
                     indent();
-                #ifdef BO2ZM_RECOMP
-                    // BO2ZM: the 8 comparison functions (alphaTestValue, shader_common.h).
+                #ifdef MW2_RECOMP
+                    // bo2-360-nx: the 8 comparison functions (alphaTestValue, shader_common.h).
                     out += "\tclip(alphaTestValue(oC0.w));\n";
                 #else
                     out += "\tclip(oC0.w - g_AlphaThreshold);\n";
@@ -2052,7 +2052,7 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
                     indent();
                     out += "}";
 
-                #ifdef BO2ZM_RECOMP
+                #ifdef MW2_RECOMP
                     // mw2nx: a k_8_8_8_8_GAMMA render target stores Xenos's piecewise gamma of the color; the host
                     // image is plain RGBA8, so the shader encodes it (SPEC_CONSTANT_GAMMA_OUTPUT, set per draw).
                     if (reinterpret_cast<const PixelShader*>(shader)->outputs & PIXEL_SHADER_OUTPUT_COLOR0)
@@ -2085,7 +2085,7 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
                     if (!hasMtxProjection)
                 #endif
                     {
-                    #ifdef BO2ZM_RECOMP
+                    #ifdef MW2_RECOMP
                         // To host clip space (ndc_scale/ndc_offset from
                         // draw.cpp): draws in pixels with clipping disabled.
                         out += "\toPos.xy = oPos.xy * g_NdcScale + g_NdcOffset * oPos.w;\n";

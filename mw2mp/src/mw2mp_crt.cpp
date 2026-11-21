@@ -125,7 +125,7 @@ REX_HOOK_RAW(sub_824142F8) { StampedSkin<__imp__sub_824142F8, 6, 4>(ctx, base); 
 // ping-pongs that line 28 times a pass. This is the same function without that no-op store: every load, every job run
 // (sub_823B6D70), every real hint clear (stwcx. of 0x7FFFFFFF), the ResetEvent (sub_8228BD78) and the order are the
 // game's. mw2mp_native_job_scan false = the recompiled one.
-REXCVAR_DEFINE_BOOL(mw2mp_native_job_scan, true, "BO2",
+REXCVAR_DEFINE_BOOL(mw2mp_native_job_scan, true, "MW2",
                     "Campaign: the job-queue scan (sub_823B7430) runs natively, without the recompiled code's atomic "
                     "write-back of the queue hint on every queue it visits. false = the recompiled scan");
 REX_EXTERN(__imp__sub_823B7430);

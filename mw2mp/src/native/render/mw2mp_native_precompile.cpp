@@ -38,21 +38,21 @@
 #define XXH_INLINE_ALL
 #include <xxhash.h>
 
-REXCVAR_DEFINE_BOOL(mw2mp_native_precompile, true, "BO2",
+REXCVAR_DEFINE_BOOL(mw2mp_native_precompile, true, "MW2",
                     "Native renderer: at start, when the pipelines earlier sessions created are not known to be "
                     "compiled for this build, driver and shader pack (cache/mw2mp_native_pipelines.ok), they are "
                     "compiled before the game starts, on every core, behind a progress screen that only comes up if "
                     "the driver really has to compile one. false = they are compiled in the background during the "
                     "menus, as before (mw2mp_native_prewarm_pipelines)")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
-REXCVAR_DEFINE_BOOL(mw2mp_native_test_cold_pipelines, false, "BO2",
+REXCVAR_DEFINE_BOOL(mw2mp_native_test_cold_pipelines, false, "MW2",
                     "Test helper: the session starts with an empty pipeline cache but keeps the list, and ignores the "
                     "stamp file, as after a driver change; on the Switch Mesa's own shader cache is off too "
                     "(mw2mp_switch.cpp): every listed pipeline is really compiled by the precompile (or by the prewarm "
                     "thread with mw2mp_native_precompile off). The PC's driver may still answer from its own cache. "
                     "The file is then saved as usual")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
-REXCVAR_DEFINE_INT32(mw2mp_native_test_precompile_screen_s, 0, "BO2",
+REXCVAR_DEFINE_INT32(mw2mp_native_test_precompile_screen_s, 0, "MW2",
                      "Test helper, with a precompile: its screen comes up at once (not at the first pipeline the "
                      "driver has to compile) and the game waits at least this many seconds, to see or capture it. 0 = "
                      "off")

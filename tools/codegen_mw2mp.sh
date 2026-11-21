@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
-# MW2 multiplayer's tools/codegen.sh (Linux host): codegen of mw2mp/ and the fix-up steps, in order.
+# Codegen of mw2mp/ (MW2 multiplayer, Linux host) and the fix-up steps, in order.
 # Needs work/load_tu6 (tools/install/tu6_setup.py) and sdk/out/linux-amd64/rexglue (tools/build_host_linux.sh).
-# localize.py is left out until mw2mp has a locals list (docs/MW2.md, milestone 5).
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 GEN="$ROOT/mw2mp/generated/default_mp"

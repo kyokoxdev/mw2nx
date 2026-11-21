@@ -124,7 +124,7 @@ REXCVAR_DEFINE_INT32(mw2mp_adaptive_on_ms, 450, "Graphics",
                      "Adaptive shadows: draw work in ms per second below which they come back")
     .range(50, 1000);
 
-REXCVAR_DEFINE_INT32(mw2mp_preset_test_s, 0, "BO2",
+REXCVAR_DEFINE_INT32(mw2mp_preset_test_s, 0, "MW2",
                      "Test helper: in a level, step to the next lower preset every N seconds (high, medium, low, "
                      "very_low, high, ...), logged as '[preset] test'. 0 = off")
     .range(0, 3600)

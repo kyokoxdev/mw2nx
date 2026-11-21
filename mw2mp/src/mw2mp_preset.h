@@ -72,14 +72,14 @@ uint16_t OnPad(const mw2mp::pad::Pad& pad);
 // where no server of its own runs and the server's entities stay empty. Any thread.
 bool ClientInGame();
 
-// The campaign program (bo2cp_autoexec.cpp), once a frame: whether its front-end level ("frontend") is the map
+// From bo2-360-nx's campaign program (its autoexec), once a frame: whether its front-end level ("frontend") is the map
 // loaded. While it is, the preset is capped at mw2mp_front_end_preset (see mw2mp_preset.cpp). Main thread.
 void SetFrontEnd(bool on);
 // Whether the campaign's front-end level is loaded and gets its own settings (not during mw2mp_front_end_test_s's turns
 // with the player's preset; any thread), and its frame rate cap (mw2mp_front_end_fps_cap, 0 = none).
 bool FrontEnd();
 int FrontEndFpsCap();
-// The campaign's front-end backdrop (bo2cp_direct_campaign): the renderer says when the scene is kept (still and
+// The campaign's front-end backdrop (bo2-360-nx): the renderer says when the scene is kept (still and
 // settled), so the menus' black veil over it can fade out (menus.lua). Any thread.
 void SetFrontEndSceneKept(bool kept);
 // While the menus' veil covers the front end (the console command "mw2mp_input_block 1|0" from menus.lua), the game

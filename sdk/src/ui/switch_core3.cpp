@@ -14,7 +14,7 @@
  *    RexSwitchCore3Configure.
  *  - Threads whose name starts with a rule's prefix are kept when they name themselves (pthread_setname_np) or, for
  *    those already named, when the rules arrive, with the mask and priority the SDK gives them (their home). While the
- *    game's setting asks for four cores (RexSwitchCore3SetActive, bo2zm_cpu_cores) they run where the rule says and
+ *    game's setting asks for four cores (RexSwitchCore3SetActive, mw2mp_cpu_cores) they run where the rule says and
  *    keep it whatever the SDK sets later (svcSetThreadPriority is wrapped too); the setting at 3 brings them home at
  *    once. Nothing needs a restart.
  *  - A meter thread on core 3 reads that core's idle time every second (InfoType_IdleTickCount answers only for the
@@ -74,7 +74,7 @@ Placed g_placed[kMaxPlaced];
 std::atomic<size_t> g_placed_count{0};
 std::mutex g_placed_mutex;  // moving the threads (switch on / off) against the SDK setting them meanwhile
 
-// bo2zm_cpu_cores (the game's setting, Extras > EXPERIMENTAL): 4 = the rules apply, when the process has core 3.
+// mw2mp_cpu_cores (the game's setting, Extras > EXPERIMENTAL): 4 = the rules apply, when the process has core 3.
 std::atomic<bool> g_active{false};
 
 std::atomic<bool> g_clamp{true};
@@ -350,7 +350,7 @@ std::atomic<int> g_hog_seconds{2};
 std::atomic<bool> g_tripped{false};
 
 void MeterMain(void*) {
-  RexSwitchPerfSetThreadName(threadGetCurHandle(), "BO2 core 3 meter");
+  RexSwitchPerfSetThreadName(threadGetCurHandle(), "MW2 core 3 meter");
   u64 last_tick = armGetSystemTick(), last_idle = IdleHere(), last_ours = OursOnCore3();
   u64 window_elapsed = 0, window_busy = 0, window_ours = 0;
   u32 window_worst = 0;
@@ -450,7 +450,7 @@ Result __wrap_svcSetThreadPriority(Handle handle, u32 priority) {
   return __real_svcSetThreadPriority(handle, priority);
 }
 
-// The game's setting (bo2zm_cpu_cores): true moves the threads the rules name to core 3, false brings them back to
+// The game's setting (mw2mp_cpu_cores): true moves the threads the rules name to core 3, false brings them back to
 // cores 0-2 at their own priorities, both at once. Without core 3 (a normal launch) nothing moves either way.
 // Returns whether the rules apply now.
 bool RexSwitchCore3SetActive(bool on) {

@@ -1,6 +1,7 @@
-"""Register locals across BO2's setjmp/longjmp (Com_Error recovery): check, and fix the generated code.
+"""Register locals across the game's setjmp/longjmp (Com_Error recovery): check, and fix the generated code.
 
-The codegen turns `bl setjmp` (setjmp_address in app/overrides.toml, 0x82918CA0) into
+The codegen turns `bl setjmp` (setjmp_address in mw2mp/overrides.toml; the addresses below are from bo2-360-nx,
+where this tool comes from) into
     env = ctx; temp.s64 = ppc_setjmp(ctx.r3.u32); if (temp.s64 != 0) ctx = env;
 so a longjmp restores ctx as it was at the setjmp. The game's setjmp also saves CR (mfcr), f14-f31, r13-r31 and
 v64-v127 in the buffer (disassembly at 0x82918CB8-0x82918E..), and its longjmp (0x82919E50) puts them back. With
@@ -22,7 +23,7 @@ mw2sp_031) coalesced the plain const copy sj_r26 with r26 itself (one stack slot
 sub_822AD7E0's normal path set r26 = r19 (0x9002), a script error longjmp'd back, and the recovery read
 table[r26 + i*4] at guest 0x9002 -> access violation on the Server thread. The asm tells GCC the copy may hold any
 value, so it gets its own slot. --fix also upgrades sites rewritten in the older `const auto` form.
-It is idempotent, and has to run after every codegen (tools/codegen.sh does).
+It is idempotent, and has to run after every codegen (tools/codegen_mw2mp.sh and tools/codegen_mw2sp.sh do).
 
 Without --fix it reports, per site, the locals that matter: those both written after the setjmp at a point where a
 call (a possible longjmp) can still follow, and read after the setjmp returns, before being written. A site with
@@ -186,7 +187,7 @@ def main():
         n, total = unprotected(a.gen)
         if n:
             sys.exit(f"setjmp_locals --verify: {n} of {total} setjmp sites use register locals without the longjmp fix: "
-                     f"the generated code was not made by tools/codegen.sh (run it)")
+                     f"the generated code was not made by tools/codegen_mw2mp.sh / codegen_mw2sp.sh (run it)")
         print(f"setjmp_locals --verify: ok ({total} sites, none unprotected)")
         return
     if a.fix:

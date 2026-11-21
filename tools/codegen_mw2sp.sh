@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
-# MW2 campaign's tools/codegen.sh (Linux host): codegen of mw2sp/ and the fix-up steps, in order.
+# Codegen of mw2sp/ (MW2 campaign, Linux host) and the fix-up steps, in order.
 # Needs work/load_tu6 (tools/install/tu6_setup.py) and sdk/out/linux-amd64/rexglue (tools/build_host_linux.sh).
-# localize.py is left out until mw2sp has a locals list (docs/MW2.md, milestone 5).
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 GEN="$ROOT/mw2sp/generated/default"

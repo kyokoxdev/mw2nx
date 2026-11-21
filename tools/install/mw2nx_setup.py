@@ -225,7 +225,7 @@ def shaders(pack, dst, work, tools, dxc_exe, jobs):
     say("  " + run(os.path.join(tools, "zone_containers" + exe), dirs["containers"], *zone_files).strip()
         .splitlines()[-1])
     shutil.rmtree(dirs["zones"])
-    say("  " + run(os.path.join(tools, "bo2zm_hlsl" + exe), dirs["containers"], dirs["hlsl"],
+    say("  " + run(os.path.join(tools, "mw2_hlsl" + exe), dirs["containers"], dirs["hlsl"],
                    os.path.join(tools, "shader_common.h")).strip().splitlines()[-1])
     hlsl = sorted(os.path.join(r, f) for r, _, fs in os.walk(dirs["hlsl"]) for f in fs if f.endswith(".hlsl"))
     failed, done = [], 0
@@ -240,7 +240,7 @@ def shaders(pack, dst, work, tools, dxc_exe, jobs):
                 print(f"\r  dxc: {done} of {len(hlsl)}", end="", flush=True)
     say(f"\n  dxc: {len(hlsl) - len(failed)} compiled, {len(failed)} left out (the game draws without them)")
     spvpack, spvidx = os.path.join(dst, pack + ".spvpack"), os.path.join(dst, pack + ".spvidx")
-    pack_exe = os.path.join(tools, "bo2zm_pack" + exe)
+    pack_exe = os.path.join(tools, "mw2_pack" + exe)
     run(pack_exe, dirs["containers"], dirs["spirv"], spvpack + ".part")
     os.replace(spvpack + ".part", spvpack)
     run(pack_exe, "--index", spvpack, spvidx)
@@ -283,7 +283,7 @@ def main():
     if not a.no_shaders:
         tools = os.path.join(HERE, "bin", name)
         if name == "linux":  # a zip unpacked without its file modes
-            for f in ("zone_containers", "bo2zm_hlsl", "bo2zm_pack"):
+            for f in ("zone_containers", "mw2_hlsl", "mw2_pack"):
                 os.chmod(os.path.join(tools, f), 0o755)
         dxc_exe = dxc(cache, name)
         for pack in ("mw2mp_shaders", "mw2sp_shaders"):

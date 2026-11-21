@@ -1,33 +1,36 @@
 #!/usr/bin/env python3
-"""Does a PGO profile still apply to the code? (Switch, BO2_PGO=use)
+"""Does a PGO profile still apply to the code? (Switch, MW2_PGO=use)
 
-  python tools/pgo_check.py [--build app/out/switch[-<tag>]] [--pgo DIR] [--file bo2zm_recomp.N.cpp] [--min 0.5]
-  python tools/pgo_check.py --native [--build ...] [--pgo DIR] [--min 0.5]
+  python3 -I tools/pgo_check.py [--program mp|sp] [--build DIR] [--pgo DIR] [--file mw2mp_recomp.N.cpp] [--min 0.5]
+  python3 -I tools/pgo_check.py --native [--program mp|sp] [--build DIR] [--pgo DIR] [--min 0.5]
+
+--program picks Multiplayer (mp, default: mw2mp/out/switch, data/pgo) or the Campaign (sp: mw2sp/out/switch,
+data/pgo-sp). Run it with no build running: each check compiles a generated file (2-3 GB).
 
 GCC finds a function's counts in the profile by a hash of its name, but drops them, silently, when the function's
 control flow no longer has the checksum it had in the training build: the warning (-Wcoverage-mismatch) points at
-DEFINE_REX_FUNC, which comes from the precompiled header, a system header, and app/CMakeLists.txt also passes
+DEFINE_REX_FUNC, which comes from the precompiled header, a system header, and the CMakeLists also pass
 -Wno-coverage-mismatch. So a profile trained before the generated code or its flags changed (plain guest memory, a
 code generator fix) can stop applying to the hot functions without a word (once, a profile two days old gave counts
-to 7 of the 35 trained functions of bo2zm_recomp.10.cpp and none to its hottest one; retrained, the build was 9 %
+to 7 of the 35 trained functions of one generated file and none to its hottest one; retrained, the build was 9 %
 faster).
 
 This compiles one generated file the way the build does (flags from <build>/build.ninja, without LTO), with the
 profile and -fdump-ipa-profile, in a scratch folder below the build folder laid out like it (the profile's file names
 come from the object's path), and counts the functions that read non-zero counts against the functions the profile
 has non-zero counts for. By default the file is the one with the most trained functions. Exit 1 if the share is
-below --min (default 0.5): retrain (BO2_PGO=generate, notes in app/build_switch.sh).
+below --min (default 0.5): retrain (MW2_PGO=generate, notes in mw2mp/build_switch.sh).
 
---native does the same for each of the app's own instrumented files the profile has (the renderer, culling, audio...;
-the list in app/CMakeLists.txt), which change far more often than the generated code: it prints each file's share and
-the share over all of them. A file that is no longer in the build, or has no counts, is skipped. A profile trained on
-the very code it is checked against reads about 98 % there (908 of 922 functions in one check).
+--native does the same for each of the program's own instrumented files the profile has (the renderer, the native
+system, the CRT copies...; the list in mw2mp/CMakeLists.txt), which change far more often than the generated code: it
+prints each file's share and the share over all of them. A file that is no longer in the build, or has no counts, is
+skipped. A profile trained on the very code it is checked against reads about 98 % there.
 
 Each file is compiled under the source path its build.ninja gives: GCC mixes the file name into the profile id of
 every function not visible outside its file (anonymous namespaces, static functions, lambdas: most of the renderer),
-so another spelling of the path finds none of their counts (joining the path itself, this tool read 46-48 % for a
-fitting profile). The same holds for real builds: a build from another checkout (a worktree) gets no
-counts for those functions from a profile trained in the main checkout; train in the checkout that builds.
+so another spelling of the path finds none of their counts. The same holds for real builds: a build from another
+checkout (a worktree) gets no counts for those functions from a profile trained in the main checkout; train in the
+checkout that builds.
 """
 import argparse
 import glob
@@ -39,15 +42,11 @@ import subprocess
 import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DKA = os.environ.get("DEVKITPRO", "")
-if not os.path.isdir(os.path.join(DKA, "devkitA64")):  # unset, or MSYS-style (/opt/devkitpro)
-    DKA = "C:/devkitPro"
-GCC = os.path.join(DKA, "devkitA64", "bin", "aarch64-none-elf-g++.exe")
-DUMP = os.path.join(DKA, "devkitA64", "bin", "aarch64-none-elf-gcov-dump.exe")
-OBJ_DIR = "CMakeFiles/bo2zm_recomp.dir/generated/default_mp"
-GEN_PREFIX = "CMakeFiles#bo2zm_recomp.dir#generated#default_mp#"
-APP_PREFIX = "CMakeFiles#bo2zm.dir#"
-
+DKA = os.environ.get("DEVKITPRO") or os.path.expanduser("~/devkitpro")
+GCC = os.path.join(DKA, "devkitA64", "bin", "aarch64-none-elf-g++")
+DUMP = os.path.join(DKA, "devkitA64", "bin", "aarch64-none-elf-gcov-dump")
+# program: (build folder, profile folder in the data folder, generated code folder)
+PROGRAMS = {"mp": ("mw2mp", "pgo", "default_mp"), "sp": ("mw2sp", "pgo-sp", "default")}
 
 def trained(gcda):
     """Number of functions with non-zero arc counts in one profile file."""
@@ -97,36 +96,43 @@ def reading(build, pgo, obj):
 
 
 def check_generated(a):
+    prog, _, gen = PROGRAMS[a.program]
+    obj_dir = f"CMakeFiles/{prog}_recomp.dir/generated/{gen}"
+    prefix = obj_dir.replace("/", "#") + "#"
     if a.file:
         name = a.file
-        n_trained = trained(os.path.join(a.pgo, GEN_PREFIX + name + ".gcda"))
+        n_trained = trained(os.path.join(a.pgo, prefix + name + ".gcda"))
     else:
         best = (-1, None)
-        for g in glob.glob(os.path.join(a.pgo, GEN_PREFIX + "bo2zm_recomp.*.cpp.gcda")):
-            best = max(best, (trained(g), os.path.basename(g)[len(GEN_PREFIX):-len(".gcda")]))
+        for g in glob.glob(os.path.join(a.pgo, prefix + f"{prog}_recomp.*.cpp.gcda")):
+            best = max(best, (trained(g), os.path.basename(g)[len(prefix):-len(".gcda")]))
         n_trained, name = best
         if name is None:
             sys.exit(f"pgo_check: no profile files in {a.pgo}")
-    n = reading(a.build, a.pgo, f"{OBJ_DIR}/{name}.obj")
+    n = reading(a.build, a.pgo, f"{obj_dir}/{name}.obj")
     if n is None:
         sys.exit(f"pgo_check: {name} is not in {a.build}/build.ninja (configure the build first)")
     share = n / n_trained if n_trained else 0.0
     print(f"pgo_check: {name}: {n} functions read non-zero counts, of {n_trained} trained in {a.pgo} "
           f"({100 * share:.0f} %)")
     if share < a.min:
-        print(f"pgo_check: the profile no longer matches the generated code: retrain it (BO2_PGO=generate)",
+        print(f"pgo_check: the profile no longer matches the generated code: retrain it (MW2_PGO=generate)",
               file=sys.stderr)
         sys.exit(1)
 
 
 def check_native(a):
+    prefix = f"CMakeFiles#{PROGRAMS[a.program][0]}.dir#"
     total_read = total_trained = 0
-    for gcda in sorted(glob.glob(os.path.join(a.pgo, APP_PREFIX + "*.gcda"))):
-        rel = os.path.basename(gcda)[len(APP_PREFIX):-len(".gcda")].replace("#", "/")  # src/native/...cpp
+    for gcda in sorted(glob.glob(os.path.join(a.pgo, prefix + "*.gcda"))):
+        # CMakeFiles/mw2mp.dir/src/...cpp.obj (devkitA64's toolchain file names objects .obj)
+        obj = os.path.basename(gcda)[:-len(".gcda")].replace("#", "/") + ".obj"
+        rel = obj[len(prefix):-len(".obj")]
+        rel = rel.removeprefix(ROOT.lstrip("/") + "/")  # mw2sp builds mw2mp/src by absolute path
         n_trained = trained(gcda)
-        if n_trained == 0 or not os.path.isfile(os.path.join(ROOT, "app", rel)):
+        if n_trained == 0:
             continue
-        n = reading(a.build, a.pgo, f"CMakeFiles/bo2zm.dir/{rel}.obj")
+        n = reading(a.build, a.pgo, obj)
         if n is None:
             print(f"pgo_check: {rel}: not in the build, skipped")
             continue
@@ -135,42 +141,39 @@ def check_native(a):
         print(f"pgo_check: {rel}: {n} functions read non-zero counts, of {n_trained} trained "
               f"({100 * n / n_trained:.0f} %)")
     share = total_read / total_trained if total_trained else 0.0
-    print(f"pgo_check: the app's native code: {total_read} of {total_trained} trained functions read counts "
+    print(f"pgo_check: the program's native code: {total_read} of {total_trained} trained functions read counts "
           f"({100 * share:.0f} %) in {a.pgo}")
     if share < a.min:
-        print(f"pgo_check: the profile no longer matches the app's native code: retrain it (BO2_PGO=generate)",
+        print(f"pgo_check: the profile no longer matches the program's native code: retrain it (MW2_PGO=generate)",
               file=sys.stderr)
         sys.exit(1)
 
 
 def data_dir():
-    """The data folder: $BO2_DATA, else the path in bo2_data.txt at the repository's root, else <root>/data. Git Bash
-    exports Windows paths as /e/..., which Windows Python cannot open, so those are turned back into E:/..."""
-    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    value = os.environ.get("BO2_DATA", "")
+    """The data folder tools/data_dir.sh prints: $MW2_DATA, else the path in mw2_data.txt at the repository's root,
+    else <root>/data."""
+    value = os.environ.get("MW2_DATA", "")
     if not value:
         try:
-            with open(os.path.join(root, "bo2_data.txt"), encoding="utf-8") as f:
+            with open(os.path.join(ROOT, "mw2_data.txt"), encoding="utf-8") as f:
                 value = f.read().strip()
         except OSError:
             value = ""
-    value = value or os.path.join(root, "data")
-    m = re.match(r"^/([a-zA-Z])/(.*)$", value)
-    if m:
-        value = f"{m.group(1).upper()}:/{m.group(2)}"
-    return os.path.abspath(value)
+    return os.path.abspath(value or os.path.join(ROOT, "data"))
 
 
 def main():
     ap = argparse.ArgumentParser()
-    tag = os.environ.get("BO2_BUILD_TAG")
-    ap.add_argument("--build", default=os.path.join(ROOT, "app", "out", "switch" + (f"-{tag}" if tag else "")))
-    ap.add_argument("--pgo", default=os.path.join(data_dir(), "pgo"))
-    ap.add_argument("--file", help="bo2zm_recomp.N.cpp (default: the one with the most trained functions)")
-    ap.add_argument("--native", action="store_true", help="check the app's own instrumented files instead")
+    ap.add_argument("--program", choices=PROGRAMS, default="mp", help="mp = Multiplayer, sp = Campaign")
+    ap.add_argument("--build", help="default: mw2mp/out/switch or mw2sp/out/switch")
+    ap.add_argument("--pgo", help="default: <data>/pgo or <data>/pgo-sp")
+    ap.add_argument("--file", help="mw2mp_recomp.N.cpp (default: the one with the most trained functions)")
+    ap.add_argument("--native", action="store_true", help="check the program's own instrumented files instead")
     ap.add_argument("--min", type=float, default=0.5, help="exit 1 below this share")
     a = ap.parse_args()
-    a.build = os.path.abspath(a.build)
+    prog, pgo, _ = PROGRAMS[a.program]
+    a.build = os.path.abspath(a.build or os.path.join(ROOT, prog, "out", "switch"))
+    a.pgo = os.path.abspath(a.pgo or os.path.join(data_dir(), pgo))
     if a.native:
         check_native(a)
     else:

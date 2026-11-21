@@ -15,10 +15,11 @@ words into segments. For each segment:
                                         -> continuation: extend that function
   - otherwise                           -> standalone function at segment start
 
-usage: python tools/codegen_gaps.py [--min 8]   (run from the repository root)
-Writes app/gaps.toml and the report work/codegen_gaps.txt (git-ignored, beside the image it reads). For another
-project (the campaign's default.xex):
-  --gen DIR --prefix NAME --image FILE --text START:END --image-size BYTES --toml FILE --report FILE
+usage: python3 -I tools/codegen_gaps.py [--program mp|sp] [--min 8]
+--program mp (default) reads mw2mp/generated/default_mp and work/dump_tu6/default_mp.image.bin and writes
+mw2mp/gaps.toml and the report work/codegen_gaps_mw2mp.txt (git-ignored, beside the image); sp does the same for the
+Campaign (mw2sp/, default.image.bin). .text and the image size come from the dump's <xex>.summary.json. Each path can
+be overridden: --gen DIR --prefix NAME --image FILE --text START:END --image-size BYTES --toml FILE --report FILE
 """
 import argparse
 import bisect
@@ -31,20 +32,18 @@ from collections import defaultdict
 import capstone
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-GEN = os.path.join(ROOT, "app", "generated", "default_mp")
-IMAGE = os.path.join(ROOT, "work", "dump_tu18", "default_mp.image.bin")
-OUT_TOML = os.path.join(ROOT, "app", "gaps.toml")
-OUT_REPORT = os.path.join(ROOT, "work", "codegen_gaps.txt")
+# program: (project folder and generated file prefix, generated code folder, xex name in work/dump_tu6)
+PROGRAMS = {"mp": ("mw2mp", "default_mp", "default_mp"), "sp": ("mw2sp", "default", "default")}
+DUMP = os.path.join(ROOT, "work", "dump_tu6")
 BASE = 0x82000000
-TEXT = (0x82160000, 0x82160000 + 0x7DEB24)  # TU18 .text
-IMAGE_RANGE = (BASE, BASE + 47054848)        # TU18 image
+GEN = IMAGE = OUT_TOML = OUT_REPORT = PREFIX = ""
+TEXT = IMAGE_RANGE = (0, 0)  # from the dump's summary.json (main)
 
 DEFINE = re.compile(r"^DEFINE_REX_FUNC\(([^)]+)\)")
 LABEL = re.compile(r"\bloc_([0-9A-F]{8})\b")
 RETADDR = re.compile(r"ctx\.lr = 0x([0-9A-Fa-f]{8})")
 
 data = b""
-PREFIX = "bo2zm"
 md = capstone.Cs(capstone.CS_ARCH_PPC, capstone.CS_MODE_32 | capstone.CS_MODE_BIG_ENDIAN)
 
 
@@ -176,22 +175,37 @@ def declared_sizes(path):
 def main():
     ap = argparse.ArgumentParser()
     global GEN, IMAGE, OUT_TOML, OUT_REPORT, TEXT, IMAGE_RANGE, PREFIX, data
+    ap.add_argument("--program", choices=PROGRAMS, default="mp", help="mp = Multiplayer, sp = Campaign")
     ap.add_argument("--min", type=int, default=8)
-    ap.add_argument("--gen", default=GEN, help="the generated code's folder")
-    ap.add_argument("--prefix", default=PREFIX, help="the project name in the generated file names")
-    ap.add_argument("--image", default=IMAGE, help="the decrypted image")
-    ap.add_argument("--text", help=".text as START:END in hex (default: default_mp's)")
-    ap.add_argument("--image-size", type=lambda v: int(v, 0), help="the image's size in bytes")
-    ap.add_argument("--toml", default=OUT_TOML)
-    ap.add_argument("--report", default=OUT_REPORT)
-    ap.add_argument("--overrides", default=os.path.join(ROOT, "app", "overrides.toml"),
+    ap.add_argument("--gen", help="the generated code's folder")
+    ap.add_argument("--prefix", help="the project name in the generated file names")
+    ap.add_argument("--image", help="the decrypted image")
+    ap.add_argument("--text", help=".text as START:END in hex (default: from the image's summary.json)")
+    ap.add_argument("--image-size", type=lambda v: int(v, 0), help="the image's size in bytes (default: likewise)")
+    ap.add_argument("--toml")
+    ap.add_argument("--report")
+    ap.add_argument("--overrides",
                     help="the project's overrides.toml: its [rexcrt] functions are dropped by the codegen on purpose")
     a = ap.parse_args()
-    GEN, IMAGE, OUT_TOML, OUT_REPORT, PREFIX = a.gen, a.image, a.toml, a.report, a.prefix
+    proj, gen, xex = PROGRAMS[a.program]
+    GEN = a.gen or os.path.join(ROOT, proj, "generated", gen)
+    PREFIX = a.prefix or proj
+    IMAGE = a.image or os.path.join(DUMP, xex + ".image.bin")
+    OUT_TOML = a.toml or os.path.join(ROOT, proj, "gaps.toml")
+    OUT_REPORT = a.report or os.path.join(ROOT, "work", f"codegen_gaps_{proj}.txt")
+    a.overrides = a.overrides or os.path.join(ROOT, proj, "overrides.toml")
+    summary = os.path.join(os.path.dirname(IMAGE), os.path.basename(IMAGE).replace(".image.bin", ".summary.json"))
+    if (not a.text or not a.image_size) and os.path.exists(summary):
+        s = json.load(open(summary))
+        text = next(x for x in s["sections"] if x["name"] == ".text")
+        TEXT = (int(text["address"], 16), int(text["address"], 16) + text["size"])
+        IMAGE_RANGE = (BASE, BASE + s["image_size"])
     if a.text:
         TEXT = tuple(int(v, 16) for v in a.text.split(":"))
     if a.image_size:
         IMAGE_RANGE = (BASE, BASE + a.image_size)
+    if not TEXT[1] or not IMAGE_RANGE[1]:
+        raise SystemExit(f"codegen_gaps: no {summary}: pass --text and --image-size")
     data = open(IMAGE, "rb").read()
     native = native_functions(a.overrides)
 
@@ -258,7 +272,7 @@ def main():
 
     header = [
         "# ============================================================================",
-        f"#  Code gaps in the TU18 image {os.path.basename(IMAGE)} - GENERATED by tools/codegen_gaps.py",
+        f"#  Code gaps in the TU6 image {os.path.basename(IMAGE)} - GENERATED by tools/codegen_gaps.py",
         "#  Do not edit by hand: fix the tool or move an entry into overrides.toml.",
         f"#  {len(starts)} functions measured, {mismatches} files skipped (name/address mismatch)",
         "#  " + ", ".join(f"{k} {v}" for k, v in sorted(counts.items())),

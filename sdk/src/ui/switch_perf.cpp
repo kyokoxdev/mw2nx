@@ -710,7 +710,7 @@ void Report(u64 elapsed_ticks, u64 tick_freq, u64 counters_last[kCounterCount],
     // Pc and lr of the same sample, so the samples of a leaf (memcpy, memset...), whose lr is its call
     // site, can be put on their callers. Stack sampling only. Caution: on the console the lr of the ring thread's
     // memcpy samples pointed just after system calls (a condition variable wait, an IPC), not at callers, probably
-    // because the context handed back keeps an older lr; the BO2_MEMCPY_CALLERS test build counts callers instead.
+    // because the context handed back keeps an older lr; the MW2_MEMCPY_CALLERS test build counts callers instead.
     // mw2nx: so the pair takes the first frame record's return address instead (fp chain, read with the thread
     // paused): for a leaf without a frame of its own (memcpy, clock_gettime, malloc) that is its caller's caller at
     // worst, and a real return address, where the lr of runs mw2sp_018 / MP put every leaf after a condvar wait.
@@ -1225,7 +1225,7 @@ void __wrap_svcSleepThread(s64 nano) {
  * (1600 or more, 1280-1599, 640-1279, 256-639, under 256).
  */
 // Stack sampling pauses every thread each millisecond: it costs frames and changes how threads share the cores, so
-// the game's settings may decide it per run (bo2zm_profile_stacks): 1 on, 0 off, -1 (default) on when
+// the game's settings may decide it per run (RexSwitchPerfSetStackSampling): 1 on, 0 off, -1 (default) on when
 // logs/rex/profile_stacks.flag exists. Only before the profiler decides, 8 s after start.
 void RexSwitchPerfSetStackSampling(int forced) {
   g_stacks_forced.store(forced, std::memory_order_relaxed);

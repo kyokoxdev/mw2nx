@@ -1,8 +1,8 @@
 """Makes the setup kit players run on their PC: <data>/release/mw2nx-setup-<version>.zip (and its folder).
 
   mw2nx_setup.py, xiso.py, stfs_extract.py   the setup script (tools/install/mw2nx_setup.py) and what it imports
-  bin/linux/, bin/windows/                   the shader tools, static x86-64 builds: zone_containers, bo2zm_hlsl,
-                                             bo2zm_pack (as tools/mw2shaders/build_zone_containers.sh and
+  bin/linux/, bin/windows/                   the shader tools, static x86-64 builds: zone_containers, mw2_hlsl,
+                                             mw2_pack (as tools/mw2shaders/build_zone_containers.sh and
                                              tools/xenosrecomp/build_tools.sh build them), and shader_common.h
   pipelines/                                 the Campaign's pipeline lists (mw2sp/pipelines)
   mods/                                      the bundled script mods (mw2mp/mods)
@@ -23,7 +23,7 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 XR = ROOT / "tools" / "xenosrecomp"
 TR = XR / "translator"
 TP = ROOT / "sdk" / "thirdparty"
-RENDER = ROOT / "app" / "src" / "native" / "render"
+RENDER = ROOT / "mw2mp" / "src" / "native" / "render"
 
 
 def zone_defs(zone, out):
@@ -50,12 +50,12 @@ def build(cxx, out, exe, zone, defs):
                   *(str(zone / f) for f in ("walker.cpp", "schema.cpp", "defs.cpp", "expr.cpp", "rules.cpp")),
                   str(defs), "-o", str(out / f"zone_containers{exe}")],
         common + ["-std=c++23", "-O1", f"-I{TR}", f"-I{TP / 'fmt' / 'include'}", "-include", str(TR / "pch_min.h"),
-                  "-include", str(XR / "assert_throw.h"), "-DFMT_HEADER_ONLY", "-DXXH_INLINE_ALL", "-DBO2ZM_RECOMP",
-                  "-D_CRT_SECURE_NO_WARNINGS", str(XR / "bo2zm_hlsl.cpp"), str(TR / "shader_recompiler.cpp"),
-                  "-o", str(out / f"bo2zm_hlsl{exe}")],
-        common + ["-std=c++23", "-O2", f"-I{RENDER}", str(XR / "bo2zm_pack.cpp"),
-                  str(RENDER / "bo2zm_shader_library.cpp"), str(RENDER / "bo2zm_shader_index.cpp"),
-                  "-o", str(out / f"bo2zm_pack{exe}")],
+                  "-include", str(XR / "assert_throw.h"), "-DFMT_HEADER_ONLY", "-DXXH_INLINE_ALL", "-DMW2_RECOMP",
+                  "-D_CRT_SECURE_NO_WARNINGS", str(XR / "mw2_hlsl.cpp"), str(TR / "shader_recompiler.cpp"),
+                  "-o", str(out / f"mw2_hlsl{exe}")],
+        common + ["-std=c++23", "-O2", f"-I{RENDER}", str(XR / "mw2_pack.cpp"),
+                  str(RENDER / "mw2mp_shader_library.cpp"), str(RENDER / "mw2mp_shader_index.cpp"),
+                  "-o", str(out / f"mw2_pack{exe}")],
     ]
     for p in [subprocess.Popen(j) for j in jobs]:
         if p.wait():

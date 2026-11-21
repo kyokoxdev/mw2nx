@@ -168,7 +168,7 @@ HttpResult Http(const Url& url, const std::string& method, const std::string& he
     result.local_ip = ntohl(self.sin_addr.s_addr);
   }
   std::string request = method + " " + url.path + " HTTP/1.1\r\nHost: " + url.host + ":" + std::to_string(url.port) +
-                        "\r\nConnection: close\r\nUser-Agent: bo2-zm-nx UPnP/1.1\r\n" + headers;
+                        "\r\nConnection: close\r\nUser-Agent: mw2nx UPnP/1.1\r\n" + headers;
   if (method == "POST") request += "Content-Length: " + std::to_string(body.size()) + "\r\n";
   request += "\r\n" + body;
   size_t sent = 0;
@@ -570,7 +570,7 @@ int AddMapping(uint16_t port, int lease, uint32_t* conflict) {
   const auto& gw = g_worker.gateway;
   const std::string arguments = Mapping(port) + "<NewInternalPort>" + std::to_string(port) +
                                 "</NewInternalPort><NewInternalClient>" + Ip(gw.internal_ip) +
-                                "</NewInternalClient><NewEnabled>1</NewEnabled><NewPortMappingDescription>bo2-zm-nx " +
+                                "</NewInternalClient><NewEnabled>1</NewEnabled><NewPortMappingDescription>mw2nx " +
                                 std::to_string(port) + "</NewPortMappingDescription><NewLeaseDuration>" +
                                 std::to_string(lease) + "</NewLeaseDuration>";
   const SoapResult result = Soap(gw, "AddPortMapping", arguments, 4000);

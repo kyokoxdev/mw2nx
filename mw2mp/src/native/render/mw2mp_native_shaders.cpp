@@ -49,7 +49,7 @@
 #include <rex/string/buffer.h>
 #endif
 
-REXCVAR_DEFINE_BOOL(mw2mp_native_shader_index_check, false, "BO2",
+REXCVAR_DEFINE_BOOL(mw2mp_native_shader_index_check, false, "MW2",
                     "Test: at start the whole shader pack is also read as before its index (mw2mp_shaders.spvidx) "
                     "and every shader made from the index is compared with it (log: \"index check\"). Slow and "
                     "uses much memory: for the PC")

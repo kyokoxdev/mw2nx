@@ -397,7 +397,7 @@ extern std::atomic<bool> g_syncs_on_flush_waits;
  * stutters of 60 ms or more in one stretch of play, three ended 40-70 ms after a dump started and one within
  * 0.12 s of the C6 substages line (0.5 would be expected by chance).
  * The line is formatted on the calling thread (it reads the ring's state, which is only consistent on its
- * own thread) and queued; the "BO2 reports" thread (priority 0x3B) writes it. The queue never blocks
+ * own thread) and queued; the "MW2 reports" thread (priority 0x3B) writes it. The queue never blocks
  * the producer: if it fills up, the line is dropped and counted. Defined in mw2mp_native_render.cpp.
  */
 void ReportDeferred(std::string line);

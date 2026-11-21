@@ -1,4 +1,4 @@
-// BO2-only systems the native renderer (src/native, from bo2-360-nx) calls into, answered "feature off" for MW2:
+// Upstream systems the native renderer (src/native, from bo2-360-nx) calls into, answered "feature off" for MW2:
 // cheats, presets, GPU skinning, the credits line and the PC tools. Each one moves to a real MW2
 // implementation when the renderer needs it (docs/MW2.md, milestone 4).
 
@@ -39,7 +39,7 @@ REXCVAR_DEFINE_INT32(mw2mp_cpu_cores, 4, "MW2",
 // The renderer's vertex copy thread (cores 2-3, its own priority 0x2E): on cores 0-2 beside the game threads it ran
 // ~0.3 % and the ring did 2/3 of the copies itself (run mw2sp_019).
 REXCVAR_DEFINE_STRING(mw2mp_core3_threads,
-                      "Server:0xF:59,Audio Worker:0x8:43,XMA Decoder:0x8:43,BO2 vertex copies:0xC:46", "MW2",
+                      "Server:0xF:59,Audio Worker:0x8:43,XMA Decoder:0x8:43,MW2 vertex copies:0xC:46", "MW2",
                       "Switch, 4-core forwarder only: threads moved to core 3, as comma-separated \"name prefix[:core "
                       "mask[:priority]]\" (0x8 = core 3 alone, 0xF = cores 0-3). \"\" = none moved")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);

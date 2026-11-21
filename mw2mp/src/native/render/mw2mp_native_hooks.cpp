@@ -23,14 +23,14 @@
 #include <array>  // mw2mp_d3d_game_vegetation
 #include <string>
 
-REXCVAR_DEFINE_BOOL(mw2mp_native_d3d_shadow, false, "BO2",
+REXCVAR_DEFINE_BOOL(mw2mp_native_d3d_shadow, false, "MW2",
                     "Native renderer (Direct3D-level renderer): on 1 in 64 draws it snapshots the "
                     "device's register mirror and the ring compares it with what it reads from the packets ('D3D "
                     "shadow' line). Does not change what is drawn")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 
 // Draw records inside FlushState's marker: see g_draw_in_ongoing and AnnotateDraw below.
-REXCVAR_DEFINE_BOOL(mw2mp_d3d_marker_record, false, "BO2",
+REXCVAR_DEFINE_BOOL(mw2mp_d3d_marker_record, false, "MW2",
                     "Native renderer, Direct3D-level renderer: each DrawIndexedVertices writes its "
                     "record (VS, PS, arguments) into the command stream and the ring draws with it instead of its own "
                     "shader identity. Starts by checking against that identity and turns itself off at the first "
@@ -41,7 +41,7 @@ REXCVAR_DEFINE_BOOL(mw2mp_d3d_marker_record, false, "BO2",
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 
 // Shadow map vegetation filtered on the game thread (see DecideVegetation).
-REXCVAR_DEFINE_BOOL(mw2mp_d3d_game_vegetation, true, "BO2",
+REXCVAR_DEFINE_BOOL(mw2mp_d3d_game_vegetation, true, "MW2",
                     "Native renderer: the DrawVertices and DrawIndexedVertices the ring would drop "
                     "as shadow-map vegetation (no color, with an alpha test or discard) are skipped whole on the game "
                     "thread: no FlushState, DRAW_INDX or record. Starts by observing (the ring checks each draw's "
@@ -437,7 +437,7 @@ void RegisterShaderObject(const uint8_t* base, uint32_t object, uint32_t physica
     return;
   }
   // The library's blob: the container (flags 0x102A11xx, bit 0 for a vertex shader; virtual size at +4, physical
-  // size at +8) followed by the physical part, as tools/inspect/ff_shaders.py built the pack.
+  // size at +8) followed by the physical part, as tools/mw2shaders/zone_containers.cpp writes it for the pack.
   // As REX_RAW_ADDR in the generated code: on Win32 the area from 0xE0000000 is 0x1000 higher.
   auto host = [base](uint32_t address) {
 #if REX_PLATFORM_WIN32

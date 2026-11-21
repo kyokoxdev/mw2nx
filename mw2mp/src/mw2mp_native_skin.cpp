@@ -1,5 +1,5 @@
 // Native rewrites of the campaign's CPU vertex skinning kernels (TU6 default.xex): sub_823D7178 (one bone),
-// sub_823D7318 (two), sub_823D7530 (three) and sub_823D7770 (four), as BO2's bo2zm_native_skin.cpp does for its three.
+// sub_823D7318 (two), sub_823D7530 (three) and sub_823D7770 (four), as bo2-360-nx's bo2zm_native_skin.cpp does for BO2's three.
 // The recompiled code runs every VMX128 instruction through the emulated register file (byte-reversing loads and
 // stores, scalar 2:10:10:10 unpacks); here each vertex stays in NEON registers.
 //

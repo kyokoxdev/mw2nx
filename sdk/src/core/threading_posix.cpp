@@ -13,8 +13,9 @@ static_assert(REX_PLATFORM_LINUX || REX_PLATFORM_MAC, "This file is POSIX-only")
 
 // On Horizon the kernel objects (events, semaphores, mutants, timers, thread exit) wait and signal
 // through the address arbiter instead of a mutex and a condition variable per object; see the comment above the
-// REX_FAST_WAITS PosixConditionBase. REX_FAST_WAITS_TEST builds the same code on Linux (futex) for the stress test
-// in this port's tools/runtime_stress. Every other POSIX build keeps the original implementation.
+// REX_FAST_WAITS PosixConditionBase. REX_FAST_WAITS_TEST builds the same code on Linux (futex) for a stress test
+// (bo2-360-nx's tools/runtime_stress; not carried in this repository). Every other POSIX build keeps the original
+// implementation.
 #if defined(__SWITCH__) || defined(REX_FAST_WAITS_TEST)
 #define REX_FAST_WAITS 1
 #else
@@ -364,7 +365,7 @@ AddressWait WaitOnAddress(void* address, uint32_t expected, int64_t timeout_ns) 
     // Anything else would make the callers spin; say so once.
     static std::atomic<bool> reported{false};
     if (!reported.exchange(true)) {
-      REXSYS_WARN("bo2-zm-nx waits: svcWaitForAddress failed with {:#x}", rc);
+      REXSYS_WARN("mw2nx waits: svcWaitForAddress failed with {:#x}", rc);
     }
   }
   return AddressWait::kChanged;
@@ -448,7 +449,7 @@ void NoteLostWakeup(const char* what, std::chrono::steady_clock::time_point star
   if (lost_wakeup_lines_.fetch_add(1, std::memory_order_relaxed) < kWaitLogLimit) {
     // A real lost wake-up, unless the thread woken instead of this one has not run for a whole check interval.
     REXSYS_WARN(
-        "bo2-zm-nx waits: possible lost wake-up #{}: thread '{}' found its {} signaled after {} ms without "
+        "mw2nx waits: possible lost wake-up #{}: thread '{}' found its {} signaled after {} ms without "
         "being woken (it took it and went on)",
         count, CurrentThreadName(), what, MillisecondsSince(start));
   }
@@ -460,7 +461,7 @@ void NoteLongWait(const char* what, std::chrono::steady_clock::time_point start,
   }
   *reported = true;
   if (long_wait_lines_.fetch_add(1, std::memory_order_relaxed) < kWaitLogLimit) {
-    REXSYS_INFO("bo2-zm-nx waits: thread '{}' has waited {} ms for {} (still waiting; logged once per wait)",
+    REXSYS_INFO("mw2nx waits: thread '{}' has waited {} ms for {} (still waiting; logged once per wait)",
                 CurrentThreadName(), MillisecondsSince(start), what);
   }
 }
@@ -483,7 +484,7 @@ std::mutex& WaitAllMutex() {
 
 }  // namespace
 
-// Lost wake-ups found so far (the stress test in app/src/bo2zm_test_waits.cpp reads it).
+// Lost wake-ups found so far (for a stress test, REX_FAST_WAITS_TEST).
 uint64_t FastWaitLostWakeups() {
   return lost_wakeups_.load(std::memory_order_relaxed);
 }
@@ -1966,7 +1967,7 @@ bool DispatchCurrentThreadUserCallback() {
 }
 
 #if REX_FAST_WAITS
-// For the stress test (app/src/bo2zm_test_waits.cpp): how many threads wait on handle right now, so it can pulse
+// For a stress test (REX_FAST_WAITS_TEST): how many threads wait on handle right now, so it can pulse
 // only once they are all inside the wait.
 uint32_t FastWaitWaiters(WaitHandle* handle) {
   auto posix_wait_handle = dynamic_cast<PosixWaitHandle*>(handle);

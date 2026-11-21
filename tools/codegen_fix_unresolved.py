@@ -6,9 +6,11 @@ It is declared as a standalone function only when the instruction right
 before it ends a function (blr, b, bctr, or zero padding). Anything else may
 be the middle of a function and is left for a human, and the loop stops.
 
-usage: python tools/codegen_fix_unresolved.py [--max-rounds N] [--project DIR --manifest FILE --image FILE]
-Run from the repository root. Appends to <project>/overrides.toml (default app/, bo2zm_manifest.toml and the
-default_mp image).
+usage: python3 -I tools/codegen_fix_unresolved.py [--program mp|sp] [--max-rounds N]
+                                                 [--project DIR --manifest FILE --image FILE]
+Run from the repository root. Appends to <project>/overrides.toml (--program mp, the default: mw2mp/,
+mw2mp_manifest.toml and work/dump_tu6/default_mp.image.bin; sp: mw2sp/, mw2sp_manifest.toml, default.image.bin).
+Run tools/codegen_mw2mp.sh / codegen_mw2sp.sh afterwards: this leaves the generated code without its fix-ups.
 """
 import argparse
 import os
@@ -20,12 +22,11 @@ import sys
 import capstone
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-APP = os.path.join(ROOT, "app")
-IMAGE = os.path.join(ROOT, "work", "dump_tu18", "default_mp.image.bin")
-# The host tools (tools/build_host.sh); a worktree without its own build can point REXGLUE_BIN at another checkout's.
-SDK_BIN = os.environ.get("REXGLUE_BIN") or os.path.join(ROOT, "sdk", "out", "win-amd64")
-OVERRIDES = os.path.join(APP, "overrides.toml")
-LOG = os.path.join(APP, "codegen_analyze.log")
+# program: (codegen project folder, xex name in work/dump_tu6)
+PROGRAMS = {"mp": ("mw2mp", "default_mp"), "sp": ("mw2sp", "default")}
+# The host tools (tools/build_host_linux.sh); REXGLUE_BIN can point at another build's folder.
+SDK_BIN = os.environ.get("REXGLUE_BIN") or os.path.join(ROOT, "sdk", "out", "linux-amd64")
+APP = OVERRIDES = LOG = ""
 BASE = 0x82000000
 
 UNRESOLVED = re.compile(r"^\s+0x([0-9A-F]{8}) from 0x([0-9A-F]{8}): (b\w*) 0x[0-9A-F]+ from .* target not in any function")
@@ -67,7 +68,7 @@ def summary(ea, limit=6):
 def run_codegen(manifest):
     env = dict(os.environ, PATH=SDK_BIN + os.pathsep + os.environ["PATH"])
     with open(LOG, "w", encoding="utf-8", errors="replace") as log:
-        rc = subprocess.call([os.path.join(SDK_BIN, "rexglue.exe"), "--log-level", "debug",
+        rc = subprocess.call([os.path.join(SDK_BIN, "rexglue"), "--log-level", "debug",
                               "codegen", manifest], cwd=APP, stdout=log,
                              stderr=subprocess.STDOUT, env=env)
     text = open(LOG, encoding="utf-8", errors="replace").read()
@@ -79,12 +80,16 @@ def run_codegen(manifest):
 def main():
     global APP, OVERRIDES, LOG, data
     ap = argparse.ArgumentParser()
+    ap.add_argument("--program", choices=PROGRAMS, default="mp", help="mp = Multiplayer, sp = Campaign")
     ap.add_argument("--max-rounds", type=int, default=15)
-    ap.add_argument("--project", default=APP, help="the codegen project folder (default app/)")
-    ap.add_argument("--manifest", default="bo2zm_manifest.toml", help="the manifest, inside --project")
-    ap.add_argument("--image", default=IMAGE, help="the decrypted image the manifest's XEX gives")
+    ap.add_argument("--project", help="the codegen project folder (default mw2mp/ or mw2sp/)")
+    ap.add_argument("--manifest", help="the manifest, inside --project (default <project>_manifest.toml)")
+    ap.add_argument("--image", help="the decrypted image the manifest's XEX gives (default from work/dump_tu6)")
     a = ap.parse_args()
-    APP = os.path.abspath(a.project)
+    proj, xex = PROGRAMS[a.program]
+    a.manifest = a.manifest or f"{proj}_manifest.toml"
+    a.image = a.image or os.path.join(ROOT, "work", "dump_tu6", xex + ".image.bin")
+    APP = os.path.abspath(a.project or os.path.join(ROOT, proj))
     OVERRIDES = os.path.join(APP, "overrides.toml")
     LOG = os.path.join(APP, "codegen_analyze.log")
     data = open(a.image, "rb").read()

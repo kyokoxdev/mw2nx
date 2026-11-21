@@ -12,14 +12,14 @@
 #include <algorithm>
 #include <string>
 
-REXCVAR_DEFINE_BOOL(mw2mp_native_texture_pool, true, "BO2",
+REXCVAR_DEFINE_BOOL(mw2mp_native_texture_pool, true, "MW2",
                     "Native renderer: textures take pieces of large memory blocks instead of each asking for a "
                     "dedicated allocation. On Horizon each dedicated allocation costs ~1.9 ms of CPU (an nvMapCreate, "
                     "TWO address reservations and TWO mappings), and the image does not change. Turning it off goes "
                     "back to one allocation per texture")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 
-REXCVAR_DEFINE_INT32(mw2mp_native_texture_pool_slab_mb, 32, "BO2",
+REXCVAR_DEFINE_INT32(mw2mp_native_texture_pool_slab_mb, 32, "MW2",
                      "Native renderer: MB of each large block of the texture pool. Larger = fewer allocations from the "
                      "system, but each new block costs a memset of that size")
     .range(4, 256)

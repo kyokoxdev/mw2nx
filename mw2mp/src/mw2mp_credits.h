@@ -1,5 +1,5 @@
-// The home screen's credits line: "Ported by: AlvaroEPena" with GitHub's mark beside it (app/src/ui/credits, drawn by
-// tools/make_credits.py), in the bottom-right corner of the Zombies home menu, on the row of its button prompts.
+// The renderer's interface to bo2-360-nx's home-screen credits line, kept so the renderer compiles unchanged. MW2 ships
+// no credits images: mw2mp_native_stubs.cpp returns none, so nothing is drawn. Upstream it worked like this:
 //
 // It is this port's own layer, not part of the game's UI: the native renderer draws it over the finished image in
 // its output pass (mw2mp_native_targets.cpp), like the FPS counter, from images that go into the program as bytes.

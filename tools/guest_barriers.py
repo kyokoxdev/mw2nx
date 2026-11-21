@@ -1,13 +1,14 @@
-"""Compiler barriers at the generated code's labels and ordering instructions (see app/src/bo2zm_guest_memory.h).
+"""Compiler barriers at the generated code's labels and ordering instructions (see mw2mp/src/mw2mp_guest_memory.h).
 
-With the CMake option BO2ZM_GUEST_MEMORY_PLAIN the generated code's guest loads and stores are not volatile. What
+With the CMake option MW2MP_GUEST_MEMORY_PLAIN (MW2SP_GUEST_MEMORY_PLAIN for the Campaign) the generated code's guest loads and stores are not volatile. What
 kept a guest spin loop rereading its flag, and stores in order across a sync, is then this barrier: a line
 `REX_GUEST_BARRIER();` right after every label (`loc_XXXXXXXX:`, every branch target, so every loop's back edge
 lands on one) and after every sync, lwsync, eieio, isync and db16cyc (which the code generator writes as a comment
 only). Without the option the macro is empty and the code is the same as without these lines.
 
-The rewrite only adds or removes those lines, in bo2zm_recomp.*.cpp, and is idempotent. Run it after every codegen
-(tools/codegen.sh does) and after direct_calls.py / localize.py in any order: neither looks at these lines.
+The rewrite only adds or removes those lines, in *_recomp.*.cpp, and is idempotent. Run it after every codegen
+(tools/codegen_mw2mp.sh and tools/codegen_mw2sp.sh do) and after direct_calls.py in any order: it does not look at
+these lines.
 
 usage: python tools/guest_barriers.py [--gen DIR] [--undo | --check]
 """
@@ -17,7 +18,7 @@ import re
 import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-GEN = os.path.join(ROOT, "app", "generated", "default_mp")
+GEN = os.path.join(ROOT, "mw2mp", "generated", "default_mp")
 BARRIER = "\tREX_GUEST_BARRIER();"
 LABEL = re.compile(r"^loc_[0-9A-F]+:\s*$")
 ORDERING = re.compile(r"^\s*// (sync|lwsync|eieio|isync|db16cyc)\b")

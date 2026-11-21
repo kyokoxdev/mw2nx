@@ -113,9 +113,9 @@ program 1). Every milestone below is done; what is left is under [Known issues](
     release build. A profile goes stale whenever the generated code changes: retrain, then build.
   - [x] Direct calls (`tools/direct_calls.py`, run by `tools/codegen_mw2mp.sh` and `tools/codegen_mw2sp.sh`, checked by
     both `build_switch.sh`): 54k calls to unhooked functions are no longer opaque.
-  - [ ] Locals (`tools/localize.py`): more guest registers as C++ locals in the hottest functions, from a list made from
-    profiles.
-  - [~] Profiles on hardware (`tools/profile_sym.py`, `tools/pc_profile_report.py`): stack samples of every game
+  - [ ] Locals: more guest registers as C++ locals in the hottest functions, from a list made from profiles (bo2-360-nx
+    has a `localize.py` pass for this; not ported).
+  - [~] Profiles on hardware (`tools/profile_sym.py`, `tools/profile_inline.py`): stack samples of every game
     thread, symbolised to `sub_X`. A campaign profile found the Mesa pipeline-cache stalls; a match profile for
     multiplayer is still to do.
   - [x] Native hot paths: CPU skinning was tried and dropped (the NEON kernels ran slower than the game's and skinning is

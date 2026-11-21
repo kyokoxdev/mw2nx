@@ -26,15 +26,15 @@ if(TARGET Vulkan::Headers)
     target_link_libraries(mw2sp PRIVATE Vulkan::Headers)
 endif()
 
-# REX_GUEST_BARRIER() for the lines tools/guest_barriers.py adds; empty unless MW2SP_GUEST_MEMORY_PLAIN (bo2's header,
-# game-agnostic).
+# REX_GUEST_BARRIER() for the lines tools/guest_barriers.py adds; empty unless MW2SP_GUEST_MEMORY_PLAIN
+# (mw2mp/src/mw2mp_guest_memory.h, shared with Multiplayer).
 option(MW2SP_GUEST_MEMORY_PLAIN "Generated code: plain guest loads and stores, with compiler barriers" OFF)
-target_precompile_headers(mw2sp_recomp PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../app/src/bo2zm_guest_memory.h")
+target_precompile_headers(mw2sp_recomp PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../mw2mp/src/mw2mp_guest_memory.h")
 if(MW2SP_GUEST_MEMORY_PLAIN)
-    target_compile_definitions(mw2sp_recomp PRIVATE BO2ZM_GUEST_MEMORY_PLAIN=1)
+    target_compile_definitions(mw2sp_recomp PRIVATE MW2MP_GUEST_MEMORY_PLAIN=1)
 endif()
 # Diagnostic only (never a release): the generated code checks every guest store against the range the renderer
-# publishes (the model lighting volume) and reports who wrote there. See app/src/bo2zm_guest_memory.h.
+# publishes (the model lighting volume) and reports who wrote there. See mw2mp/src/mw2mp_guest_memory.h.
 option(MW2_WATCH_STORES "Diagnostic: report the writers of the model lighting volume" OFF)
 if(MW2_WATCH_STORES)
     target_compile_definitions(mw2sp_recomp PRIVATE MW2_WATCH_STORES=1)
@@ -71,7 +71,7 @@ if(MW2SP_PGO)
     set_property(SOURCE ${_mw2sp_pgo_native} APPEND PROPERTY COMPILE_OPTIONS ${_mw2sp_pgo_flags})
 endif()
 
-# Line tables (-g1) for the native renderer, as bo2's BO2ZM_DEBUG_LINES, always on: -g does not change the code GCC
+# Line tables (-g1) for the native renderer, always on: -g does not change the code GCC
 # generates and the NRO carries no debug sections, so every unstripped ELF can split ring-thread samples by line
 # (tools/profile_inline.py). Run mw2sp_009's ring spent ~5.5 of ~8.3 us a draw outside the timed substages.
 if(REXGLUE_PLATFORM_SWITCH)

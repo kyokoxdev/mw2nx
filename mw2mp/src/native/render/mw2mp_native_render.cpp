@@ -124,25 +124,25 @@ std::string Summary();
 // Diagnostics: "ADDRESS:BYTES@SECONDS" (hex, hex, decimal) writes that much guest physical memory to
 // dump_mem_<address>_<seconds>s.bin next to the executable at the first Swap after that many seconds. Useful for
 // checking whether texture data (the mip chains, for instance) changes after the renderer first read it.
-REXCVAR_DEFINE_STRING(mw2mp_native_dump_memory, "", "BO2",
+REXCVAR_DEFINE_STRING(mw2mp_native_dump_memory, "", "MW2",
                       "Diagnostics: ADDRESS:BYTES@SECONDS (hex:hex@s) dumps guest memory once at that time")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 
 extern std::atomic<uint64_t> g_mw2mp_dump_texture;  // mw2mp_native_draws.cpp
 
 // Diagnostics: the color-grading strip's inputs (NativeRenderSystem::DiagDropsLutMw2mp).
-REXCVAR_DEFINE_BOOL(mw2mp_native_diag_lut, false, "BO2",
+REXCVAR_DEFINE_BOOL(mw2mp_native_diag_lut, false, "MW2",
                     "Diagnostics: log the colour-grading strip draw's constants and base table every 5 s")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 
 // Vertex shaders that write memory (memexport). See NativeRenderSystem::ExecuteMemexportMw2mp.
-REXCVAR_DEFINE_BOOL(mw2mp_native_memexport, true, "BO2",
+REXCVAR_DEFINE_BOOL(mw2mp_native_memexport, true, "MW2",
                     "Native renderer: run the vertex shaders that write guest memory (memexport) on the CPU, as the "
-                    "GPU does. BO2 copies streamed texture data (mip levels) this way. false = drop them, as before");
-REXCVAR_DEFINE_BOOL(mw2mp_native_memexport_fast, true, "BO2",
-                    "Native renderer: BO2's two memexport copy shaders (texture streaming) are done directly in C++ "
+                    "GPU does. The game copies streamed texture data (mip levels) this way. false = drop them, as before");
+REXCVAR_DEFINE_BOOL(mw2mp_native_memexport_fast, true, "MW2",
+                    "Native renderer: the game's two memexport copy shaders (texture streaming) are done directly in C++ "
                     "instead of through the shader interpreter, with the same writes. false = interpreter");
-REXCVAR_DEFINE_BOOL(mw2mp_native_memexport_verify, false, "BO2",
+REXCVAR_DEFINE_BOOL(mw2mp_native_memexport_verify, false, "MW2",
                     "Diagnostic: after each direct memexport copy, run the interpreter too and compare the bytes (log "
                     "'direct memexport'). Slow");
 
@@ -162,7 +162,7 @@ REXCVAR_DEFINE_BOOL(mw2mp_native_memexport_verify, false, "BO2",
  * copy after the vertex cache is 13-25 MB every 10 s, and in Town the ring ended up copying 16 MB itself in 12 ms
  * every 10 s instead of 8 MB in 8 ms, with no change in frame rate.
  */
-REXCVAR_DEFINE_BOOL(mw2mp_native_fences_wait_copies, true, "BO2",
+REXCVAR_DEFINE_BOOL(mw2mp_native_fences_wait_copies, true, "MW2",
                     "Native renderer: fences, memory writes and interrupts from the ring wait for the "
                     "vertex copy thread first, so the game cannot reuse vertices that are not copied yet. false = as "
                     "before (sprites blinked on battery)")
@@ -378,19 +378,19 @@ class Sink final : public rex::graphics::ShaderInterpreter::ExportSink {
 
 }  // namespace mw2mp::memexport
 
-REXCVAR_DEFINE_STRING(mw2mp_c1_renderer, "xenos", "BO2",
+REXCVAR_DEFINE_STRING(mw2mp_c1_renderer, "xenos", "MW2",
                       "xenos = GPU emulation; native = native renderer in development (piece C1: the game runs without "
                       "emulation and the screen shows a test color)")
     .allowed({"xenos", "native"})
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 
-REXCVAR_DEFINE_BOOL(mw2mp_native_vector_register_writes, true, "BO2",
+REXCVAR_DEFINE_BOOL(mw2mp_native_vector_register_writes, true, "MW2",
                     "Native renderer: the ring's register blocks are copied 4 at a time with NEON. "
                     "The first 200,000 blocks are checked against the usual path and, if one differs, it turns itself "
                     "off. false = the usual path")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 
-REXCVAR_DEFINE_BOOL(mw2mp_native_block_register_writes, true, "BO2",
+REXCVAR_DEFINE_BOOL(mw2mp_native_block_register_writes, true, "MW2",
                     "Native renderer: register blocks without side effects (almost always VS and PS constants) are "
                     "written in one go instead of register by register. false: as before");
 
@@ -407,7 +407,7 @@ REXCVAR_DEFINE_BOOL(mw2mp_native_block_register_writes, true, "BO2",
  * 211 ms), so the default is 20 s, which still leaves plenty of reports to measure with. The real fix is to keep the
  * writing off the ring thread altogether, which the next setting does.
  */
-REXCVAR_DEFINE_INT32(mw2mp_native_diag_report_s, 20, "BO2",
+REXCVAR_DEFINE_INT32(mw2mp_native_diag_report_s, 20, "MW2",
                      "Native renderer: seconds between dumps of the diagnostic report. Each dump is written by the "
                      "thread that feeds the GPU and causes stutters: 10 gives twice the detail and twice the stutters "
                      "from this cause")
@@ -422,14 +422,14 @@ REXCVAR_DEFINE_INT32(mw2mp_native_diag_report_s, 20, "BO2",
  * flushed to the SD card.
  *
  * Lines are still formatted on the ring thread, because they read its state, which is only coherent there, and then
- * queued; the "BO2 reports" thread writes them, sleeping on a condition variable in between. It avoids the two
+ * queued; the "MW2 reports" thread writes them, sleeping on a condition variable in between. It avoids the two
  * problems that sank the SDK's asynchronous logger (see log_async in sdk/src/core/logging.cpp): the queue never
  * blocks the producer (when it is full the line is dropped and counted), and the thread runs at 0x3B, the only
  * time-sliced priority on Horizon. One point of contention remains: if the ring writes a line of its own while this
  * thread is writing, it waits for that one line (the log lock), not for a whole block. false = the ring writes every
  * line itself.
  */
-REXCVAR_DEFINE_BOOL(mw2mp_native_deferred_reports, true, "BO2",
+REXCVAR_DEFINE_BOOL(mw2mp_native_deferred_reports, true, "MW2",
                     "Native renderer: the ring thread's periodic report and [hitch] lines are "
                     "written to the SD from a separate thread; the ring only formats and queues them. false = as "
                     "before, the ring writes them itself (29-32 ms every 20 s in 176)")
@@ -448,7 +448,7 @@ REXCVAR_DEFINE_BOOL(mw2mp_native_deferred_reports, true, "BO2",
 #include "../../mw2mp_page_writes.h"
 #include "../../mw2mp_pc_profiler.h"
 
-REXCVAR_DEFINE_BOOL(mw2mp_native_im_load_without_memcmp, true, "BO2",
+REXCVAR_DEFINE_BOOL(mw2mp_native_im_load_without_memcmp, true, "MW2",
                     "Native renderer: an IM_LOAD whose microcode nobody has written since the last "
                     "check (the constructors and the D3D fetch patcher report it) is taken from the cache without "
                     "comparing it whole with memcmp. Starts by checking each load against the memcmp and turns itself "
@@ -462,7 +462,7 @@ REXCVAR_DEFINE_BOOL(mw2mp_native_im_load_without_memcmp, true, "BO2",
  * byte-identical to one already seen (memcmp against the stored raw copy) reuses its swapped copy, its
  * identification, its fingerprint and its generation. The self-checking guard is in LoadImmediate.
  */
-REXCVAR_DEFINE_BOOL(mw2mp_native_im_immediate_cache, true, "BO2",
+REXCVAR_DEFINE_BOOL(mw2mp_native_im_immediate_cache, true, "MW2",
                     "Native renderer: an IM_LOAD_IMMEDIATE (the VS the D3D copies into the ring with "
                     "the patched fetches) byte-for-byte identical to one already seen reuses its flipped copy, its "
                     "identification, its hash and its generation, without flipping or identifying again. Starts by "
@@ -524,7 +524,7 @@ class ReportQueue {
   static constexpr size_t kMaxLines = 4096;
 
   void Loop() {
-    rex::thread::set_current_thread_name("BO2 reports");
+    rex::thread::set_current_thread_name("MW2 reports");
 #if REX_PLATFORM_SWITCH
     const bool priority = RexSwitchSetCurrentThreadPriorityOk(REX_SWITCH_PRIO_GUEST);
 #else
@@ -585,7 +585,7 @@ void ReportDeferred(std::string line) {
  * See LoopRing. Lowered so the presentation thread (0x2C) can preempt it; at the same priority the
  * presenter went without a core 70 % of the time.
  */
-REXCVAR_DEFINE_INT32(mw2mp_native_ring_priority, 0x2D, "BO2",
+REXCVAR_DEFINE_INT32(mw2mp_native_ring_priority, 0x2D, "MW2",
                      "Switch: Horizon priority of the ring thread (0x1C-0x3B). 0x2D by default, one step below the "
                      "presenter (0x2C) and two below audio (0x2B). Raising it to 0x2C brings back an older split, in "
                      "which only half the frames reached the screen");
@@ -603,7 +603,7 @@ REXCVAR_DEFINE_INT32(mw2mp_native_ring_priority, 0x2D, "BO2",
  * counts migrations per second and names the core the thread is on. In practice the migrations stay the same with -1
  * and with 1 (see the next setting).
  */
-REXCVAR_DEFINE_INT32(mw2mp_native_ring_core, 1, "BO2",
+REXCVAR_DEFINE_INT32(mw2mp_native_ring_core, 1, "MW2",
                      "Switch: preferred core of the ring thread (-1 = the default, which is the same as the game "
                      "thread's; 0-2 = a specific one). Not exclusive: the mask is not touched, so the kernel can still "
                      "move it");
@@ -621,17 +621,17 @@ REXCVAR_DEFINE_INT32(mw2mp_native_ring_core, 1, "BO2",
  * the ring to one core made the worst frames worse (minimum 16.3 FPS against about 21 without it; see
  * docs/platform-notes.md, Threads). The log shows whether migrations drop to zero.
  */
-REXCVAR_DEFINE_BOOL(mw2mp_native_ring_core_exclusive, false, "BO2",
+REXCVAR_DEFINE_BOOL(mw2mp_native_ring_core_exclusive, false, "MW2",
                     "Switch: besides preferring mw2mp_native_ring_core's core, FORBIDS the others (exclusive mask). It "
                     "is the real pin. Careful: if that core saturates, the ring does not get to run; check the "
                     "migrations/s in the log, which must drop to 0");
-REXCVAR_DEFINE_INT32(mw2mp_native_regmem_wait_us, 1000, "BO2",
+REXCVAR_DEFINE_INT32(mw2mp_native_regmem_wait_us, 1000, "MW2",
                      "Native renderer: pause between WAIT_REG_MEM polls in microseconds (exact on the Switch; on "
                      "Windows, below 1000 it only yields)");
 // How much the ring thread's own time limits the frame rate. With the benchmark A/B (mw2mp_benchmark_ab_s), the ring
 // spins this many nanoseconds per draw in the arms where factor 1 is on: about what the state decoding would cost per
 // draw, to estimate what removing it could gain.
-REXCVAR_DEFINE_INT32(mw2mp_native_ring_spin_ns_ab, 0, "BO2",
+REXCVAR_DEFINE_INT32(mw2mp_native_ring_spin_ns_ab, 0, "MW2",
                      "Test, with mw2mp_benchmark_ab_s: the ring thread spins this many ns per draw in the arms of A/B "
                      "factor 1 (0 = off)");
 // The blur behind popups in the menus. A menu that covers another one outside a match blurs what is behind it, and
@@ -653,15 +653,15 @@ constexpr int32_t kMenuBlurEveryDefault = 0;
 constexpr int32_t kMenuBlurEveryDefault = 1;
 #endif
 constexpr uint32_t kMenuBlurSecond = 15;  // the popup's frame that runs the chain again, after the fade-in
-REXCVAR_DEFINE_INT32(mw2mp_native_menu_blur_every, kMenuBlurEveryDefault, "BO2",
+REXCVAR_DEFINE_INT32(mw2mp_native_menu_blur_every, kMenuBlurEveryDefault, "MW2",
                      "Native renderer: after a popup's first frames, the blur behind it runs on one frame in N and the "
                      "others reuse it. 0 = it is kept until the popup closes (the Switch's default); 1 = every frame, "
                      "as the game does (the PC's)")
     .range(0, 1000);
-REXCVAR_DEFINE_STRING(mw2mp_native_menu_blur_ps, "", "BO2",
+REXCVAR_DEFINE_STRING(mw2mp_native_menu_blur_ps, "", "MW2",
                       "Native renderer: the menu blur's pixel shaders, as microcode hashes (hex, comma-separated). "
                       "Empty = the three the game uses");
-REXCVAR_DEFINE_INT32(mw2mp_native_menu_blur_every_alternate_s, 0, "BO2",
+REXCVAR_DEFINE_INT32(mw2mp_native_menu_blur_every_alternate_s, 0, "MW2",
                      "Test helper: mw2mp_native_menu_blur_every and 1 (every frame) take turns every N seconds, "
                      "logged as '[native] menu blur'. 0 = off")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
@@ -675,7 +675,7 @@ constexpr bool kFrontEndNoPrepassDefault = true;
 #else
 constexpr bool kFrontEndNoPrepassDefault = false;
 #endif
-REXCVAR_DEFINE_BOOL(mw2mp_native_front_end_no_prepass, kFrontEndNoPrepassDefault, "BO2",
+REXCVAR_DEFINE_BOOL(mw2mp_native_front_end_no_prepass, kFrontEndNoPrepassDefault, "MW2",
                     "Native renderer: in the campaign's front-end menus the 3D scene's depth prepass is skipped (on "
                     "by default on the Switch)");
 // The campaign's front end, reused while its camera holds still. Everything but the menus is drawn into targets
@@ -700,72 +700,72 @@ constexpr bool kFrontEndReuseDefault = true;
 constexpr bool kFrontEndReuseDefault = false;
 #endif
 constexpr uint32_t kSceneNoisy = 64;
-REXCVAR_DEFINE_BOOL(mw2mp_native_front_end_reuse, kFrontEndReuseDefault, "BO2",
+REXCVAR_DEFINE_BOOL(mw2mp_native_front_end_reuse, kFrontEndReuseDefault, "MW2",
                     "Native renderer: in the campaign's front-end menus the 3D scene is drawn again only when its "
                     "view changes, and reused in between (on by default on the Switch)");
-REXCVAR_DEFINE_DOUBLE(mw2mp_native_front_end_reuse_move, 0.05, "BO2",
+REXCVAR_DEFINE_DOUBLE(mw2mp_native_front_end_reuse_move, 0.05, "MW2",
                       "Native renderer: with mw2mp_native_front_end_reuse, a view constant that changes by more than "
                       "this (relative to its size, at least 1) redraws the scene at once")
     .range(0.0, 10.0);
-REXCVAR_DEFINE_DOUBLE(mw2mp_native_front_end_reuse_drift, 0.05, "BO2",
+REXCVAR_DEFINE_DOUBLE(mw2mp_native_front_end_reuse_drift, 0.05, "MW2",
                       "Native renderer: with mw2mp_native_front_end_reuse, smaller changes of the view constants than "
                       "this are ignored; changes between this and mw2mp_native_front_end_reuse_move redraw at most "
                       "once in mw2mp_native_front_end_reuse_drift_ms")
     .range(0.0, 10.0);
-REXCVAR_DEFINE_INT32(mw2mp_native_front_end_reuse_drift_ms, 3000, "BO2",
+REXCVAR_DEFINE_INT32(mw2mp_native_front_end_reuse_drift_ms, 3000, "MW2",
                      "Native renderer: with mw2mp_native_front_end_reuse, a slow drift of the view redraws the scene "
                      "at most this often (ms)")
     .range(0, 60000);
-REXCVAR_DEFINE_INT32(mw2mp_native_front_end_reuse_settle, 30, "BO2",
+REXCVAR_DEFINE_INT32(mw2mp_native_front_end_reuse_settle, 30, "MW2",
                      "Native renderer: with mw2mp_native_front_end_reuse, when the front end opens (or its scene "
                      "changes entirely) the scene is drawn in full for this many still frames before it is reused, so "
                      "the effects that build up over frames on the GPU (exposure, glow) settle first")
     .range(0, 600);
-REXCVAR_DEFINE_INT32(mw2mp_native_front_end_reuse_settle_ms, 8000, "BO2",
+REXCVAR_DEFINE_INT32(mw2mp_native_front_end_reuse_settle_ms, 8000, "MW2",
                      "Native renderer: with mw2mp_native_front_end_reuse, a new scene (the front end opening or "
                      "loading again) is not kept before this long, while its textures stream in and the landing's "
                      "blur and boot-up run")
     .range(0, 60000);
-REXCVAR_DEFINE_INT32(mw2mp_native_front_end_reuse_still_ms, 2000, "BO2",
+REXCVAR_DEFINE_INT32(mw2mp_native_front_end_reuse_still_ms, 2000, "MW2",
                      "Native renderer: with mw2mp_native_front_end_reuse, the scene is kept only once its view has held "
                      "still for this long after a move")
     .range(0, 60000);
-REXCVAR_DEFINE_INT32(mw2mp_native_front_end_reuse_settle_move, 10, "BO2",
+REXCVAR_DEFINE_INT32(mw2mp_native_front_end_reuse_settle_move, 10, "MW2",
                      "Native renderer: with mw2mp_native_front_end_reuse, the still frames drawn in full after a camera "
                      "move (the exposure changes less than when the front end opens)")
     .range(0, 600);
-REXCVAR_DEFINE_INT32(mw2mp_native_front_end_reuse_refresh_ms, 0, "BO2",
+REXCVAR_DEFINE_INT32(mw2mp_native_front_end_reuse_refresh_ms, 0, "MW2",
                      "Native renderer: with mw2mp_native_front_end_reuse, the scene is drawn again after this many "
                      "ms even if its view did not change (0 = only when it changes)")
     .range(0, 60000);
-REXCVAR_DEFINE_INT32(mw2mp_native_diag_frame_s, 0, "BO2",
+REXCVAR_DEFINE_INT32(mw2mp_native_diag_frame_s, 0, "MW2",
                      "Native renderer: after these seconds, logs every draw and every copy of one whole frame (0 = no; "
                      "tests only)");
-REXCVAR_DEFINE_STRING(mw2mp_native_diag_vertices_ps, "", "BO2",
+REXCVAR_DEFINE_STRING(mw2mp_native_diag_vertices_ps, "", "MW2",
                       "Native renderer: in the traced frame, for draws with these PS (comma-separated numbers) logs the "
                       "VS fetches and the bytes of their first vertices and texels (tests only)");
 // The game measures with an occlusion query how much of the sun is visible (sub_82225438: GetData, Issue(BEGIN),
 // a draw and Issue(END)) and uses it to turn off the flare when trees or terrain cover it. With the faked count of
 // 1000 samples the flare was always drawn in full: sky burned to white and blue or purple halos in the trees.
-REXCVAR_DEFINE_INT32(mw2mp_native_occlusion, 1, "BO2",
+REXCVAR_DEFINE_INT32(mw2mp_native_occlusion, 1, "MW2",
                      "Native renderer: the game's occlusion queries (the sun flare). 1 = measured on the GPU, like the "
                      "Xbox 360; 0 = a fake count of 1000 samples (what was there before: the flare is never "
                      "hidden); 2 = a fake count of 0 samples (tests only: never a flare)")
     .range(0, 2)
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
-REXCVAR_DEFINE_STRING(mw2mp_native_diag_constants_ps, "", "BO2",
+REXCVAR_DEFINE_STRING(mw2mp_native_diag_constants_ps, "", "MW2",
                       "Native renderer (tests only): PS numbers (comma-separated) whose first 12 constants are logged, "
                       "at most every mw2mp_native_diag_constants_ms");
-REXCVAR_DEFINE_INT32(mw2mp_native_diag_constants_ms, 250, "BO2",
+REXCVAR_DEFINE_INT32(mw2mp_native_diag_constants_ms, 250, "MW2",
                      "Native renderer (tests only): minimum interval between constant logs per PS")
     .range(0, 60000);
-REXCVAR_DEFINE_INT32(mw2mp_native_occlusion_alternate_s, 0, "BO2",
+REXCVAR_DEFINE_INT32(mw2mp_native_occlusion_alternate_s, 0, "MW2",
                      "Native renderer (tests only): with mw2mp_native_occlusion = 1 and N > 0, alternates every N "
                      "seconds between measured queries (even spans) and the fake count of 1000 (odd spans), and logs "
                      "each switch, to compare the sun flare in the same session")
     .range(0, 600)
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
-REXCVAR_DEFINE_INT32(mw2mp_native_occlusion_scale, 0, "BO2",
+REXCVAR_DEFINE_INT32(mw2mp_native_occlusion_scale, 0, "MW2",
                      "Native renderer: samples per pixel used to count the occlusion queries (0 = those of the "
                      "antialiasing mode the game has chosen, as on the Xbox 360; 1-16 = fixed, tests only)")
     .range(0, 16)
@@ -2691,7 +2691,7 @@ class NativeRenderSystem final : public rex::system::IGraphicsSystem {
         vertices += fmt::format(" {:.4g}", float_value(rex::memory::load_and_swap<uint32_t>(data + i * 4)));
       }
     }
-    REXLOG_INFO("[native] BO2 draw without a shader: vs {} ({} words) ps {} ({} words) start {:08X} mode {} z {:08X} "
+    REXLOG_INFO("[native] draw without a shader: vs {} ({} words) ps {} ({} words) start {:08X} mode {} z {:08X} "
                 "mask {:08X} color {:08X} depth {:08X} surface {:08X} vte {:08X} stencil {:08X} clear z {:08X} color "
                 "{:08X} fetch0 {:08X} {:08X};{} | vertices:{}",
                 vs_draw_ ? int(vs_draw_->number) : -1, vs_microcode_.size(),
@@ -2863,13 +2863,13 @@ class NativeRenderSystem final : public rex::system::IGraphicsSystem {
     memexport_ns_ += uint64_t(
         std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count());
     if (memexport_done_ <= 2) {
-      REXLOG_INFO("[native] BO2 memexport trace: c255 {:08X} {:08X} {:08X} {:08X} c254 {:08X} {:08X};{}",
+      REXLOG_INFO("[native] memexport trace: c255 {:08X} {:08X} {:08X} {:08X} c254 {:08X} {:08X};{}",
                   DvarRecord(0x4000 + 255 * 4), DvarRecord(0x4001 + 255 * 4), DvarRecord(0x4002 + 255 * 4),
                   DvarRecord(0x4003 + 255 * 4), DvarRecord(0x4000 + 254 * 4), DvarRecord(0x4001 + 254 * 4),
                   sink.trace);
     }
     if (memexport_done_ <= 3 || memexport_done_ % 2000 == 0 || sink.rejected || sink.format_odd) {
-      REXLOG_INFO("[native] BO2 memexport done on the CPU: draw {} ({} vertices, source {}): {} elements at "
+      REXLOG_INFO("[native] memexport done on the CPU: draw {} ({} vertices, source {}): {} elements at "
                   "{:08X}-{:08X}, {} outside the count, {} eA rejected, format not handled {}; in total {} elements, "
                   "{:.1f} ms ({} without the interpreter)",
                   memexport_done_, num_indices, source_kind, sink.elements,
@@ -2987,14 +2987,14 @@ class NativeRenderSystem final : public rex::system::IGraphicsSystem {
                              reference.elements == direct.elements && reference.outside == direct.outside;
     const bool same_bytes = copy.empty() || std::memcmp(copy.data(), physical + direct.dir_min, copy.size()) == 0;
     if ((!same_range || !same_bytes) && ++memexport_different_ <= 8) {
-      REXLOG_ERROR("[native] BO2 direct memexport: MISMATCH with the interpreter in draw {}: range {:08X}-{:08X} and {} "
+      REXLOG_ERROR("[native] direct memexport: MISMATCH with the interpreter in draw {}: range {:08X}-{:08X} and {} "
                    "elements ({} outside) versus {:08X}-{:08X} and {} ({} outside); bytes {}",
                    memexport_done_ + 1, direct.dir_min, direct.dir_max, direct.elements, direct.outside,
                    reference.dir_min, reference.dir_max, reference.elements, reference.outside,
                    same_bytes ? "equal" : "different");
     }
     if (memexport_verified_ % 500 == 0) {
-      REXLOG_INFO("[native] BO2 direct memexport: {} draws compared with the interpreter, {} with differences",
+      REXLOG_INFO("[native] direct memexport: {} draws compared with the interpreter, {} with differences",
                   memexport_verified_, memexport_different_);
     }
     return same_range && same_bytes;
@@ -3011,7 +3011,7 @@ class NativeRenderSystem final : public rex::system::IGraphicsSystem {
     const uint64_t hash = XXH3_64bits(vs_microcode_.data(), vs_microcode_.size() * sizeof(uint32_t));
     if (!memexport_seen_.insert(hash).second || memexport_seen_.size() > 64) {
       if (memexport_draws_ % 2000 == 0) {
-        REXLOG_INFO("[native] BO2 memexport: {} draws not handled ({} different VS)", memexport_draws_,
+        REXLOG_INFO("[native] memexport: {} draws not handled ({} different VS)", memexport_draws_,
                     memexport_seen_.size());
       }
       return;
@@ -3028,7 +3028,7 @@ class NativeRenderSystem final : public rex::system::IGraphicsSystem {
                                 DvarRecord(0x4001 + k * 4), DvarRecord(0x4002 + k * 4), DvarRecord(0x4003 + k * 4),
                                 float_value(DvarRecord(0x4000 + k * 4)));
     }
-    REXLOG_INFO("[native] BO2 memexport: VS {:016X} ({} words, in the library: {}) ps {} start {:08X} indices {} mode "
+    REXLOG_INFO("[native] memexport: VS {:016X} ({} words, in the library: {}) ps {} start {:08X} indices {} mode "
                 "{} mask {:08X} fetch0 {:08X} {:08X};{}",
                 hash, vs_microcode_.size(), vs_draw_ ? "si" : "no", ps_draw_ ? int(ps_draw_->number) : -1,
                 DvarRecord(g::XE_GPU_REG_VGT_DRAW_INITIATOR), DvarRecord(g::XE_GPU_REG_VGT_DRAW_INITIATOR) >> 16,
@@ -3077,7 +3077,7 @@ class NativeRenderSystem final : public rex::system::IGraphicsSystem {
     }
     const auto no_is_clear = [this](const char* reason) {
       if (clears_d3d_rejected_++ < 16) {
-        REXLOG_WARN("[native] BO2 D3D clear not applied ({}): z {:08X} stencil {:08X} mask {:08X} mode {}",
+        REXLOG_WARN("[native] D3D clear not applied ({}): z {:08X} stencil {:08X} mask {:08X} mode {}",
                     reason, DvarRecord(rex::graphics::XE_GPU_REG_RB_DEPTHCONTROL),
                     DvarRecord(rex::graphics::XE_GPU_REG_RB_STENCILREFMASK),
                     DvarRecord(rex::graphics::XE_GPU_REG_RB_COLOR_MASK),
@@ -3182,7 +3182,7 @@ class NativeRenderSystem final : public rex::system::IGraphicsSystem {
       for (uint32_t i = 0; i < words; ++i) {
         raw += fmt::format(" {:.4g}", float_value(rex::memory::load_and_swap<uint32_t>(data + size_t(i) * 4)));
       }
-      REXLOG_INFO("[native] BO2 D3D clear: surface {:08X} z {:08X} stencil {:08X} depth {:08X} color {:08X} mode {} -> "
+      REXLOG_INFO("[native] D3D clear: surface {:08X} z {:08X} stencil {:08X} depth {:08X} color {:08X} mode {} -> "
                   "z {} ({:.6g}) stencil {} ({}) color {} ({:.3g},{:.3g},{:.3g},{:.3g});{} | vertices:{}",
                   surface, control_z, stencil, info_z, info_color, mode, b.depth, b.z, b.stencil,
                   b.value_stencil, b.color, b.rgba[0], b.rgba[1], b.rgba[2], b.rgba[3], detail, raw);
@@ -3190,7 +3190,7 @@ class NativeRenderSystem final : public rex::system::IGraphicsSystem {
         std::string vs, ps;
         for (uint32_t w : vs_microcode_) vs += fmt::format(" {:08X}", w);
         for (uint32_t i = 0; i < 9; ++i) ps += fmt::format(" {:08X}", ps_immediate_mw2mp_[i]);
-        REXLOG_INFO("[native] BO2 D3D clear: VS{} | PS{}", vs, ps);
+        REXLOG_INFO("[native] D3D clear: VS{} | PS{}", vs, ps);
       }
     }
     return true;
@@ -3420,7 +3420,7 @@ class NativeRenderSystem final : public rex::system::IGraphicsSystem {
         sum += data[i];
       }
     }
-    REXLOG_INFO("[native] BO2 LUT strip: PS n{} viewport {}x{}; fetch 0 {:08X} {:08X} {:08X} {:08X} {:08X} {:08X}, "
+    REXLOG_INFO("[native] LUT strip: PS n{} viewport {}x{}; fetch 0 {:08X} {:08X} {:08X} {:08X} {:08X} {:08X}, "
                 "average of the table's 4 KB {:.1f};{}",
                 ps_draw_ ? int(ps_draw_->number) : -1, std::abs(scale_x) * 2, std::abs(scale_y) * 2,
                 DvarRecord(f0), DvarRecord(f0 + 1), DvarRecord(f0 + 2), DvarRecord(f0 + 3), DvarRecord(f0 + 4),
@@ -3550,7 +3550,7 @@ class NativeRenderSystem final : public rex::system::IGraphicsSystem {
         rex::filesystem::GetExecutableFolder() / fmt::format("dump_mem_{:08X}_{}s.bin", address, seconds);
     std::ofstream output(path, std::ios::binary);
     output.write(reinterpret_cast<const char*>(memory_->TranslatePhysical(address)), std::streamsize(bytes));
-    REXLOG_INFO("[native] BO2: memory {:08X}+{:X} dumped to {}", address, bytes, path.string());
+    REXLOG_INFO("[native] memory {:08X}+{:X} dumped to {}", address, bytes, path.string());
   }
   bool memory_dumped_mw2mp_ = false;
 

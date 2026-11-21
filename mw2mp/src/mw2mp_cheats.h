@@ -1,5 +1,6 @@
-// Cheats for the Zombies modes, driven by the Extras menu (app/src/ui/menus.lua; the saved settings are in
-// mw2mp_extras.cpp). mw2mp_cheats.cpp explains how each one works; in short:
+// The renderer's interface to bo2-360-nx's Zombies cheats, kept so the renderer compiles unchanged; MW2 has none of
+// them, and mw2mp_native_stubs.cpp answers "off". Upstream (the Extras menu, menus.lua; mw2mp_extras.cpp and
+// mw2mp_cheats.cpp there) they worked like this:
 //   - God mode: the primary local actor takes no damage at all (the game's damage function skips them, so nothing kills them, not
 //     even leaving the playable area), and the game's own invulnerability flag is kept set.
 //   - Noclip and UFO (fly modes, one at a time): retail TU18 has no code for them. Noclip runs the game's spectator

@@ -153,7 +153,7 @@ REXCVAR_DEFINE_INT32(switch_io_ranges_mb, 320, "Filesystem",
 // Floor, in KB. A 4 MB floor would leave out the small requests that repeat most (a few hundred KB to 2 MB).
 REXCVAR_DEFINE_INT32(switch_io_ranges_min_kb, 64, "Filesystem",
                      "Only reads of this many KB or more are cached. 64 = MW2's smallest reread image reads "
-                     "(BO2's simulation preferred 256 at the old 64 MB cap).");
+                     "(bo2-360-nx's simulation preferred 256 at the old 64 MB cap).");
 
 // Compatibility: the old cvar in MB. If a toml sets it to a value > 0, it overrides the KB one.
 REXCVAR_DEFINE_INT32(switch_io_ranges_min_mb, 0, "Filesystem",

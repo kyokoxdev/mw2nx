@@ -157,7 +157,7 @@ libraries into `sd/atmosphere/contents/01F2D6C0A9E40000/`, the installed game's 
 python3 -I tools/make_setup_zip.py --version 1.0.0
 ```
 
-It builds the shader tools (`zone_containers`, `bo2zm_hlsl`, `bo2zm_pack`) as static programs for Linux with `g++` and
+It builds the shader tools (`zone_containers`, `mw2_hlsl`, `mw2_pack`) as static programs for Linux with `g++` and
 for Windows with `x86_64-w64-mingw32-g++` (13 or later), and packs them with the script, the Campaign's pipeline lists
 and the bundled mods into `<data>/release/mw2nx-setup-1.0.0.zip`. The zone reader comes from a checkout of
 mw2-recompiled (`MW2_RECOMPILED`, default `~/projects/mw2-recompiled`). The kit contains no game data.

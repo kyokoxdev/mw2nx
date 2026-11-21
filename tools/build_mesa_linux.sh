@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Linux (x86_64 / WSL2, no sudo) twin of tools/build_mesa.sh: builds the Mesa/NVK Vulkan driver for the Switch
-# (static libvulkan.a SDK) from danfromtico/mesa-switch at 1a8c1a66d6f plus patches/mesa-bo2zm.patch.
+# Builds the Mesa/NVK Vulkan driver for the Switch on the Linux host (x86_64 / WSL2, no sudo)
+# (static libvulkan.a SDK) from danfromtico/mesa-switch at 1a8c1a66d6f plus patches/mesa-mw2nx.patch.
 # mesa-switch's own build-unified.sh only runs under MSYS2 and its Linux path needs Docker and root, so this follows
 # the same two steps by hand: native host tools (mesa_clc, vtn_bindgen2), then the Horizon cross build. Vulkan only.
 #
@@ -19,7 +19,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 MESA="${MESA_DIR:-$(bash "$ROOT/tools/data_dir.sh")/mesa}"
-PATCH="$ROOT/patches/mesa-bo2zm.patch"
+PATCH="$ROOT/patches/mesa-mw2nx.patch"
 export DEVKITPRO="${DEVKITPRO:-$HOME/devkitpro}"
 HOST_ROOT="${HOST_ROOT:-$HOME/tools/clang}"
 JOBS="${JOBS:-3}"
@@ -32,7 +32,7 @@ fi
 if git -C "$MESA" apply --check "$PATCH" 2>/dev/null; then
   git -C "$MESA" apply "$PATCH"
 elif ! git -C "$MESA" apply --check -R "$PATCH" 2>/dev/null; then
-  echo "patches/mesa-bo2zm.patch neither applies nor is already applied to $MESA" >&2
+  echo "patches/mesa-mw2nx.patch neither applies nor is already applied to $MESA" >&2
   exit 1
 fi
 
