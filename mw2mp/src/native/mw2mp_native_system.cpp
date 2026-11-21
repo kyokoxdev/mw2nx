@@ -60,7 +60,7 @@ REXCVAR_DEFINE_BOOL(mw2mp_native_clear_quads, true, "MW2",
                     "Native renderer: run Direct3D's Clear() rectangles as clears (off = drop them, as before)")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 
-REXCVAR_DEFINE_INT32(mw2mp_native_report_s, 10, "MW2",
+REXCVAR_DEFINE_INT32(mw2mp_native_report_s, 0, "MW2",
                      "Native renderer: seconds between ring reports in the log (0 = off)");
 
 namespace mw2mp::native {

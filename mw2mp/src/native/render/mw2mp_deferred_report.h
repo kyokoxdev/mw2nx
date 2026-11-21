@@ -18,4 +18,10 @@ namespace mw2mp::native {
 void ReportDeferred(std::string line);
 }  // namespace mw2mp::native
 
-#define MW2MP_REPORT_DEFERRED(...) ::mw2mp::native::ReportDeferred(fmt::format(__VA_ARGS__))
+// Not even formatted below info (the default log_level is warn).
+#define MW2MP_REPORT_DEFERRED(...)                                                            \
+  do {                                                                                        \
+    auto* mw2mp_log_ = ::rex::GetLoggerRaw(::rex::log::core());                               \
+    if (mw2mp_log_ && mw2mp_log_->should_log(spdlog::level::info))                            \
+      ::mw2mp::native::ReportDeferred(fmt::format(__VA_ARGS__));                              \
+  } while (0)

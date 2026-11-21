@@ -129,7 +129,7 @@ them with `appletExecuteProgram`, passing the Switch user along so both programs
 
 ```bash
 # the last LTO+PGO builds of both programs, then:
-python3 -I tools/make_nsp.py --version 1.0.0
+python3 -I tools/make_nsp.py --version 1.0.1
 ```
 
 | Needs | Where |
@@ -139,7 +139,7 @@ python3 -I tools/make_nsp.py --version 1.0.0
 | Your console's keys | `--keys` (default `docs/prod.keys`): the NCAs are encrypted with the builder's own keys |
 | An icon | `--icon` (default `docs/images/icon.jpg`) |
 
-The output is `<data>/nsp/mw2nx-1.0.0-[01F2D6C0A9E40000].nsp`. The keys and the icon are local files and are never
+The output is `<data>/nsp/mw2nx-1.0.1-01F2D6C0A9E40000.nsp`. The keys and the icon are local files and are never
 committed (both paths are git-ignored); the NSP contains no game data.
 
 **Installed, the program uses its own folder**, `sdmc:/atmosphere/contents/01F2D6C0A9E40000/`, for `game/`, `update/`,
@@ -149,15 +149,15 @@ are the console's save data of the application (32 MB with a 16 MB journal). `ap
 
 ## The setup kit
 
-The release's second file, `mw2nx-setup-1.0.0.zip`, is what players run on their PC (Windows or Linux, Python 3.11
+The release's second file, `mw2nx-setup-1.0.1.zip`, is what players run on their PC (Windows or Linux, Python 3.11
 or later): `mw2nx_setup.py` checks their ISO, downloads Title Update 6 and DXC, extracts the disc and builds both shader
 libraries into `sd/atmosphere/contents/01F2D6C0A9E40000/`, the installed game's folder.
 
 ```bash
-python3 -I tools/make_setup_zip.py --version 1.0.0
+python3 -I tools/make_setup_zip.py --version 1.0.1
 ```
 
 It builds the shader tools (`zone_containers`, `mw2_hlsl`, `mw2_pack`) as static programs for Linux with `g++` and
 for Windows with `x86_64-w64-mingw32-g++` (13 or later), and packs them with the script, the Campaign's pipeline lists
-and the bundled mods into `<data>/release/mw2nx-setup-1.0.0.zip`. The zone reader comes from a checkout of
+and the bundled mods into `<data>/release/mw2nx-setup-1.0.1.zip`. The zone reader comes from a checkout of
 mw2-recompiled (`MW2_RECOMPILED`, default `~/projects/mw2-recompiled`). The kit contains no game data.

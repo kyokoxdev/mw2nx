@@ -402,7 +402,13 @@ extern std::atomic<bool> g_syncs_on_flush_waits;
  */
 void ReportDeferred(std::string line);
 
-// Like REXLOG_INFO, but the report thread does the SD write (ReportDeferred).
-#define MW2MP_REPORT_RING(...) ::mw2mp::native::ReportDeferred(fmt::format(__VA_ARGS__))
+// Like REXLOG_INFO, but the report thread does the SD write (ReportDeferred). Not even formatted below info (the
+// default log_level is warn).
+#define MW2MP_REPORT_RING(...)                                                                \
+  do {                                                                                        \
+    auto* mw2mp_log_ = ::rex::GetLoggerRaw(::rex::log::core());                               \
+    if (mw2mp_log_ && mw2mp_log_->should_log(spdlog::level::info))                            \
+      ::mw2mp::native::ReportDeferred(fmt::format(__VA_ARGS__));                              \
+  } while (0)
 
 }  // namespace mw2mp::native

@@ -35,7 +35,14 @@
 // libnx's (switch.h's typedefs collide with rex): starts the bsd service that BSD sockets need on Horizon.
 struct SocketInitConfig;
 extern "C" uint32_t socketInitialize(const SocketInitConfig* config);
+// sdk/src/ui/switch_perf.cpp: whether the 10 s profile report goes to logs/rex/rex_profile.log.
+extern "C" void RexSwitchPerfSetReport(bool on);
 #endif
+
+REXCVAR_DEFINE_BOOL(mw2mp_profile_report, false, "MW2",
+                    "Development: the 10 s CPU/thread profile report in logs/rex/rex_profile.log (stack sampling "
+                    "still needs logs/rex/profile_stacks.flag)")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 
 // The gamertag (XamUserGetName, XamUserGetSigninInfo: lobby, scoreboard, killfeed). The SDK names the profile "User".
 REXCVAR_DEFINE_STRING(mw2mp_user_name, "", "MW2",
@@ -98,6 +105,9 @@ class Mw2mpApp : public rex::ReXApp {
   void OnPostInitLogging() override {
     mw2mp::settings::RequestBootClocks();
     mw2mp::ConfigureCores();
+#if REX_PLATFORM_SWITCH
+    RexSwitchPerfSetReport(REXCVAR_GET(mw2mp_profile_report));
+#endif
   }
 
   // The profile's name before the game runs (it reads the gamertag when it signs in). Renaming keeps the profile and

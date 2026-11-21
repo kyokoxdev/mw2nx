@@ -11,7 +11,7 @@
 No game data goes in it. Needs g++ (static libstdc++) and x86_64-w64-mingw32-g++ (13 or later), and a checkout of
 mw2-recompiled for the zone reader (MW2_RECOMPILED, default ~/projects/mw2-recompiled).
 
-usage: python3 -I tools/make_setup_zip.py --version 1.0.0
+usage: python3 -I tools/make_setup_zip.py --version 1.0.1
 """
 import argparse
 import os

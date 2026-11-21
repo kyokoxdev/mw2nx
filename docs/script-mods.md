@@ -14,8 +14,8 @@ replaces or adds scripts. It does not sandbox what they do. Campaign does not lo
    mw2mp_mod = "<name>"
    ```
 
-3. Start multiplayer. The log (`logs/`) shows `[gsc] mod "<name>"`, then one `[gsc] ... from the mod` line for each
-   script the mod supplies.
+3. Start multiplayer. With `log_level = "info"` in the toml, the log (`logs/`) shows `[gsc] mod "<name>"`, then one
+   `[gsc] ... from the mod` line for each script the mod supplies.
 
 Set `mw2mp_mod = ""` to play without mods; with the line removed, the bundled Bot Warfare loads. Only one mod is active at a time.
 

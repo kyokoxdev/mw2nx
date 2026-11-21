@@ -1360,7 +1360,7 @@ void XThread::SetActiveCpu(uint8_t cpu_index) {
     // second written and flushed to the SD (29,771 in six minutes).
     static std::atomic<bool> warned{false};
     if (!warned.exchange(true)) {
-      REXSYS_WARN("Too few processor cores - scheduling will be wonky");
+      REXSYS_INFO("Too few processor cores - scheduling will be wonky");
     }
   }
 }

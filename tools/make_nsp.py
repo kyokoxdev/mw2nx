@@ -192,7 +192,7 @@ def main():
     shutil.copytree(os.path.join(ROOT, "mw2sp", "pipelines"), os.path.join(romfs, "pipelines"))
     nsp, _, _ = hacbrewpack(args, os.path.join(stage, "pack_application"), TITLE_ID, exefs_sp, control,
                             ["--romfsdir", romfs, "--extraprogram", program_mp, "--extracontrol", control_nca_mp])
-    final = os.path.join(args.out, f"mw2nx-{args.version}-[{TITLE_ID:016X}].nsp")
+    final = os.path.join(args.out, f"mw2nx-{args.version}-{TITLE_ID:016X}.nsp")
     os.replace(nsp, final)
     print(f"{final}: {os.path.getsize(final) / (1 << 20):.1f} MB")
 

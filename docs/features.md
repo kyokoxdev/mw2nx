@@ -51,5 +51,6 @@ mw2mp_show_fps = true
 | `mw2mp_preset_test_s` | Steps through the presets every N seconds, for an A/B in one run |
 | `mw2mp_native_per_draw_stats_s` | Draw statistics every N seconds |
 
-Logs go to `logs/` in the game's folder (next to the NRO when run as one). Anything under `mw2mp_native_*` is a renderer switch for development and is
+Logs go to `logs/` in the game's folder (next to the NRO when run as one): warnings and errors only, unless the toml
+sets `log_level = "info"`. Anything under `mw2mp_native_*` is a renderer switch for development and is
 documented in the source beside its definition.

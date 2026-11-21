@@ -64,7 +64,7 @@ std::unique_ptr<VulkanProvider> VulkanProvider::Create(const bool with_gpu_emula
 
   const VulkanInstance::Functions& ifn = provider->vulkan_instance_->functions();
 
-  REXLOG_WARN(
+  REXLOG_INFO(
       "Available Vulkan physical devices (use the 'vulkan_device' "
       "configuration variable to force a specific device):");
   for (size_t physical_device_index = 0; physical_device_index < physical_devices.size();
@@ -72,7 +72,7 @@ std::unique_ptr<VulkanProvider> VulkanProvider::Create(const bool with_gpu_emula
     VkPhysicalDeviceProperties physical_device_properties;
     ifn.vkGetPhysicalDeviceProperties(physical_devices[physical_device_index],
                                       &physical_device_properties);
-    REXLOG_WARN("* {}: {}", physical_device_index, physical_device_properties.deviceName);
+    REXLOG_INFO("* {}: {}", physical_device_index, physical_device_properties.deviceName);
   }
 
   if (REXCVAR_GET(vulkan_device) >= 0 &&

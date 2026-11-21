@@ -116,7 +116,7 @@ REXCVAR_DEFINE_BOOL(vulkan_allow_present_mode_fifo_relaxed, true, "UI/Vulkan",
                     "Allow FIFO relaxed present mode");
 
 #if REX_PLATFORM_SWITCH
-#define REX_PRESENT_PAINT_PROFILE_DEFAULT true
+#define REX_PRESENT_PAINT_PROFILE_DEFAULT false
 #else
 #define REX_PRESENT_PAINT_PROFILE_DEFAULT false
 #endif

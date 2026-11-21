@@ -8,7 +8,7 @@ else()
 endif()
 
 project(ReXGlue
-    VERSION 0.10.0
+    VERSION 1.0.0
     LANGUAGES ${REXGLUE_LANGUAGES}
     DESCRIPTION "Xbox 360 Recompilation SDK"
 )

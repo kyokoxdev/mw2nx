@@ -36,7 +36,7 @@
 #include <spdlog/sinks/stdout_sinks.h>
 #endif
 
-REXCVAR_DEFINE_STRING(log_level, "info", "Log",
+REXCVAR_DEFINE_STRING(log_level, "warn", "Log",
                       "Global log level: trace, debug, info, warn, error, critical, off")
     .allowed({"trace", "debug", "info", "warn", "error", "critical", "off"});
 

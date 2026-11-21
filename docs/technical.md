@@ -145,10 +145,10 @@ checkpoint hitches in the Campaign. The run-by-run detail is in [MW2.md](MW2.md)
 ## Testing and measuring
 
 - **Benchmark**: `mw2mp_benchmark` runs a timed window in a private match for PGO training and for comparing builds.
-- **Profiler**: stack samples of every game thread (`logs/rex/profile_stacks.flag` on the SD card), symbolised with
-  `tools/profile_sym.py`.
-- **Logs**: each run writes a numbered console log; the renderer reports draws, pipelines compiled and skipped draws
-  every ten seconds.
+- **Profiler**: `mw2mp_profile_report = true` writes `logs/rex/rex_profile.log` every ten seconds; stack samples of
+  every game thread need `logs/rex/profile_stacks.flag` on the SD card too. Symbolised with `tools/profile_sym.py`.
+- **Logs**: each run writes a numbered console log, warnings and errors only by default. With `log_level = "info"` the
+  renderer also reports draws, pipelines compiled and skipped draws every ten seconds.
 - **Crashes**: Atmosphère's crash report is matched to the ELF by build ID (module ID), so a stale program is spotted.
 - **Clocks**: the profile log prints the real CPU, GPU and memory clocks with the SoC temperature every ten seconds;
   check it before blaming code for a slow run (a missing sys-clk profile for Multiplayer's program ID once looked like a

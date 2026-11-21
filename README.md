@@ -9,7 +9,7 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/Nintendo%20Switch-E60012?style=for-the-badge&logo=nintendoswitch&logoColor=white" alt="Nintendo Switch">
-  <img src="https://img.shields.io/badge/release-1.0.0-brightgreen?style=for-the-badge" alt="Release: 1.0.0">
+  <img src="https://img.shields.io/badge/release-1.0.1-brightgreen?style=for-the-badge" alt="Release: 1.0.1">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-GPL--3.0-blue?style=for-the-badge" alt="License: GPL-3.0"></a>
 </p>
 
@@ -79,8 +79,8 @@ Settings and their file: [docs/features.md](docs/features.md).
 
 Steps:
 
-1. **Install the NSP** (`mw2nx-1.0.0-[01F2D6C0A9E40000].nsp` from the release) on the console.
-2. **Run the setup script.** Unpack `mw2nx-setup-1.0.0.zip` from the release, put your ISO in its folder and run
+1. **Install the NSP** (`mw2nx-1.0.1-01F2D6C0A9E40000.nsp` from the release) on the console.
+2. **Run the setup script.** Unpack `mw2nx-setup-1.0.1.zip` from the release, put your ISO in its folder and run
    `python mw2nx_setup.py` (on Windows, double-clicking it works too). It checks the disc, downloads Title Update 6 and
    Microsoft's shader compiler, extracts your files and builds both shader libraries into `sd/atmosphere/`. It needs
    about 10 GB of free space and 10-40 minutes, depending on the PC; the shader libraries are derived from your disc and never shared.

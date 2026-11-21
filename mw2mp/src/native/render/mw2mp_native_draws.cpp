@@ -623,7 +623,7 @@ REXCVAR_DEFINE_INT32(mw2mp_native_texture_hash_thread_mb, 16, "MW2",
  * no decision of the ring: it only counts, and reports every 10 s in the "C3 reuse by content"
  * line.
  */
-REXCVAR_DEFINE_BOOL(mw2mp_native_diag_reuse, true, "MW2",
+REXCVAR_DEFINE_BOOL(mw2mp_native_diag_reuse, false, "MW2",
                     "Native renderer (measurement only): counts how many new textures have the same "
                     "content and shape as another live one in the cache (the game reloads the packs at another address) "
                     "and how many of those others have gone unused for more than 120 frames. Changes nothing. false = "
@@ -1598,7 +1598,7 @@ REXCVAR_DEFINE_BOOL(mw2mp_native_dynamic_state3, false, "MW2",
                     "Native renderer: blend, equation and color mask with vkCmdSet* "
                     "(VK_EXT_extended_dynamic_state3) instead of in the pipeline. Checks itself. false = in the "
                     "pipeline, as before");
-REXCVAR_DEFINE_BOOL(mw2mp_native_diag_upload_memory, true, "MW2",
+REXCVAR_DEFINE_BOOL(mw2mp_native_diag_upload_memory, false, "MW2",
                     "Native renderer: when the upload buffer is created, measures once how many MB/s the CPU writes "
                     "into each visible memory type (8 MB) and how much publishing them costs")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
