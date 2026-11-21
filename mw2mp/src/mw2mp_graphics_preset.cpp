@@ -68,15 +68,23 @@ REXCVAR_DEFINE_INT32(mw2mp_draw_distance, -1, "Graphics",
 // The calibration knob for model detail (the hook on XModelGetLodForDist below; campaign only).
 REXCVAR_DEFINE_DOUBLE(mw2mp_model_detail, 0.0, "Graphics",
                       "Campaign: how much sooner models switch to their simpler versions (their switch distances are "
-                      "divided by this). 0: the preset's (very_low 2.5, low 1.5, medium 1.25, high 1 = the game's own). A "
+                      "divided by this). 0: the preset's (very_low 1.5, low 1.5, medium 1.25, high 1 = the game's own). A "
                       "model the game draws is never hidden by it, only simplified. Applied at once")
+    .range(0.0, 8.0);
+
+// The small-prop cull's own distance factor (ChooseModelVersion below; very_low only). Split from mw2mp_model_detail
+// after run mw2sp_036: the GPU had room for detailed models (7-13 ms a frame) but every prop the cull lets back costs a
+// draw on the ring thread, and the user minded props popping in more than models changing shape.
+REXCVAR_DEFINE_DOUBLE(mw2mp_model_cull_detail, 0.0, "Graphics",
+                      "very_low preset: the small-prop cull hides a prop once its distance times this passes its "
+                      "simplest version's distance (higher: props vanish nearer, fewer draws). 0: 2.0. Applied at once")
     .range(0.0, 8.0);
 
 // The calibration knob for the small-prop cull (ChooseModelVersion below; very_low only).
 // Run mw2sp_014: at 64 it hid ~1 % of favela_escape's draws and no pop-in showed; 128 takes medium props too.
 REXCVAR_DEFINE_DOUBLE(mw2mp_model_cull_reach, 128.0, "Graphics",
                       "very_low preset: static props smaller than this many units (middle to farthest "
-                      "corner) are hidden once their distance times the model detail factor passes their simplest "
+                      "corner) are hidden once their distance times mw2mp_model_cull_detail passes their simplest "
                       "version's distance, as PC MW2 does with r_lodScaleRigid. Characters, weapons, vehicles and "
                       "effects are never hidden. 0: off. Applied at once")
     .range(0.0, 1024.0);
@@ -229,9 +237,12 @@ constexpr uint32_t kMipsMinus[kLevels] = {0, 0, 0, 1};
 // Run mw2sp_007: at 4 up to 37 % of the picks were simpler than the game's and the switches showed as pop-in, so
 // halved. Run mw2sp_014 (very_low at 2, small-prop cull at 64): the user saw no pop-in at all, while the ring thread
 // still set the frame rate, so very_low took 3. Run mw2sp_016 (3, cull reach 128): pop-in noticeable, so 2.5 (models
-// switch and small props vanish 20 % farther out), paid for with the scene at 80 %.
-constexpr float kModelFactors[kLevels] = {1.0f, 1.25f, 1.5f, 2.5f};
+// switch and small props vanish 20 % farther out), paid for with the scene at 80 %. Run mw2sp_036 (2.5): GPU 7-13 ms
+// a frame, ring-bound; the cull got its own factor (mw2mp_model_cull_detail, 2.0) and very_low's models went to 1.5.
+constexpr float kModelFactors[kLevels] = {1.0f, 1.25f, 1.5f, 1.5f};
+constexpr float kCullFactorDefault = 2.0f;
 std::atomic<float> g_model_factor{1.0f};
+std::atomic<float> g_cull_factor{kCullFactorDefault};
 std::atomic<uint32_t> g_model_picks{0};    // the hook's calls since the last report
 std::atomic<uint32_t> g_model_simpler{0};  // of those, a simpler version than the game's
 std::atomic<uint32_t> g_model_held{0};     // of those, held back from the simplest (it has more surfaces)
@@ -415,15 +426,17 @@ void Apply() {
   g_applied.store(level, std::memory_order_relaxed);
   const double model_detail = REXCVAR_GET(mw2mp_model_detail);
   g_model_factor.store(model_detail > 0.0 ? float(model_detail) : kModelFactors[level], std::memory_order_relaxed);
+  const double cull_detail = REXCVAR_GET(mw2mp_model_cull_detail);
+  g_cull_factor.store(cull_detail > 0.0 ? float(cull_detail) : kCullFactorDefault, std::memory_order_relaxed);
 #ifdef MW2_XMODEL_LOD_FOR_DIST
   static auto report_at = std::chrono::steady_clock::now();
   if (std::chrono::steady_clock::now() - report_at >= std::chrono::seconds(10)) {
     report_at = std::chrono::steady_clock::now();
     const uint32_t picks = g_model_picks.exchange(0, std::memory_order_relaxed);
     if (picks) {
-      REXLOG_INFO("[preset] model detail x{:.2f}, last 10 s: {} version picks, {} simpler than the game's ({} held "
-                  "back from the simplest), {} small static props hidden",
-                  g_model_factor.load(std::memory_order_relaxed), picks,
+      REXLOG_INFO("[preset] model detail x{:.2f}, cull x{:.2f}, last 10 s: {} version picks, {} simpler than the "
+                  "game's ({} held back from the simplest), {} small static props hidden",
+                  g_model_factor.load(std::memory_order_relaxed), g_cull_factor.load(std::memory_order_relaxed), picks,
                   g_model_simpler.exchange(0, std::memory_order_relaxed),
                   g_model_held.exchange(0, std::memory_order_relaxed),
                   g_model_culled.exchange(0, std::memory_order_relaxed));
@@ -567,8 +580,8 @@ void ChooseModelVersion(PPCContext& ctx, uint8_t* base, void (*game_pick)(PPCCon
   game_pick(ctx, base);
   const float factor = mw2mp::gfx_preset::g_model_factor.load(std::memory_order_relaxed);
   const int game = ctx.r3.s32;
-  if (factor == 1.0f || game < 0) {
-    return;  // the game's own, or the game itself puts it past its versions
+  if (game < 0) {
+    return;  // the game itself puts it past its versions
   }
   mw2mp::gfx_preset::g_model_picks.fetch_add(1, std::memory_order_relaxed);
   const uint8_t* const model = base + model_address;
@@ -576,16 +589,16 @@ void ChooseModelVersion(PPCContext& ctx, uint8_t* base, void (*game_pick)(PPCCon
   const auto limit = [model](int i) { return ModelFloat(model + 64 + 40 * i); };
   const float reach = ModelReach(model);
   // A small static prop past its simplest version's distance (the game's own cull test, on the plain distance) once
-  // scaled by the factor: hidden, as the game hides it past that distance unscaled.
+  // scaled by the cull factor (mw2mp_model_cull_detail): hidden, as the game hides it past that distance unscaled.
   if (static_model && lods >= 1 && mw2mp::gfx_preset::g_applied.load(std::memory_order_relaxed) == 3 &&
       reach < float(REXCVAR_GET(mw2mp_model_cull_reach)) && limit(lods - 1) > 0.0f &&
-      plain * factor >= limit(lods - 1)) {
+      plain * mw2mp::gfx_preset::g_cull_factor.load(std::memory_order_relaxed) >= limit(lods - 1)) {
     mw2mp::gfx_preset::g_model_culled.fetch_add(1, std::memory_order_relaxed);
     ctx.r3.s64 = -1;
     return;
   }
-  if (game >= lods - 1) {
-    return;  // already its simplest
+  if (factor == 1.0f || game >= lods - 1) {
+    return;  // the game's own versions, or already its simplest
   }
   const auto surfaces = [model](int i) { return rex::memory::load_and_swap<uint16_t>(model + 64 + 40 * i + 4); };
   constexpr float kReachLong = 256.0f;

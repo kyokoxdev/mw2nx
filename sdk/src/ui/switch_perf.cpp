@@ -776,6 +776,82 @@ void Report(u64 elapsed_ticks, u64 tick_freq, u64 counters_last[kCounterCount],
 }
 
 /*
+ * CPU and GPU clocks put back after waking from sleep.
+ *
+ * Run mw2sp_037: after a 157 s sleep the console came back at CPU 1020 / GPU 307.2 (stock handheld) instead
+ * of the 1785 / 768 the clock sysmodule had set before, and stayed there: Boneyard went from ~48 to 17-34 FPS.
+ * An earlier 73 s sleep in the same run came back fine, and so did four in run 034. So the sysmodule does not
+ * always re-apply its profile on wake.
+ *
+ * Every tick remembers the clocks. When a tick comes after a gap (the thread did not run: sleep or
+ * suspend), it waits kGraceTicks seconds for the sysmodule, then sets back with clkrst whatever is still
+ * below what it was before the gap. Only ever back to the console's own pre-sleep clocks, never above;
+ * not when the dock mode changed meanwhile (another column is legitimate); at most kTries times per wake.
+ * A sysmodule that is alive and wants other clocks re-applies its own on its next loop and wins.
+ */
+void ClockGuard(u64 elapsed, u64 freq, bool docked_real) {
+  constexpr unsigned kN = 2;  // CPU, GPU
+  constexpr int kGraceTicks = 3;
+  constexpr int kTries = 3;
+  static bool started = false, ok = false;
+  static ClkrstSession ses[kN]{};
+  static u32 before[kN] = {};
+  static bool docked_before = false;
+  static int grace = -1;  // -1: not after a gap
+  static int tries = 0;
+  if (!started) {
+    started = true;
+    ok = R_SUCCEEDED(clkrstInitialize()) && R_SUCCEEDED(clkrstOpenSession(&ses[0], PcvModuleId_CpuBus, 3)) &&
+         R_SUCCEEDED(clkrstOpenSession(&ses[1], PcvModuleId_GPU, 3));
+  }
+  if (!ok) {
+    return;
+  }
+  u32 hz[kN] = {};
+  for (unsigned i = 0; i < kN; ++i) {
+    if (R_FAILED(clkrstGetClockRate(&ses[i], &hz[i]))) {
+      return;
+    }
+  }
+  if (elapsed > 5 * freq) {
+    // The read right at wake is not trustworthy (run 037 read 2295 / 76.8): keep `before` as it was.
+    grace = before[0] && before[1] && docked_real == docked_before ? kGraceTicks : -1;
+    tries = 0;
+    return;
+  }
+  if (grace < 0) {
+    before[0] = hz[0];
+    before[1] = hz[1];
+    docked_before = docked_real;
+    return;
+  }
+  if (grace > 0) {
+    --grace;
+    return;
+  }
+  bool low = false;
+  for (unsigned i = 0; i < kN; ++i) {
+    low |= hz[i] + before[i] / 20 < before[i];  // more than 5 % below
+  }
+  if (!low || docked_real != docked_before || tries >= kTries) {
+    if (low) {
+      std::fprintf(stderr, "[clocks] after waking: still CPU %.1f / GPU %.1f MHz (was %.1f / %.1f), giving up\n",
+                   hz[0] / 1e6, hz[1] / 1e6, before[0] / 1e6, before[1] / 1e6);
+    }
+    grace = -1;  // back to tracking
+    return;
+  }
+  ++tries;
+  std::fprintf(stderr, "[clocks] after waking: CPU %.1f / GPU %.1f MHz, was %.1f / %.1f before: setting it back (try %d)\n",
+               hz[0] / 1e6, hz[1] / 1e6, before[0] / 1e6, before[1] / 1e6, tries);
+  for (unsigned i = 0; i < kN; ++i) {
+    if (hz[i] + before[i] / 20 < before[i]) {
+      clkrstSetClockRate(&ses[i], before[i]);
+    }
+  }
+}
+
+/*
  * The one-second tick for the console overlays, separate from the profile loop.
  *
  * Two loops use it: the warm-up one (from second zero) and the normal one (from kStartDelayNs on).
@@ -831,6 +907,7 @@ struct TicOverlay {
       const bool docked_real = appletGetOperationMode() == AppletOperationMode_Console;
       const bool docked = rex::ui::switch_saltynx::DockMode(docked_real);
       rex::ui::switch_sysclk::FollowMode(docked, docked_real);
+      ClockGuard(now - tic, freq, docked_real);
     }
     /*
      * The memory clock is watched here too. It is outside the if above on purpose: the

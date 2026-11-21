@@ -70,11 +70,15 @@ The home screen's credits line (`app/src/ui/credits`, drawn by `tools/make_credi
 |---|---|---|
 | IW4 Bot Warfare 2.4.0 (`mw2mp/mods/bot_warfare/`, unmodified) | [Bot Warfare](https://github.com/ineedbots/iw4_bot_warfare) by INeedGames / INeedBot(s), Xbox 360 port by [CoD Xenon](https://github.com/codxenon/iw4-bot-warfare-xenon) (release `v2.4.0-xenon`, commit `2f5e9fc`). Credits in `mw2mp/mods/bot_warfare/CREDITS.md` | The author's grant in the Bot Warfare README: use, host, modify and merge freely with credit |
 
-## Build-time tools (not shipped)
+## The setup kit and the shader tools
 
-The shader library is built on the user's machine from their own game data with the translator above and
-[DirectXShaderCompiler](https://github.com/microsoft/DirectXShaderCompiler) from the Vulkan SDK (University of
-Illinois/NCSA Open Source License, with LLVM's license terms).
+The shader library is built on the user's machine from their own game data. The setup kit
+(`mw2nx-setup-<version>.zip`, `tools/make_setup_zip.py`) ships the tools for it as static programs: the translator
+above, the packer (`tools/xenosrecomp/bo2zm_pack.cpp`) and `zone_containers`, which is built from
+[mw2-recompiled](https://github.com/PaulCombal/mw2-recompiled)'s fastfile reader (`launcher/zone`, commit `b3aa7d8`,
+GPL-3.0), with fmt and xxHash from `sdk/thirdparty`. The setup script downloads
+[DirectXShaderCompiler](https://github.com/microsoft/DirectXShaderCompiler) v1.9.2609 from Microsoft's release
+(University of Illinois/NCSA Open Source License, with LLVM's license terms); it is not in the kit.
 
 ## Trademarks
 

@@ -10,8 +10,8 @@ Steps 1-5 build Multiplayer (`default_mp.xex`); the Campaign (`default.xex`) rep
 [below](#campaign). The release is the NSP of [the last section](#the-installable-nsp); the NROs from steps 5 and 7 are
 the development layout, run from the Homebrew Menu.
 
-Players who only install the released NSP need steps 1, 6 and 7 (game files, shader libraries, staging); the rest builds
-the program itself.
+Players who only install the released NSP need none of this: the setup kit of [the last section](#the-setup-kit) does
+steps 1, 6 and 7 for them on Windows or Linux. The rest builds the program itself.
 
 ## What you need
 
@@ -146,3 +146,18 @@ committed (both paths are git-ignored); the NSP contains no game data.
 the shader libraries, `pipelines/`, caches, settings and logs, and never reads `sdmc:/switch/`. The profile and saves
 are the console's save data of the application (32 MB with a 16 MB journal). `application_type` in the NPDM must stay
 `1`: as an applet the process got only about 394 MB.
+
+## The setup kit
+
+The release's second file, `mw2nx-setup-1.0.0.zip`, is what players run on their PC (Windows or Linux, Python 3.11
+or later): `mw2nx_setup.py` checks their ISO, downloads Title Update 6 and DXC, extracts the disc and builds both shader
+libraries into `sd/atmosphere/contents/01F2D6C0A9E40000/`, the installed game's folder.
+
+```bash
+python3 -I tools/make_setup_zip.py --version 1.0.0
+```
+
+It builds the shader tools (`zone_containers`, `bo2zm_hlsl`, `bo2zm_pack`) as static programs for Linux with `g++` and
+for Windows with `x86_64-w64-mingw32-g++` (13 or later), and packs them with the script, the Campaign's pipeline lists
+and the bundled mods into `<data>/release/mw2nx-setup-1.0.0.zip`. The zone reader comes from a checkout of
+mw2-recompiled (`MW2_RECOMPILED`, default `~/projects/mw2-recompiled`). The kit contains no game data.

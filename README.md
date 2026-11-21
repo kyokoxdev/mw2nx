@@ -74,23 +74,20 @@ Settings and their file: [docs/features.md](docs/features.md).
 - Your Xbox 360 disc of Modern Warfare 2, version 1.0.557 (USA/Europe), as an ISO.
 - **Title Update 6.** The setup tool downloads it after it has checked your ISO.
 - A Switch that runs homebrew (custom firmware such as Atmosphère) and a way to install an NSP.
-- A Linux or WSL2 PC. The NSP holds no game data, so the files and the shader libraries are made from your own disc on
-  this PC. Building them takes the tools in [docs/building.md](docs/building.md).
+- A PC with Windows or Linux and [Python](https://www.python.org/downloads/) 3.11 or later. The NSP holds no game
+  data: the setup script makes the game files and the shader libraries from your own disc on this PC.
 
-Steps, from the repository root:
+Steps:
 
 1. **Install the NSP** (`mw2nx-1.0.0-[01F2D6C0A9E40000].nsp` from the release) on the console.
-2. **Set up the game files.** Put your ISO in `iso/` and run `python tools/install/tu6_setup.py`. It checks the disc,
-   fetches Title Update 6 and fills `work/load_tu6/`.
-3. **Stage the SD card.** `python tools/stage_sd_mw2mp.py` extracts your disc and the update into a `switch/mw2mp/`
-   folder.
-4. **Build the shader libraries** from your own disc with `tools/mw2shaders/build_mw2mp_shaders.sh <work folder>`
-   (`MW2_SP=1` for the Campaign's). They are derived from the game and never shared.
-5. **Copy to the console.** Put the contents of the staged `switch/mw2mp/` folder (`game/`, `update/`, `mods/`,
-   `pipelines/`) and both shader libraries into the game's own folder on the SD card:
-   `sdmc:/atmosphere/contents/01F2D6C0A9E40000/`.
-6. Start **Call of Duty: Modern Warfare 2** from the HOME menu. On its first start the game makes that folder and, while
-   files are missing, lists what to copy where; it checks again every few seconds and starts once everything is there.
+2. **Run the setup script.** Unpack `mw2nx-setup-1.0.0.zip` from the release, put your ISO in its folder and run
+   `python mw2nx_setup.py` (on Windows, double-clicking it works too). It checks the disc, downloads Title Update 6 and
+   Microsoft's shader compiler, extracts your files and builds both shader libraries into `sd/atmosphere/`. It needs
+   about 10 GB of free space and 10-40 minutes, depending on the PC; the shader libraries are derived from your disc and never shared.
+3. **Copy to the console.** Copy the `atmosphere` folder from `sd/` to the root of the SD card (merge it with the one
+   already there).
+4. Start **Call of Duty: Modern Warfare 2** from the HOME menu. While files are missing, the game lists what to copy
+   where; it checks again every few seconds and starts once everything is there.
 
 The game's folder on the SD card:
 
