@@ -12,8 +12,10 @@
 // Disable warnings about unused parameters for kernel functions
 #pragma GCC diagnostic ignored "-Wunused-parameter"
 
+#include <algorithm>
 #include <atomic>
 #include <cerrno>
+#include <cstddef>
 #include <cstring>
 
 #if REX_PLATFORM_MAC
@@ -722,6 +724,44 @@ u32 NetDll_XNetQosServiceLookup_entry(u32 caller, u32 flags, u32 event_handle, m
   return 0;
 }
 
+// MW2's session search probes the hosts it found ("Starting QoS probes on %i hosts!", 0x8233B7D0) and keeps the
+// XNQOS to read later; the old stub left the pointer unset and returned garbage. System link peers are plain UDP on
+// the LAN, so every target answers at once: complete, contacted, 1 ms, 10 Mbit/s each way. No data comes back (a
+// host's XNetQosListen blob would need a probe protocol of its own), so XNET_XNQOSINFO_DATA_RECEIVED stays clear and
+// the title never reads a data pointer.
+u32 NetDll_XNetQosLookup_entry(u32 caller, u32 xna_count, mapped_void xnas, mapped_void xnkids, mapped_void xnkeys,
+                               u32 ina_count, mapped_void inas, mapped_void service_ids, u32 probe_count,
+                               u32 bits_per_sec, u32 flags, u32 event_handle, mapped_u32 pqos) {
+  static_assert(sizeof(XNQOSINFO) == 24 && offsetof(XNQOS, info) == 8);
+  constexpr uint8_t kComplete = 0x01, kTargetContacted = 0x02;  // XNET_XNQOSINFO_*
+  const uint32_t count = xna_count + ina_count;
+  if (!pqos) return 0x2726;  // WSAEINVAL
+  const uint32_t size = uint32_t(offsetof(XNQOS, info) + std::max(count, 1u) * sizeof(XNQOSINFO));
+  const uint32_t qos_guest = REX_KERNEL_MEMORY()->SystemHeapAlloc(size);
+  auto* qos = REX_KERNEL_MEMORY()->TranslateVirtual<XNQOS*>(qos_guest);
+  std::memset(qos, 0, size);
+  qos->count = count;
+  qos->count_pending = 0;
+  const uint16_t probes = uint16_t(std::max(probe_count, 1u));
+  for (uint32_t i = 0; i < count; ++i) {
+    XNQOSINFO& info = qos->info[i];
+    info.flags = kComplete | kTargetContacted;
+    info.probes_xmit = probes;
+    info.probes_recv = probes;
+    info.rtt_min_in_msecs = 1;
+    info.rtt_med_in_msecs = 1;
+    info.up_bits_per_sec = 10'000'000;
+    info.down_bits_per_sec = 10'000'000;
+  }
+  *pqos = qos_guest;
+  REXKRNL_DEBUG("XNetQosLookup({} addresses, {} servers, {} probes, flags {:08X}) -> all reachable", xna_count,
+                ina_count, probe_count, flags);
+  if (event_handle) {
+    if (auto ev = REX_KERNEL_OBJECTS()->LookupObject<XEvent>(event_handle)) ev->Set(0, false);
+  }
+  return 0;
+}
+
 u32 NetDll_XNetQosRelease_entry(u32 caller, ppc_ptr_t<XNQOS> qos) {
   if (!qos) {
     return X_STATUS_INVALID_PARAMETER;
@@ -1224,7 +1264,7 @@ REX_EXPORT_STUB(__imp__NetDll_XNetGetSystemLinkPort);
 REX_EXPORT_STUB(__imp__NetDll_XNetGetXnAddrPlatform);
 REX_EXPORT_STUB(__imp__NetDll_XNetInAddrToServer);
 REX_EXPORT_STUB(__imp__NetDll_XNetQosGetListenStats);
-REX_EXPORT_STUB(__imp__NetDll_XNetQosLookup);
+REX_EXPORT(__imp__NetDll_XNetQosLookup, rex::kernel::xam::NetDll_XNetQosLookup_entry)
 REX_EXPORT(__imp__NetDll_XNetRegisterKey, rex::kernel::xam::NetDll_XNetRegisterKey_entry)
 REX_EXPORT_STUB(__imp__NetDll_XNetReplaceKey);
 REX_EXPORT_STUB(__imp__NetDll_XNetServerToInAddr);
