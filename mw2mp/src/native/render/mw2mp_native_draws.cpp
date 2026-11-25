@@ -5394,14 +5394,15 @@ class VulkanDrawsImpl final : public VulkanDraws {
         AnnotateVerticesRepeated(source.address, source.bytes, uint32_t(source.order), source.data);
       }
       VkDeviceSize offset;
-      // In the dedupe's check frames every range carries the hash of its guest bytes; a reuse whose
+      // The dedupe's sampled ranges (DedupeSampled) carry the hash of their guest bytes; a reuse whose
       // bytes differ is counted (DedupeVertices::discrepancies) and copied as usual.
       const uint64_t hash_dedupe =
-          dedupe_active_ && dedupe_hash_frame_ ? XXH3_64bits(source.data, size_t(source.bytes)) | 1 : 0;
+          dedupe_active_ && DedupeSampled(source.address) ? XXH3_64bits(source.data, size_t(source.bytes)) | 1 : 0;
       // If this same range was already copied in this frame, its place in the upload buffer is reused and
       // nothing is copied. See mw2mp_native_vertex_dedupe.h.
       if (dedupe_active_ &&
           dedupe_.Find(source.address, source.bytes, uint32_t(source.order), offset, hash_dedupe)) {
+        dedupe_checked_ += hash_dedupe != 0;
         offsets_vertices[b] = offset;
         SamplerPath(40, t_binding);
         continue;
@@ -19318,22 +19319,27 @@ class VulkanDrawsImpl final : public VulkanDraws {
     return added;
   }
   std::chrono::steady_clock::time_point vcache_report_{};
-  // The check frames of the vertex dedupe (hashes, see the binding loop) and their guard. A check frame hashes every
-  // vertex range it draws (tens of MB): with 20,000 the first ~10 s of a mission ran at 70 ms a frame (run mw2sp_019,
-  // 20,294 checks by 08:36:02, 0 different in every run so far), and 1 frame in 512 paid it again.
-  static constexpr uint64_t kDedupeChecks = 2000;
-  bool dedupe_hash_frame_ = false;
-  uint64_t dedupe_hits_frame_start_ = 0;
-  uint64_t dedupe_checked_ = 0;     // reuses made in check frames
+  // The vertex dedupe's guard (hashes, see the binding loop). Whole check frames hashed every vertex range they drew
+  // (tens of MB, ~70 ms a frame): with 2,000 checks the first ~7 s after cl_ingame hitched (run mw2sp_054: 43 frames
+  // over 45 ms, the ring in XXH3), and 1 frame in 2048 hitched again; 0 different in every run since mw2sp_019.
+  // Now a sample of the ranges in every frame: 1 in 64 until kDedupeChecks reuses were checked, then 1 in 1024.
+  // Within one frame the pick depends on the address alone, so a reuse is hashed exactly when its copy was (Find
+  // counts a hashed lookup against an unhashed entry as different).
+  static constexpr uint64_t kDedupeChecks = 500;
+  bool dedupe_sample_on_ = false;
+  uint32_t dedupe_sample_mask_ = 63;
+  uint64_t dedupe_checked_ = 0;     // reuses checked by hash
   uint64_t dedupe_discrepancies_seen_ = 0;
   bool dedupe_keep_flush_ = false;  // mw2mp_native_dedupe_keep_on_flush_waits, read once
 
-  // Once per upload slot (UseSlot): counts the last check frame's reuses, picks whether this one hashes, and on a
-  // difference goes back to forgetting at every WAIT_REG_MEM.
+  bool DedupeSampled(uint64_t address) const {
+    return dedupe_sample_on_ &&
+           (((uint32_t(address >> 4) * 0x9E3779B1u) >> 16) & dedupe_sample_mask_) == (uint32_t(frame_) & dedupe_sample_mask_);
+  }
+
+  // Once per upload slot (UseSlot, after the dedupe's NewFrame): picks this frame's sample rate, and on a difference
+  // goes back to forgetting at every WAIT_REG_MEM.
   void GuardDedupe() {
-    if (dedupe_hash_frame_) {
-      dedupe_checked_ += dedupe_.hits() - dedupe_hits_frame_start_;
-    }
     if (dedupe_.discrepancies() != dedupe_discrepancies_seen_) {
       dedupe_discrepancies_seen_ = dedupe_.discrepancies();
       if (!g_syncs_on_flush_waits.exchange(true, std::memory_order_relaxed)) {
@@ -19342,8 +19348,8 @@ class VulkanDrawsImpl final : public VulkanDraws {
                      dedupe_checked_);
       }
     }
-    dedupe_hash_frame_ = dedupe_keep_flush_ && (dedupe_checked_ < kDedupeChecks || (frame_ & 2047) == 0);
-    dedupe_hits_frame_start_ = dedupe_.hits();
+    dedupe_sample_on_ = dedupe_keep_flush_;
+    dedupe_sample_mask_ = dedupe_checked_ < kDedupeChecks ? 63u : 1023u;
   }
   // 16-bit index ranges (DedupeIndices, mw2mp_native_dedupe_indices).
   DedupeIndices dedupe_indices_;

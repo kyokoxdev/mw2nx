@@ -75,6 +75,25 @@ REX_HOOK_RAW(sub_823AA1D0) { StampedKernel<__imp__sub_823AA1D0>(ctx, base); }
 REX_HOOK_RAW(sub_823AA560) { StampedKernel<__imp__sub_823AA560>(ctx, base); }
 #endif
 
+// The asset loader's read, DB_ReadXFileData (SP sub_82145608, MP twin sub_821B0B10): r3 = destination, r4 = bytes. It
+// sets them as zlib's next_out / avail_out and inflates (SP sub_821446E8) straight into the destination with plain
+// stores, so assets streamed in mid-level over memory that held others stamped nothing: the vertex guard caught
+// 19940010 (+512K), 17900000 (+768K), 19A00000 and 1558000C minutes into runs mw2sp_048-054, one stale flash each.
+#if defined(MW2_CAMPAIGN) && MW2_CAMPAIGN
+#define MW2_DB_READ sub_82145608
+#define MW2_DB_READ_IMP __imp__sub_82145608
+#else
+#define MW2_DB_READ sub_821B0B10
+#define MW2_DB_READ_IMP __imp__sub_821B0B10
+#endif
+REX_EXTERN(MW2_DB_READ_IMP);
+REX_HOOK_RAW(MW2_DB_READ) {
+  const uint32_t dst = ctx.r3.u32;
+  const uint32_t n = ctx.r4.u32;
+  MW2_DB_READ_IMP(ctx, base);
+  mw2mp::page_writes::MarkGuest(dst, n);
+}
+
 // MW2's CPU skinning kernels write each skinned vertex (32 bytes) with VMX stores and stamped nothing: run mw2sp_019's
 // vertex cache guard caught 236 ranges changed without a stamp in the first 20 s of a mission, the stretch where NPC
 // models were seen shifting (until the guard notices, the cache serves the previous skin). Read from their PowerPC code:
@@ -137,9 +156,37 @@ REX_HOOK_RAW(sub_824142F8) { StampedSkin<__imp__sub_824142F8, 6, 4>(ctx, base); 
 REX_EXTERN(MW2_CODE_MESH_RESERVE_IMP);
 namespace {
 std::atomic<uint32_t> g_code_mesh_seen[8] = {};  // vertex bases already marked (two frames' buffers, with room)
+std::atomic<uint32_t> g_frame_mesh_seen[8] = {};
 
 uint32_t CodeMeshPhysical(uint32_t guest) {
   return (guest & 0x1FFFFFFFu) + (guest >= 0xE0000000u ? 0x1000u : 0u);  // as page_writes::MarkGuest
+}
+
+// Marks a per-frame vertex + index buffer pair as written every frame the first time its vertex base shows up.
+// Volatile marks are permanent, so once per base is enough; bases past the 8 slots are left to the guard.
+void MarkMeshOnce(std::atomic<uint32_t> (&seen)[8], const char* what, uint32_t vertices, uint32_t vertex_bytes,
+                  uint32_t indices, uint32_t index_bytes) {
+  for (auto& slot : seen) {
+    const uint32_t s = slot.load(std::memory_order_relaxed);
+    if (s == vertices) {
+      return;
+    }
+    if (s != 0) {
+      continue;
+    }
+    if (vertices < 0xA0000000u || indices < 0xA0000000u || vertex_bytes > (64u << 20) || index_bytes > (64u << 20)) {
+      return;  // not physical memory or nonsense sizes: left to the guard
+    }
+    uint32_t expected = 0;
+    if (!slot.compare_exchange_strong(expected, vertices, std::memory_order_relaxed) && expected == vertices) {
+      return;  // another thread took this slot for the same buffer
+    }
+    mw2mp::page_writes::MarkVolatile(CodeMeshPhysical(vertices), vertex_bytes);
+    mw2mp::page_writes::MarkVolatile(CodeMeshPhysical(indices), index_bytes);
+    REXLOG_INFO("[native] C6 {} at {:08X}+{} (vertices) and {:08X}+{} (indices): marked as written every frame", what,
+                CodeMeshPhysical(vertices), vertex_bytes, CodeMeshPhysical(indices), index_bytes);
+    return;
+  }
 }
 }  // namespace
 REX_HOOK_RAW(MW2_CODE_MESH_RESERVE) {
@@ -149,31 +196,35 @@ REX_HOOK_RAW(MW2_CODE_MESH_RESERVE) {
     return;
   }
   const uint8_t* const b = Host(base, buffer);
-  const uint32_t vertices = rex::memory::load_and_swap<uint32_t>(b + 16);
-  for (auto& seen : g_code_mesh_seen) {
-    const uint32_t s = seen.load(std::memory_order_relaxed);
-    if (s == vertices) {
-      return;
-    }
-    if (s != 0) {
-      continue;
-    }
-    const uint32_t indices = rex::memory::load_and_swap<uint32_t>(b + 20);
-    const uint32_t vertex_bytes = rex::memory::load_and_swap<uint32_t>(b + 40) * 32u;
-    const uint32_t index_bytes = rex::memory::load_and_swap<uint32_t>(b + 44) * 2u;
-    if (vertices < 0xA0000000u || indices < 0xA0000000u || vertex_bytes > (64u << 20) || index_bytes > (64u << 20)) {
-      return;  // not physical memory or nonsense sizes: left to the guard
-    }
-    uint32_t expected = 0;
-    if (!seen.compare_exchange_strong(expected, vertices, std::memory_order_relaxed) && expected == vertices) {
-      return;  // another thread took this slot for the same buffer
-    }
-    mw2mp::page_writes::MarkVolatile(CodeMeshPhysical(vertices), vertex_bytes);
-    mw2mp::page_writes::MarkVolatile(CodeMeshPhysical(indices), index_bytes);
-    REXLOG_INFO("[native] C6 FX code mesh at {:08X}+{} (vertices) and {:08X}+{} (indices): marked as written every frame",
-                CodeMeshPhysical(vertices), vertex_bytes, CodeMeshPhysical(indices), index_bytes);
+  MarkMeshOnce(g_code_mesh_seen, "FX code mesh", rex::memory::load_and_swap<uint32_t>(b + 16),
+               rex::memory::load_and_swap<uint32_t>(b + 40) * 32u, rex::memory::load_and_swap<uint32_t>(b + 20),
+               rex::memory::load_and_swap<uint32_t>(b + 44) * 2u);
+}
+
+// The frame's second dynamic mesh (store watch run mw2sp_051: 1DA40000 / 1DC00000, written by sub_82193B60 /
+// sub_82193F00 through sub_823B8C70 = base + index x 32). SP sub_823B8B90 (MP twin sub_823F1FD0, same instructions)
+// starts it each frame: the state at SP 0x83E39200 (MP 0x83D7D600) gets +4 vertices used, +8 indices used, +12 vertex
+// base (32-byte vertices), +16 index base (16-bit) from the frame context. Reserves cap them at 8448 vertices
+// (sub_823B8CC8 / MP sub_823F2108) and 18432 indices (sub_823B8C30 / MP sub_823F2070). Run mw2sp_054: the vertex guard
+// still caught 1DA40000 / 1DC00000 once each at level start (a flash of up to 16 frames).
+#if defined(MW2_CAMPAIGN) && MW2_CAMPAIGN
+#define MW2_FRAME_MESH_BEGIN sub_823B8B90
+#define MW2_FRAME_MESH_BEGIN_IMP __imp__sub_823B8B90
+constexpr uint32_t kFrameMeshState = 0x83E39200u;
+#else
+#define MW2_FRAME_MESH_BEGIN sub_823F1FD0
+#define MW2_FRAME_MESH_BEGIN_IMP __imp__sub_823F1FD0
+constexpr uint32_t kFrameMeshState = 0x83D7D600u;
+#endif
+REX_EXTERN(MW2_FRAME_MESH_BEGIN_IMP);
+REX_HOOK_RAW(MW2_FRAME_MESH_BEGIN) {
+  MW2_FRAME_MESH_BEGIN_IMP(ctx, base);
+  if (!mw2mp::page_writes::g_enabled.load(std::memory_order_relaxed)) {
     return;
   }
+  const uint8_t* const s = Host(base, kFrameMeshState);
+  MarkMeshOnce(g_frame_mesh_seen, "frame mesh", rex::memory::load_and_swap<uint32_t>(s + 12), 8448u * 32u,
+               rex::memory::load_and_swap<uint32_t>(s + 16), 18432u * 2u);
 }
 
 #if defined(MW2_CAMPAIGN) && MW2_CAMPAIGN
