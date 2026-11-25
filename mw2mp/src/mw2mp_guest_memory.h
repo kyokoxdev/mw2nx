@@ -59,18 +59,19 @@ typedef u64 __attribute__((may_alias)) mw2_guest_u64;
 #endif
 
 // Diagnostic (CMake MW2_WATCH_STORES, mw2sp/build_switch.sh MW2_WATCH_STORES=1; never in a release): every guest
-// store, and every vector access through REX_RAW_ADDR, checks whether it lands in the physical range the renderer
-// published (the model lighting volume, mw2mp_native_draws.cpp UpdateVolume); a hit records the host return address
-// and the guest lr, reported in the C3 3D textures line. Finds the volume's writer, so its pages can be marked instead
-// of hashing all 2 MB on every update.
+// store, and every vector access through REX_RAW_ADDR, checks whether it lands in a watched 64 KB region of physical
+// memory (mw2mp_native_draws.cpp: the model lighting volume, published by UpdateVolume, and the ranges the vertex and
+// index caches caught changing without a write stamp); a hit records the host return address, the guest lr and the
+// 256 KB block, reported in the C3 store watch line. Finds writers to mark or stamp.
 #if defined(MW2_WATCH_STORES)
-extern "C" unsigned mw2_watch_lo;
-extern "C" unsigned mw2_watch_size;
+extern "C" unsigned char mw2_watch_regions[1024];  // bit per 64 KB region of the 512 MB
 extern "C" void mw2_watch_hit(unsigned guest, unsigned long long guest_lr);
 static inline u32 mw2_watch_check(u32 x, unsigned long long guest_lr) {
-  if (x >= 0xA0000000u &&
-      (x & 0x1FFFFFFFu) + (x >= 0xE0000000u ? 0x1000u : 0u) - mw2_watch_lo < mw2_watch_size) [[unlikely]] {
-    mw2_watch_hit(x, guest_lr);
+  if (x >= 0xA0000000u) {
+    const u32 region = (((x & 0x1FFFFFFFu) + (x >= 0xE0000000u ? 0x1000u : 0u)) >> 16) & 0x1FFFu;
+    if ((mw2_watch_regions[region >> 3] >> (region & 7)) & 1) [[unlikely]] {
+      mw2_watch_hit(x, guest_lr);
+    }
   }
   return x;
 }

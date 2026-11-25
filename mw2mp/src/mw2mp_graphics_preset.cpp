@@ -72,6 +72,15 @@ REXCVAR_DEFINE_DOUBLE(mw2mp_model_detail, 0.0, "Graphics",
                       "model the game draws is never hidden by it, only simplified. Applied at once")
     .range(0.0, 8.0);
 
+// Model detail for animated models: characters, weapons, vehicles (DObj, the XModelGetLodForDist call from
+// sub_822F0360). Split from mw2mp_model_detail after run mw2sp_047 (scenes still near 30 fps, ring-bound by draws):
+// the user minded models changing shape less than props popping in, and a simpler version can have fewer surfaces
+// (draws). The report's "surfaces fewer" says how many draws the simpler versions saved.
+REXCVAR_DEFINE_DOUBLE(mw2mp_model_detail_animated, 0.0, "Graphics",
+                      "Campaign: as mw2mp_model_detail, for characters, weapons and vehicles. 0: the preset's "
+                      "(very_low 2.5, low 2, medium 1.25, high 1). Applied at once")
+    .range(0.0, 8.0);
+
 // The small-prop cull's own distance factor (ChooseModelVersion below; very_low only). Split from mw2mp_model_detail
 // after run mw2sp_036: the GPU had room for detailed models (7-13 ms a frame) but every prop the cull lets back costs a
 // draw on the ring thread, and the user minded props popping in more than models changing shape.
@@ -240,9 +249,16 @@ constexpr uint32_t kMipsMinus[kLevels] = {0, 0, 0, 1};
 // switch and small props vanish 20 % farther out), paid for with the scene at 80 %. Run mw2sp_036 (2.5): GPU 7-13 ms
 // a frame, ring-bound; the cull got its own factor (mw2mp_model_cull_detail, 2.0) and very_low's models went to 1.5.
 constexpr float kModelFactors[kLevels] = {1.0f, 1.25f, 1.5f, 1.5f};
+constexpr float kAnimatedFactors[kLevels] = {1.0f, 1.25f, 2.0f, 2.5f};  // mw2mp_model_detail_animated
 constexpr float kCullFactorDefault = 2.0f;
 std::atomic<float> g_model_factor{1.0f};
+std::atomic<float> g_animated_factor{1.0f};
 std::atomic<float> g_cull_factor{kCullFactorDefault};
+std::atomic<uint32_t> g_animated_picks{0};    // of the picks, animated models' (DObj)
+std::atomic<uint32_t> g_animated_simpler{0};  // of those, a simpler version than the game's
+// Surfaces (draws) the simpler versions left out, other models / animated ones (negative: a simpler one had more).
+std::atomic<int32_t> g_surfaces_fewer{0};
+std::atomic<int32_t> g_animated_surfaces_fewer{0};
 std::atomic<uint32_t> g_model_picks{0};    // the hook's calls since the last report
 std::atomic<uint32_t> g_model_simpler{0};  // of those, a simpler version than the game's
 std::atomic<uint32_t> g_model_held{0};     // of those, held back from the simplest (it has more surfaces)
@@ -426,6 +442,9 @@ void Apply() {
   g_applied.store(level, std::memory_order_relaxed);
   const double model_detail = REXCVAR_GET(mw2mp_model_detail);
   g_model_factor.store(model_detail > 0.0 ? float(model_detail) : kModelFactors[level], std::memory_order_relaxed);
+  const double animated_detail = REXCVAR_GET(mw2mp_model_detail_animated);
+  g_animated_factor.store(animated_detail > 0.0 ? float(animated_detail) : kAnimatedFactors[level],
+                          std::memory_order_relaxed);
   const double cull_detail = REXCVAR_GET(mw2mp_model_cull_detail);
   g_cull_factor.store(cull_detail > 0.0 ? float(cull_detail) : kCullFactorDefault, std::memory_order_relaxed);
 #ifdef MW2_XMODEL_LOD_FOR_DIST
@@ -435,11 +454,17 @@ void Apply() {
     const uint32_t picks = g_model_picks.exchange(0, std::memory_order_relaxed);
     if (picks) {
       REXLOG_INFO("[preset] model detail x{:.2f}, cull x{:.2f}, last 10 s: {} version picks, {} simpler than the "
-                  "game's ({} held back from the simplest), {} small static props hidden",
+                  "game's ({} held back from the simplest, {} surfaces fewer), {} small static props hidden; "
+                  "animated x{:.2f}: {} picks, {} simpler, {} surfaces fewer",
                   g_model_factor.load(std::memory_order_relaxed), g_cull_factor.load(std::memory_order_relaxed), picks,
                   g_model_simpler.exchange(0, std::memory_order_relaxed),
                   g_model_held.exchange(0, std::memory_order_relaxed),
-                  g_model_culled.exchange(0, std::memory_order_relaxed));
+                  g_surfaces_fewer.exchange(0, std::memory_order_relaxed),
+                  g_model_culled.exchange(0, std::memory_order_relaxed),
+                  g_animated_factor.load(std::memory_order_relaxed),
+                  g_animated_picks.exchange(0, std::memory_order_relaxed),
+                  g_animated_simpler.exchange(0, std::memory_order_relaxed),
+                  g_animated_surfaces_fewer.exchange(0, std::memory_order_relaxed));
     }
   }
 #endif
@@ -572,18 +597,31 @@ bool FromStaticModels(uint64_t lr) {
   return false;
 }
 
+// The DObj caller (sub_822F0360: characters, weapons, vehicles), mw2mp_model_detail_animated. Campaign only:
+// multiplayer keeps one factor for every model (players' models stay as detailed as everything else).
+#if defined(MW2_CAMPAIGN) && MW2_CAMPAIGN
+constexpr uint32_t kAnimatedModelCaller = 0x822F0450;
+#else
+constexpr uint32_t kAnimatedModelCaller = 0;
+#endif
+
 void ChooseModelVersion(PPCContext& ctx, uint8_t* base, void (*game_pick)(PPCContext&, uint8_t*)) {
   const uint32_t model_address = ctx.r3.u32;
   const float ramp = float(ctx.f1.f64);
   const float plain = float(ctx.f2.f64);
   const bool static_model = FromStaticModels(ctx.lr);
+  const bool animated = kAnimatedModelCaller && ctx.lr == kAnimatedModelCaller;
   game_pick(ctx, base);
-  const float factor = mw2mp::gfx_preset::g_model_factor.load(std::memory_order_relaxed);
+  const float factor = (animated ? mw2mp::gfx_preset::g_animated_factor : mw2mp::gfx_preset::g_model_factor)
+                           .load(std::memory_order_relaxed);
   const int game = ctx.r3.s32;
   if (game < 0) {
     return;  // the game itself puts it past its versions
   }
   mw2mp::gfx_preset::g_model_picks.fetch_add(1, std::memory_order_relaxed);
+  if (animated) {
+    mw2mp::gfx_preset::g_animated_picks.fetch_add(1, std::memory_order_relaxed);
+  }
   const uint8_t* const model = base + model_address;
   const int lods = int8_t(model[225]);
   const auto limit = [model](int i) { return ModelFloat(model + 64 + 40 * i); };
@@ -616,6 +654,13 @@ void ChooseModelVersion(PPCContext& ctx, uint8_t* base, void (*game_pick)(PPCCon
   }
   if (chosen != game) {
     mw2mp::gfx_preset::g_model_simpler.fetch_add(1, std::memory_order_relaxed);
+    const int32_t fewer = int32_t(surfaces(game)) - int32_t(surfaces(chosen));
+    if (animated) {
+      mw2mp::gfx_preset::g_animated_simpler.fetch_add(1, std::memory_order_relaxed);
+      mw2mp::gfx_preset::g_animated_surfaces_fewer.fetch_add(fewer, std::memory_order_relaxed);
+    } else {
+      mw2mp::gfx_preset::g_surfaces_fewer.fetch_add(fewer, std::memory_order_relaxed);
+    }
   }
   ctx.r3.s64 = chosen;
 }

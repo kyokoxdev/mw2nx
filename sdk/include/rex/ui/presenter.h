@@ -41,6 +41,14 @@
 #include <rex/ui/surface.h>
 #include <rex/ui/ui_drawer.h>
 
+// FSR 1 (EASU, RCAS) and CAS need nothing from the FidelityFX SDK: their shaders are prebuilt in
+// src/ui/shaders/vulkan_spirv and their constants are computed here. On the Switch they are always built, defined in
+// this header so every file sees the same GuestOutputPaintConfig / Presenter layout. FSR 2/3 still need
+// REX_HAS_FIDELITYFX_RUNTIME (off on the Switch) and fall back to the FSR 1 path there.
+#if REX_PLATFORM_SWITCH && !defined(REX_HAS_FIDELITYFX_SDK)
+#define REX_HAS_FIDELITYFX_SDK 1
+#endif
+
 #if REX_PLATFORM_WIN32
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN

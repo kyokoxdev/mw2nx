@@ -147,6 +147,7 @@ def main():
     ap.add_argument("--hacbrewpack", default=os.path.join(data, "tools", "hacbrewpack", "hacbrewpack"))
     ap.add_argument("--out", default=os.path.join(data, "nsp"))
     args = ap.parse_args()
+    args.out = os.path.abspath(args.out)  # hacbrewpack runs in its work folder: relative stage paths would break
 
     for what, path in (("keys", args.keys), ("icon", args.icon), ("Campaign ELF", args.sp_elf),
                        ("Multiplayer ELF", args.mp_elf), ("hacbrewpack", args.hacbrewpack)):

@@ -6,11 +6,15 @@
 // No other register is written (the 360 routines only clobber volatile ones). Copies use memmove semantics, a
 // superset of the CRT's forward-only memcpy. Each write is stamped for the native renderer (mw2mp_page_writes.h).
 
+#include <algorithm>
+#include <atomic>
 #include <cstdint>
 #include <cstring>
 
 #include <rex/cvar.h>
 #include <rex/hook.h>
+#include <rex/logging.h>
+#include <rex/memory/utils.h>
 #include <rex/system/xmemory.h>
 
 #include "mw2mp_page_writes.h"
@@ -116,6 +120,62 @@ REX_HOOK_RAW(sub_824141F8) { StampedSkin<__imp__sub_824141F8, 7, 4>(ctx, base); 
 REX_HOOK_RAW(sub_824142F8) { StampedSkin<__imp__sub_824142F8, 6, 4>(ctx, base); }
 #endif
 
+// The effects' code mesh: every FX writer reserves vertices and indices with SP sub_82394CB8 (MP twin sub_823D17F0,
+// same instructions; r3 = the buffer: +4 vertices used, +8 indices used, +16 vertex base (32-byte vertices), +20 index
+// base (16-bit), +40 / +44 their capacities), then stores into them with plain stores through sub_82394D70 (base +
+// index x 32) from a dozen functions (sub_82185938, sub_821839D0, ...; store watch run mw2sp_051: 1DA80000-1DD00000).
+// The buffers are rewritten every frame, so the first reserve on each one marks it whole as written every frame.
+// Without this the vertex guard had to catch each 256 KB of it first: run mw2sp_052, a chunk the guard never sampled
+// drew pale stretched triangles at invasion's Nate's for as long as it stayed; run 053, a flash until 1DAC0000 was caught.
+#if defined(MW2_CAMPAIGN) && MW2_CAMPAIGN
+#define MW2_CODE_MESH_RESERVE sub_82394CB8
+#define MW2_CODE_MESH_RESERVE_IMP __imp__sub_82394CB8
+#else
+#define MW2_CODE_MESH_RESERVE sub_823D17F0
+#define MW2_CODE_MESH_RESERVE_IMP __imp__sub_823D17F0
+#endif
+REX_EXTERN(MW2_CODE_MESH_RESERVE_IMP);
+namespace {
+std::atomic<uint32_t> g_code_mesh_seen[8] = {};  // vertex bases already marked (two frames' buffers, with room)
+
+uint32_t CodeMeshPhysical(uint32_t guest) {
+  return (guest & 0x1FFFFFFFu) + (guest >= 0xE0000000u ? 0x1000u : 0u);  // as page_writes::MarkGuest
+}
+}  // namespace
+REX_HOOK_RAW(MW2_CODE_MESH_RESERVE) {
+  const uint32_t buffer = ctx.r3.u32;
+  MW2_CODE_MESH_RESERVE_IMP(ctx, base);
+  if (!mw2mp::page_writes::g_enabled.load(std::memory_order_relaxed)) {
+    return;
+  }
+  const uint8_t* const b = Host(base, buffer);
+  const uint32_t vertices = rex::memory::load_and_swap<uint32_t>(b + 16);
+  for (auto& seen : g_code_mesh_seen) {
+    const uint32_t s = seen.load(std::memory_order_relaxed);
+    if (s == vertices) {
+      return;
+    }
+    if (s != 0) {
+      continue;
+    }
+    const uint32_t indices = rex::memory::load_and_swap<uint32_t>(b + 20);
+    const uint32_t vertex_bytes = rex::memory::load_and_swap<uint32_t>(b + 40) * 32u;
+    const uint32_t index_bytes = rex::memory::load_and_swap<uint32_t>(b + 44) * 2u;
+    if (vertices < 0xA0000000u || indices < 0xA0000000u || vertex_bytes > (64u << 20) || index_bytes > (64u << 20)) {
+      return;  // not physical memory or nonsense sizes: left to the guard
+    }
+    uint32_t expected = 0;
+    if (!seen.compare_exchange_strong(expected, vertices, std::memory_order_relaxed) && expected == vertices) {
+      return;  // another thread took this slot for the same buffer
+    }
+    mw2mp::page_writes::MarkVolatile(CodeMeshPhysical(vertices), vertex_bytes);
+    mw2mp::page_writes::MarkVolatile(CodeMeshPhysical(indices), index_bytes);
+    REXLOG_INFO("[native] C6 FX code mesh at {:08X}+{} (vertices) and {:08X}+{} (indices): marked as written every frame",
+                CodeMeshPhysical(vertices), vertex_bytes, CodeMeshPhysical(indices), index_bytes);
+    return;
+  }
+}
+
 #if defined(MW2_CAMPAIGN) && MW2_CAMPAIGN
 // The campaign's job-queue scan, sub_823B7430 (the worker loop sub_823B79C0 calls it after each 1 ms wait on the work
 // event; sub_823B7270 too). Run mw2sp_014: Worker2 spent 49 % of its busy time in this function's own loop. Each of the
@@ -131,7 +191,22 @@ REXCVAR_DEFINE_BOOL(mw2mp_native_job_scan, true, "MW2",
 REX_EXTERN(__imp__sub_823B7430);
 REX_EXTERN(__imp__sub_823B6D70);  // call only
 REX_EXTERN(__imp__sub_8228BD78);  // call only
+// The worker loop's wait (sub_8228BD30 = WaitForSingleObject(work event, 1 ms)) backs off while the scans find nothing.
+// sub_823B79C0 (Worker2's loop) bumps the waiting-workers count at 0x83E28A88, waits, drops it, scans. Producers
+// (sub_823B6AA8, sub_823B6B08) lower the queue hint, then set the event only if that count is nonzero; the 1 ms timeout
+// covers a push that lands between a scan's last pass and the count going up. Run mw2sp_037: Worker2 17 % CPU, about
+// 10 % of a core in the scans of those wakes (1,000 a second, most finding nothing). Backed off, a worker woken by the
+// event wakes at once as before; only that narrow race can wait longer (up to the maximum). Main's job waits
+// (sub_823B7840) and the other worker loop (sub_823B7920) keep the game's 1 ms.
+REXCVAR_DEFINE_INT32(mw2mp_job_wait_max_ms, 4, "MW2",
+                     "Campaign: Worker2's longest wait for the job event between scans. 1 ms after a scan that ran a "
+                     "job, doubling after each scan that ran none, up to this. 1 = the game's 1 ms poll (1-16)")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REX_EXTERN(__imp__sub_8228BD30);
+REX_EXTERN(__imp__sub_8236FB78);  // call only
 namespace {
+thread_local bool t_job_ran = false;    // the native scan ran a job since this thread's last wait
+thread_local uint32_t t_job_wait_ms = 1;
 constexpr uint32_t kJobPreferred = 0x8241F580u;  // lis r10,-32190; addi r26,r10,-2688: s32, the preferred queue
 constexpr uint32_t kJobEnabled = kJobPreferred + 120;  // byte per queue
 constexpr uint32_t kJobHint = 0x83E28A80u;      // lis r11,-31773; addi r29,r11,-30080
@@ -152,6 +227,7 @@ inline int32_t RunJob(PPCContext& ctx, uint8_t* base, int32_t q, uint32_t lr) {
   ctx.r3.u64 = uint32_t(q);
   ctx.lr = lr;
   __imp__sub_823B6D70(ctx, base);  // call only
+  t_job_ran |= ctx.r3.s32 != 0;
   return ctx.r3.s32;
 }
 // The game's lwarx/cmpw/stwcx. loop: the hint goes to "none" if it still names q. The no-match path's stwcx. of the
@@ -218,6 +294,30 @@ REX_HOOK_RAW(sub_823B7430) {
     __imp__sub_8228BD78(ctx, base);  // ResetEvent of the work event, then one more pass; call only
     reset_left = false;
   }
+  ctx.r1.u32 = sp;
+}
+
+REX_HOOK_RAW(sub_8228BD30) {
+  static const uint32_t max_ms = uint32_t(std::clamp(REXCVAR_GET(mw2mp_job_wait_max_ms), 1, 16));
+  // Only from sub_823B79C0's wait (return address 0x823B7A14), and only with the native scan (it reports the jobs).
+  if (ctx.lr != 0x823B7A14 || max_ms <= 1 || !REXCVAR_GET(mw2mp_native_job_scan)) {
+    __imp__sub_8228BD30(ctx, base);
+    return;
+  }
+  t_job_wait_ms = t_job_ran ? 1 : std::min(t_job_wait_ms * 2, max_ms);
+  t_job_ran = false;
+  // The game's body with r4 = the wait: stwu r1,-96(r1); r3 = the work event (lwz r3,-16320 off 0x83510000);
+  // WaitForSingleObject; r3 = 1 when it was signalled (cntlzw / rlwinm), the caller ignores it.
+  const uint32_t sp = ctx.r1.u32;
+  *reinterpret_cast<volatile uint32_t*>(Host(base, sp - 96)) = __builtin_bswap32(sp);
+  ctx.r1.u32 = sp - 96;
+  ctx.r3.u64 = GuestLoad(base, 0x8350C040u);
+  ctx.r4.u64 = t_job_wait_ms;
+  const uint64_t lr = ctx.lr;
+  ctx.lr = 0x8228BD4C;
+  __imp__sub_8236FB78(ctx, base);  // call only
+  ctx.lr = lr;
+  ctx.r3.u64 = ctx.r3.u32 == 0 ? 1 : 0;
   ctx.r1.u32 = sp;
 }
 #endif

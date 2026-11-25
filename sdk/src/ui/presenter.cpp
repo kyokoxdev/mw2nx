@@ -146,8 +146,16 @@ REXCVAR_DEFINE_INT32(present_safe_area_y, 90, "UI/Presenter",
     .range(0, 100);
 
 #if defined(REX_HAS_FIDELITYFX_SDK)
-REXCVAR_DEFINE_STRING(present_effect, "bilinear", "UI/Presenter",
-                      "Guest output effect: bilinear, cas, fsr, fsr2, fsr3")
+// The Switch: FSR by default. Handheld (1280x720 frame on a 1280x720 screen) that is RCAS sharpening alone; docked
+// (1920x1080) EASU upscales the frame to 1080p, then RCAS.
+#if REX_PLATFORM_SWITCH
+#define REX_PRESENT_EFFECT_DEFAULT "fsr"
+#else
+#define REX_PRESENT_EFFECT_DEFAULT "bilinear"
+#endif
+REXCVAR_DEFINE_STRING(present_effect, REX_PRESENT_EFFECT_DEFAULT, "UI/Presenter",
+                      "Guest output effect: bilinear, cas, fsr (FSR 1: EASU upscaling when the screen is bigger "
+                      "than the frame, then RCAS sharpening), fsr2, fsr3")
     .allowed({"bilinear", "cas", "fsr", "fsr2", "fsr3"})
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 
@@ -1186,10 +1194,12 @@ Presenter::GuestOutputPaintFlow Presenter::GetGuestOutputPaintFlow(
     bool temporal_quality_mode_forced =
         is_temporal_effect &&
         config.GetFsrQualityMode() != GuestOutputPaintConfig::FsrQualityMode::kAuto;
-    if ((config.GetEffect() == GuestOutputPaintConfig::Effect::kFsr || is_temporal_effect) &&
-        ((ffx_last_size.first < output_width_clamped ||
-          ffx_last_size.second < output_height_clamped) ||
-         temporal_quality_mode_forced)) {
+    // Plain FSR always takes this path: at 1:1 (the Switch handheld) no EASU pass, RCAS alone, which is what "fsr"
+    // asks for rather than CAS.
+    if (config.GetEffect() == GuestOutputPaintConfig::Effect::kFsr ||
+        (is_temporal_effect && ((ffx_last_size.first < output_width_clamped ||
+                                 ffx_last_size.second < output_height_clamped) ||
+                                temporal_quality_mode_forced))) {
       // AMD FidelityFX Super Resolution - upsample along at least one axis.
       // Using the output size clamped to the maximum render target size here as
       // EASU will always write to intermediate images, and RCAS supports only

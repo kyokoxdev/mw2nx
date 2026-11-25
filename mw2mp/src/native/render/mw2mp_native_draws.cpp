@@ -1149,6 +1149,21 @@ REXCVAR_DEFINE_INT32(mw2mp_native_vertex_cache_chunk_kb, 256, "MW2",
 REXCVAR_DEFINE_BOOL(mw2mp_native_vertex_cache_sum, true, "MW2",
                     "Native renderer: the vertex cache checks a range with Fletcher sums of its 16-byte blocks "
                     "(ChangeSum, no multiplies) instead of XXH3 (~2 GB/s on the console). false = XXH3");
+// Run mw2sp_048 (invasion, 23-36 fps windows, ring 100 % CPU): ChangeSum from GuardVertexCacheByWrites was 11-12 % of
+// the ring thread. ~1.65M binds per 10 s land in ~90 chunk copies of 256 KB, so a chunk is hit ~55 times a frame and
+// "every 128 hits" summed ~13k x 256 KB = 3.3 GB per 10 s. Every unstamped change the guard caught in runs 034-048
+// was a chunk in its first second (1DA40000-1DC80000 at level start) or a later one (1DAC0000, 19940010, ...).
+// Build guardfix (run mw2sp_052) checked them at 1 in 512 of ALL big hits (one global counter): the new pale wedges at
+// invasion's Nate's (stale FX vertices, never reported) came with it. A frame's hits come in a near-fixed order, so a
+// global stride can skip the same copy every frame. Now per copy, by frames.
+REXCVAR_DEFINE_INT32(mw2mp_native_vertex_guard_big_frames, 16, "MW2",
+                     "Native renderer: a vertex cache copy of 256 KB or more is checked against the guest bytes at its "
+                     "first hit, then at its first hit after this many frames x (its size in 256 KB, rounded up to a "
+                     "power of 2) since its last check. A change by a writer that does not stamp shows stale vertices "
+                     "at most that many frames before it is caught (then its pages count as written every frame). "
+                     "1 = every frame")
+    .range(1, 256)
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 REXCVAR_DEFINE_BOOL(mw2mp_native_vertex_cache_sum_ab, false, "MW2",
                     "Test, with mw2mp_benchmark_ab_s: A/B factor 2 is mw2mp_native_vertex_cache_sum (on = ChangeSum, "
                     "off = XXH3)")
@@ -2157,35 +2172,57 @@ static_assert([] {
 
 }  // namespace
 
-// The store watch of a diagnostic build (MW2_WATCH_STORES, mw2mp_guest_memory.h): the physical range the
-// generated code's stores are checked against (the model lighting volume, set in UpdateVolume; empty = nothing hits),
-// and who wrote into it: host return address (inside the generated function, sub_XXXXXXXX in the ELF) and guest lr
-// (its caller), with a count. Defined in every build; only the watch build calls mw2_watch_hit.
+// The store watch of a diagnostic build (MW2_WATCH_STORES, mw2mp_guest_memory.h): the 64 KB regions of physical
+// memory the generated code's stores are checked against, and who wrote there: host return address (inside the
+// generated function, sub_XXXXXXXX in the ELF), guest lr (its caller) and the 256 KB block, with a count. Defined in
+// every build; only the watch build calls mw2_watch_hit.
+namespace {
+// Physical ranges the vertex and index caches caught changing without a write stamp in every invasion run
+// (mw2sp_048-050): within ~10 s of cl_ingame (1DA40000-1DCC0000 incl. the index ranges 1DB22xxx/1DC6Bxxx, 1DD0A1xx,
+// 14240008) and minutes in (19940010-19AC0000, 17840000-17940000, 1558000C after favela_escape loads). The lighting
+// volume's regions are added by UpdateVolume.
+constexpr std::pair<uint32_t, uint32_t> kWatchRanges[] = {
+    {0x1DA40000u, 0x1DCC0000u}, {0x1DD00000u, 0x1DD10000u}, {0x14240000u, 0x142C0000u},
+    {0x19940000u, 0x19AC0000u}, {0x17840000u, 0x17940000u}, {0x15580000u, 0x155C0000u},
+};
+}  // namespace
 extern "C" {
-unsigned mw2_watch_lo = 0;
-unsigned mw2_watch_size = 0;
+unsigned char mw2_watch_regions[1024] = {};
+}
+static void WatchRegions(uint32_t physical, uint32_t end) {
+  for (uint32_t r = physical >> 16; r < std::min<uint32_t>((end + 0xFFFFu) >> 16, 8192); ++r) {
+    mw2_watch_regions[r >> 3] |= uint8_t(1u << (r & 7));
+  }
 }
 namespace {
+[[maybe_unused]] const bool g_watch_fixed = [] {
+  for (const auto& [lo, hi] : kWatchRanges) {
+    WatchRegions(lo, hi);
+  }
+  return true;
+}();
 struct WatchWriter {
-  std::atomic<uint64_t> key{0};  // host return address
+  std::atomic<uint64_t> key{0};  // host return address | 256 KB block << 48
   std::atomic<uint32_t> guest_lr{0};
   std::atomic<uint32_t> count{0};
 };
-std::array<WatchWriter, 64> g_watch_writers;
+std::array<WatchWriter, 256> g_watch_writers;
 std::atomic<uint64_t> g_watch_hits{0};
-std::atomic<uint64_t> g_watch_dropped{0};  // writers past the table's 64
+std::atomic<uint64_t> g_watch_dropped{0};  // writers past the table's 256
 }  // namespace
-extern "C" [[gnu::noinline]] void mw2_watch_hit(unsigned, unsigned long long guest_lr) {
+extern "C" [[gnu::noinline]] void mw2_watch_hit(unsigned guest, unsigned long long guest_lr) {
   const uint64_t pc = uint64_t(reinterpret_cast<uintptr_t>(__builtin_return_address(0)));
+  const uint32_t physical = (guest & 0x1FFFFFFFu) + (guest >= 0xE0000000u ? 0x1000u : 0u);
+  const uint64_t key = (pc & 0xFFFFFFFFFFFFull) | (uint64_t(physical >> 18) << 48);
   g_watch_hits.fetch_add(1, std::memory_order_relaxed);
-  for (uint32_t i = 0, slot = uint32_t((pc >> 2) * 0x9E3779B1u) & 63; i < 64; ++i, slot = (slot + 1) & 63) {
+  for (uint32_t i = 0, slot = uint32_t((key >> 2) * 0x9E3779B1u) & 255; i < 256; ++i, slot = (slot + 1) & 255) {
     WatchWriter& w = g_watch_writers[slot];
-    uint64_t key = w.key.load(std::memory_order_relaxed);
-    if (key == 0 && w.key.compare_exchange_strong(key, pc, std::memory_order_relaxed)) {
+    uint64_t seen = w.key.load(std::memory_order_relaxed);
+    if (seen == 0 && w.key.compare_exchange_strong(seen, key, std::memory_order_relaxed)) {
       w.guest_lr.store(uint32_t(guest_lr), std::memory_order_relaxed);
-      key = pc;
+      seen = key;
     }
-    if (key == pc) {
+    if (seen == key) {
       w.count.fetch_add(1, std::memory_order_relaxed);
       return;
     }
@@ -8748,8 +8785,8 @@ class VulkanDrawsImpl final : public VulkanDraws {
                            "{} unchanged, {} updated ({} pages, {:.2f} MB uploaded), {:.1f} ms; {} checked against the "
                            "whole read since boot; finding the changed pages: comparing {:.0f} us each ({}), by hash "
                            "{:.0f} us each ({}), by the writer's marks {:.0f} us each ({}; {} also hashed as a check, "
-                           "{} pages marked only after the check, {} pages changed without a mark, {} pages by "
-                           "write stamps)",
+                           "{} pages marked only after the check (up to {} frames late), {} pages changed without a "
+                           "mark, {} pages by write stamps)",
                            volume_states_, volume_no_changes_, volume_updated_report_, volume_pages_,
                            double(volume_bytes_) / 1048576.0, double(volume_ns_) / 1e6, volume_checked_,
                            volume_detects_[0] ? double(volume_detect_ns_[0]) / 1e3 / double(volume_detects_[0]) : 0.0,
@@ -8757,9 +8794,9 @@ class VulkanDrawsImpl final : public VulkanDraws {
                            volume_detects_[1] ? double(volume_detect_ns_[1]) / 1e3 / double(volume_detects_[1]) : 0.0,
                            volume_detects_[1],
                            volume_detects_[2] ? double(volume_detect_ns_[2]) / 1e3 / double(volume_detects_[2]) : 0.0,
-                           volume_detects_[2], volume_mark_checked_, volume_mark_late_, volume_mark_misses_,
-                           volume_mark_stamped_);
-      volume_mark_stamped_ = 0;
+                           volume_detects_[2], volume_mark_checked_, volume_mark_late_, volume_mark_late_max_,
+                           volume_mark_misses_, volume_mark_stamped_);
+      volume_mark_stamped_ = volume_mark_late_max_ = 0;
       volume_states_ = volume_no_changes_ = volume_updated_report_ = 0;
       volume_pages_ = volume_bytes_ = volume_ns_ = 0;
       volume_detect_ns_[0] = volume_detect_ns_[1] = volume_detects_[0] = volume_detects_[1] = 0;
@@ -8772,13 +8809,14 @@ class VulkanDrawsImpl final : public VulkanDraws {
       for (WatchWriter& w : g_watch_writers) {
         const uint32_t n = w.count.exchange(0, std::memory_order_relaxed);
         if (n) {
-          writers += fmt::format(" | pc {:#x} guest lr {:08X} x{}", w.key.load(std::memory_order_relaxed),
-                                 w.guest_lr.load(std::memory_order_relaxed), n);
+          const uint64_t key = w.key.load(std::memory_order_relaxed);
+          writers += fmt::format(" | pc {:#x} guest lr {:08X} block {:08X} x{}", key & 0xFFFFFFFFFFFFull,
+                                 w.guest_lr.load(std::memory_order_relaxed), uint32_t(key >> 48) << 18, n);
         }
       }
-      MW2MP_REPORT_RING("[native] C3 volume store watch, last 10 s: {} stores into {:08X}+{:#x} ({} dropped); "
+      MW2MP_REPORT_RING("[native] C3 store watch, last 10 s: {} stores into the watched regions ({} dropped); "
                         "reference mw2_watch_hit at {:#x}{}",
-                        hits, mw2_watch_lo, mw2_watch_size, g_watch_dropped.exchange(0, std::memory_order_relaxed),
+                        hits, g_watch_dropped.exchange(0, std::memory_order_relaxed),
                         uint64_t(reinterpret_cast<uintptr_t>(&mw2_watch_hit)), writers);
     }
     if (volumes_read_.empty()) {
@@ -10905,6 +10943,7 @@ class VulkanDrawsImpl final : public VulkanDraws {
     vcache_by_writes_ = REXCVAR_GET(mw2mp_native_vertex_cache_by_writes);
     vcache_whole_bytes_ = uint32_t(std::clamp(REXCVAR_GET(mw2mp_native_vertex_cache_whole_kb), 0, 4096)) << 10;
     vcache_chunk_bytes_ = uint32_t(std::clamp(REXCVAR_GET(mw2mp_native_vertex_cache_chunk_kb), 0, 1024)) << 10;
+    vcache_guard_big_frames_ = uint32_t(std::clamp(REXCVAR_GET(mw2mp_native_vertex_guard_big_frames), 1, 256));
     if (vcache_by_writes_) {
       mw2mp::page_writes::Enable(true);  // from now on, including the maps loaded later
     }
@@ -11066,7 +11105,7 @@ class VulkanDrawsImpl final : public VulkanDraws {
                            mw2mp::page_writes::Unchanged(physical, bytes, e.copy_epoch);
     CutSubstage(46, t_part);
     if (unchanged) {
-      const bool guard_passed = GuardVertexCacheByWrites(data, bytes, physical, e.sum_pool, e.hits++);
+      const bool guard_passed = GuardVertexCacheByWrites(data, bytes, physical, e.sum_pool, e.hits++, e.checked_frame);
       CutSubstage(47, t_part);
       if (!guard_passed) {
         mw2mp::page_writes::MarkVolatile(physical, bytes);
@@ -11639,20 +11678,30 @@ class VulkanDrawsImpl final : public VulkanDraws {
   // By sum, not by reading the pool copy back: that would have to wait for the copy thread first, and on the console
   // the ~4,000 checks a second (pools refilled after each switch) cost 9.5 % of the frame rate that way.
   bool GuardVertexCacheByWrites(const uint8_t* data, uint32_t bytes, uint32_t physical, uint64_t expected,
-                                uint32_t hit) {
+                                uint32_t hit, uint32_t& checked_frame) {
     const uint64_t n = ++vcache_guard_seen_;
     // A copy of 256 KB or more (chunks, mw2mp_native_vertex_cache_chunk_kb, and draw ranges that big) is checked at
-    // its first hit and then every 64 x (its size in 256 KB, rounded up to a power of 2) hits: the bytes summed per hit
-    // stay about those of a small copy's 1 in 64, where every 64th hit of a MB-sized copy would sum MBs per frame.
-    if (const uint32_t big = bytes >> 18) {
-      const uint32_t every_mask = (64u << std::bit_width(big)) - 1;
-      if ((hit & every_mask) != 0) {
+    // its first hit and then (until build guardsparse) every 64 x (its size in 256 KB, rounded up to a power of 2)
+    // hits: a MB-sized copy summed per hit about what a small copy's 1 in 64 does. Run mw2sp_049: a per-copy "first
+    // 8192 hits dense" never ended (25k checks, 4.5 GB summed per 10 s, ChangeSum 10.8 % of the ring): hits restart at
+    // every fresh copy (a stamp anywhere in 256 KB) and slot replacement (~11k per 10 s), and one chunk has an entry per
+    // start and size. Builds guardstride/guardfix: 1 in 512 x size class of all big hits, one global counter; that
+    // aliased with a frame's fixed hit order (run mw2sp_052: stale FX wedges, no WARN). Now: its first hit, then once
+    // per mw2mp_native_vertex_guard_big_frames x size class frames per copy (~90 chunks / 16 frames ~ 0.6 GB per 10 s).
+    // + 4095: a chunk copy starts a whole number of strides into its chunk, so it is up to a stride (< 1 KB) short of
+    // 256 KB (run mw2sp_050: 14240008+262136). Before build guardfix those took the small rule (1 in 64): 22.8k
+    // checks and 4 GB summed per 10 s through builds guardsparse and guardstride.
+    if (const uint32_t big = (bytes + 4095) >> 18) {
+      const uint32_t now = uint32_t(frame_);
+      if (hit != 0 && now - checked_frame < (vcache_guard_big_frames_ << (std::bit_width(big) - 1))) {
         return true;
       }
+      checked_frame = now;
     } else if (n > 2000 && hit >= 2 && (hit & 63) != 0) {
       return true;
     }
     ++vcache_checked_;
+    vcache_bytes_checked_ += bytes;
     if ((ChangeSum(data, size_t(bytes)) | 1) == expected) {
       return true;
     }
@@ -11799,12 +11848,12 @@ class VulkanDrawsImpl final : public VulkanDraws {
     MW2MP_REPORT_RING("[native] C6 vertex cache (mw2mp_native_vertex_cache, {}), last 10 s: {} hits ({:.1f} MB not "
                       "copied), {} new copies in the pools ({:.1f} MB; {} refills after a switch), {} changed or new ranges copied as usual; "
                       "hashed {:.1f} MB in {:.1f} ms; pool {} at {:.1f} of {} MB, {} switches, {} times full; {} "
-                      "entries replaced by newer ranges; {} hits checked against the guest bytes",
+                      "entries replaced by newer ranges; {} hits checked against the guest bytes ({:.1f} MB summed)",
                       vcache_active_ ? "on" : (vcache_off_ ? "OFF after a mismatch" : "off"), vcache_hits_,
                       double(vcache_bytes_hit_) / 1048576.0, vcache_filled_, double(vcache_bytes_filled_) / 1048576.0, vcache_refilled_,
                       vcache_changed_, double(vcache_bytes_hashed_) / 1048576.0, double(vcache_ns_hash_) / 1e6, vpool_,
                       double(vpools_[vpool_].used) / 1048576.0, vpools_[vpool_].size >> 20, vcache_switches_,
-                      vcache_full_, vcache_evicted_, vcache_checked_);
+                      vcache_full_, vcache_evicted_, vcache_checked_, double(vcache_bytes_checked_) / 1048576.0);
     if (vcache_by_writes_) {
       MW2MP_REPORT_RING("[native] C6 vertex cache by write stamps: {} ranges changed without a stamp in 10 s ({} since "
                         "start), now copied every frame",
@@ -11832,7 +11881,7 @@ class VulkanDrawsImpl final : public VulkanDraws {
       std::fill(vcache_cover_filled_.begin(), vcache_cover_filled_.end(), 0);
     }
     vcache_hits_ = vcache_bytes_hit_ = vcache_filled_ = vcache_bytes_filled_ = vcache_changed_ = 0;
-    vcache_bytes_hashed_ = vcache_ns_hash_ = vcache_full_ = vcache_evicted_ = vcache_refilled_ = vcache_checked_ = 0;
+    vcache_bytes_hashed_ = vcache_ns_hash_ = vcache_full_ = vcache_evicted_ = vcache_refilled_ = vcache_checked_ = vcache_bytes_checked_ = 0;
   }
 
   // A small CPU-cached buffer per slot, only for the shared constants. If anything fails, it continues as
@@ -14089,8 +14138,7 @@ class VulkanDrawsImpl final : public VulkanDraws {
       v = texture.incremental.get();
       v->address = address;
       v->bound = bound;
-      mw2_watch_lo = address;  // the store watch's range (diagnostic build only; see mw2_watch_hit)
-      mw2_watch_size = pages * 4096;
+      WatchRegions(address, address + pages * 4096);  // the store watch's regions (diagnostic build only)
       v->depth3d = depth3d;
       v->height = blocks_y_host;
       v->width_host = blocks_x_host;
@@ -14176,6 +14224,10 @@ class VulkanDrawsImpl final : public VulkanDraws {
        * the marks are off for the rest of the run.
        */
       const bool by_marks = mw2mp::volume_writes::UseMarks();
+      if (by_marks && !volume_marks_were_on_) {
+        volume_mark_looks_ = 0;  // back on after a miss's hashing time: the first 300 looks checked in full again
+      }
+      volume_marks_were_on_ = by_marks;
       const bool check_marks = by_marks && (++volume_mark_looks_ <= 300 || (volume_mark_looks_ & 63) == 0);
       if (by_marks) {
         marked_pages_.clear();
@@ -14219,11 +14271,12 @@ class VulkanDrawsImpl final : public VulkanDraws {
             }
           } else if (page_marked_[p]) {
             ++volume_mark_late_;
+            volume_mark_late_max_ = std::max<uint64_t>(volume_mark_late_max_, frame_ - s.frame);
           } else if (frame_ - s.frame < kVolumeMarkGraceFrames) {
             volume_mark_suspects_[kept++] = s;
           } else {
             ++volume_mark_misses_;
-            mw2mp::volume_writes::Missed(s.physical_page << 12);
+            mw2mp::volume_writes::Missed(s.physical_page << 12, s.runs, frame_ - s.frame);
           }
         }
         volume_mark_suspects_.resize(kept);
@@ -14241,7 +14294,14 @@ class VulkanDrawsImpl final : public VulkanDraws {
                                        : std::memcmp(live + since, v->raw.data() + since, bytes) != 0;
           if (changed) {
             if (by_marks) {
-              volume_mark_suspects_.push_back({(address >> 12) + p, frame_});  // judged at later looks
+              VolumeSuspect s{(address >> 12) + p, frame_, {0, 0}};  // judged at later looks
+              for (uint32_t r = 0; r * 32 < bytes; ++r) {  // raw still holds the bytes before the change
+                if (std::memcmp(live + since + r * 32, v->raw.data() + since + r * 32,
+                                std::min<uint32_t>(32, bytes - r * 32)) != 0) {
+                  s.runs[r >> 6] |= uint64_t(1) << (r & 63);
+                }
+              }
+              volume_mark_suspects_.push_back(s);
             }
             std::memcpy(v->raw.data() + since, live + since, bytes);
             v->hashes[p] = XXH3_64bits(v->raw.data() + since, bytes);
@@ -14375,6 +14435,7 @@ class VulkanDrawsImpl final : public VulkanDraws {
   // By the writer's marks (mw2mp_volume_writes): looks so far, checks and misses in the report interval,
   // and the marked pages of a look.
   uint64_t volume_mark_looks_ = 0;
+  bool volume_marks_were_on_ = true;  // by marks at the previous look (off for a while after a miss)
   uint64_t volume_mark_checked_ = 0;
   uint64_t volume_mark_misses_ = 0;
   uint64_t volume_mark_late_ = 0;  // suspects cleared by a mark that came after the check (report interval)
@@ -14477,8 +14538,15 @@ class VulkanDrawsImpl final : public VulkanDraws {
   struct VolumeSuspect {
     uint32_t physical_page;  // guest physical address >> 12
     uint64_t frame;          // frame_ when the check saw it changed without a mark
+    uint64_t runs[2];        // its changed 32-byte runs then (bit n = page offset n x 32): the miss detail's shape
   };
-  static constexpr uint64_t kVolumeMarkGraceFrames = 4;
+  // Was 4. Runs mw2sp_035/036/038/039: late marks come in bursts (2-20 pages a 10 s window, several times a run) and
+  // every miss was 2-4 pages (one or two bricks) a few minutes into such stretches, while sub_8239F480 is the only
+  // code with the brick's store pattern (stw at r5 + 0..5376) and all five of its calls go through the hook: marks
+  // later than 4 frames (a preempted job worker in heavy scenes), not another writer. Run mw2sp_047 used up all four
+  // misses in 20 min, then hashed the volume for the rest of the session (2-4 % of the ring thread).
+  static constexpr uint64_t kVolumeMarkGraceFrames = 60;
+  uint64_t volume_mark_late_max_ = 0;  // frames from the check to the latest late mark (report interval)
   std::vector<VolumeSuspect> volume_mark_suspects_;
 
   bool ReadVolume(const uint32_t* f, const HostTextureFormat& tf, uint32_t blocks_x,
@@ -19171,6 +19239,7 @@ class VulkanDrawsImpl final : public VulkanDraws {
     uint64_t hash_pool = 0;  // XXH3 | 1 of the bytes of its persistent copy (0: none)
     uint64_t sum_pool = 0;   // ChangeSum | 1 of the same bytes
     bool seen_by_sum = false;  // hash_seen is a ChangeSum
+    uint32_t checked_frame = 0;  // by writes: frame_ (low 32 bits) of the guard's last check of a big copy
     VkDeviceSize offset = 0;
     uint32_t pool = 0;
     uint32_t generation = 0;  // the copy is valid while vpool_generation_[pool] is this
@@ -19224,6 +19293,8 @@ class VulkanDrawsImpl final : public VulkanDraws {
   uint64_t vcache_hits_ = 0, vcache_bytes_hit_ = 0, vcache_filled_ = 0, vcache_bytes_filled_ = 0;
   uint64_t vcache_changed_ = 0, vcache_bytes_hashed_ = 0, vcache_ns_hash_ = 0, vcache_full_ = 0;
   uint64_t vcache_switches_ = 0, vcache_guard_seen_ = 0, vcache_checked_ = 0, vcache_evicted_ = 0, vcache_refilled_ = 0;
+  uint64_t vcache_bytes_checked_ = 0;  // bytes GuardVertexCacheByWrites summed (report interval)
+  uint32_t vcache_guard_big_frames_ = 16;  // mw2mp_native_vertex_guard_big_frames
   // C6 vertex cache detail (measurement): 256-byte blocks of guest physical memory covered in the last 10 s.
   uint64_t vcache_usual_first_ = 0, vcache_usual_written_ = 0, vcache_bytes_usual_ = 0;
   uint64_t vcache_distinct_usual_ = 0, vcache_distinct_filled_ = 0;
