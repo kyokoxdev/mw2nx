@@ -7,7 +7,7 @@ Building: [building.md](building.md).
 
 The Switch is the only target: no desktop builds.
 
-**Release 1.0.1** is out as an installable NSP (application `01F2D6C0A9E40000`: the Campaign is program 0, Multiplayer
+**Release 1.0.2** is out as an installable NSP (application `01F2D6C0A9E40000`: the Campaign is program 0, Multiplayer
 program 1). Every milestone below is done; what is left is under [Known issues](#known-issues) and goes into 1.0.x.
 
 ## Inputs (yours, never committed)

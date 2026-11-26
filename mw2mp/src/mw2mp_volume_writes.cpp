@@ -82,32 +82,10 @@ int64_t NowNs() {
       .count();
 }
 
-// Diagnostic for the misses (runs mw2sp_048-050: 4 of 4 in every invasion run, each one brick): a writer call
-// preempted between its stores and its mark, or another writer? The calls running now (destination, start), the last
-// 256 that ended, and the first call after a miss that covers the missed page, all logged at or after the miss.
-struct InFlight {
-  std::atomic<uint32_t> destination{0};  // guest r5; 0 = free
-  std::atomic<int64_t> start_ns{0};
-};
-std::array<InFlight, 16> g_in_flight;
-struct Ended {
-  std::atomic<uint32_t> physical{0};
-  std::atomic<int64_t> end_ns{0};
-};
-std::array<Ended, 256> g_ended;
-std::atomic<uint32_t> g_ended_next{0};
-std::atomic<uint32_t> g_missed_page{0};  // physical page index + 1 of the last miss until a call covers it; 0 = none
-std::atomic<int64_t> g_missed_ns{0};
-
 uint32_t Physical(uint32_t guest_address) {
   auto* runtime = rex::Runtime::instance();
   auto* memory = runtime ? runtime->memory() : nullptr;
   return memory ? memory->GetPhysicalAddress(guest_address) : UINT32_MAX;
-}
-
-bool Covers(uint32_t physical, uint32_t page) {
-  return physical != UINT32_MAX && page >= ((physical & 0x1FFFFFFFu) >> 12) &&
-         page <= (((physical & 0x1FFFFFFFu) + kBrickBytes - 1) >> 12);
 }
 
 bool On() {
@@ -151,40 +129,11 @@ void TakeMarks(uint32_t physical_first, uint32_t count, std::vector<uint32_t>& p
   }
 }
 
-void Missed(uint32_t physical_page, const uint64_t runs[2], uint64_t frames) {
+void Missed(uint32_t physical_page) {
   const int64_t now = NowNs();
   if (now < g_resume_ns.load(std::memory_order_relaxed)) {
     return;  // already off: more suspects of the same look are the same event
   }
-  const uint32_t page = (physical_page & 0x1FFFFFFFu) >> 12;
-  std::string running;
-  for (InFlight& f : g_in_flight) {
-    const uint32_t destination = f.destination.load(std::memory_order_acquire);
-    if (destination) {
-      const uint32_t physical = Physical(destination);
-      running += fmt::format(" {:08X} (physical {:08X}{}, {:.1f} ms)", destination, physical,
-                             Covers(physical, page) ? ", THIS PAGE" : "",
-                             double(now - f.start_ns.load(std::memory_order_relaxed)) / 1e6);
-    }
-  }
-  int64_t last_end = 0;
-  uint32_t last_physical = 0;
-  for (Ended& e : g_ended) {
-    const uint32_t physical = e.physical.load(std::memory_order_relaxed);
-    const int64_t end = e.end_ns.load(std::memory_order_relaxed);
-    if (physical && Covers(physical, page) && end > last_end) {
-      last_end = end;
-      last_physical = physical;
-    }
-  }
-  REXLOG_WARN("[native] C3 lighting volume miss detail: page {:08X}, seen changed {} frames before; changed 32-byte "
-              "runs {:016X}{:016X} (bit n = page offset n x 32, high word first); writer calls running:{}; the last "
-              "of 256 ended calls on this page: {}",
-              physical_page, frames, runs[1], runs[0], running.empty() ? " none" : running.c_str(),
-              last_end ? fmt::format("{:08X}, ended {:.1f} ms ago", last_physical, double(now - last_end) / 1e6)
-                       : std::string("none"));
-  g_missed_ns.store(now, std::memory_order_relaxed);
-  g_missed_page.store(page + 1, std::memory_order_release);
   const uint32_t misses = g_misses.fetch_add(1, std::memory_order_relaxed) + 1;
   if (misses >= kMissesForSession) {
     g_resume_ns.store(INT64_MAX, std::memory_order_relaxed);
@@ -206,36 +155,9 @@ void Missed(uint32_t physical_page, const uint64_t runs[2], uint64_t frames) {
 REX_HOOK_RAW(MW2_VOLUME_WRITER) {
   using namespace mw2mp::volume_writes;
   const uint32_t destination = ctx.r5.u32;
-  if (!On()) {
-    MW2_VOLUME_WRITER_IMP(ctx, base);
-    return;
-  }
-  InFlight* slot = nullptr;  // none free (16 running at once): this call is just not listed
-  for (InFlight& f : g_in_flight) {
-    uint32_t expected = 0;
-    if (f.destination.load(std::memory_order_relaxed) == 0 &&
-        f.destination.compare_exchange_strong(expected, destination, std::memory_order_acq_rel)) {
-      f.start_ns.store(NowNs(), std::memory_order_relaxed);
-      slot = &f;
-      break;
-    }
-  }
   MW2_VOLUME_WRITER_IMP(ctx, base);
-  const uint32_t physical = Physical(destination);
-  Mark(physical);
-  const int64_t end = NowNs();
-  if (slot) {
-    slot->destination.store(0, std::memory_order_release);
-  }
-  Ended& e = g_ended[g_ended_next.fetch_add(1, std::memory_order_relaxed) & 255];
-  e.physical.store(physical == UINT32_MAX ? 0 : physical, std::memory_order_relaxed);
-  e.end_ns.store(end, std::memory_order_relaxed);
-  if (const uint32_t missed = g_missed_page.load(std::memory_order_acquire);
-      missed && Covers(physical, missed - 1) && g_missed_page.exchange(0, std::memory_order_relaxed) == missed) {
-    REXLOG_WARN("[native] C3 lighting volume miss detail: the first writer call on page {:08X} since the miss: {:08X} "
-                "(physical {:08X}), ended {:.1f} ms after the miss",
-                (missed - 1) << 12, destination, physical,
-                double(end - g_missed_ns.load(std::memory_order_relaxed)) / 1e6);
+  if (On()) {
+    Mark(Physical(destination));
   }
 }
 

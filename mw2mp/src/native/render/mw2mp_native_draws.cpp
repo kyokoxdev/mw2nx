@@ -14277,7 +14277,7 @@ class VulkanDrawsImpl final : public VulkanDraws {
             volume_mark_suspects_[kept++] = s;
           } else {
             ++volume_mark_misses_;
-            mw2mp::volume_writes::Missed(s.physical_page << 12, s.runs, frame_ - s.frame);
+            mw2mp::volume_writes::Missed(s.physical_page << 12);
           }
         }
         volume_mark_suspects_.resize(kept);
@@ -14295,14 +14295,7 @@ class VulkanDrawsImpl final : public VulkanDraws {
                                        : std::memcmp(live + since, v->raw.data() + since, bytes) != 0;
           if (changed) {
             if (by_marks) {
-              VolumeSuspect s{(address >> 12) + p, frame_, {0, 0}};  // judged at later looks
-              for (uint32_t r = 0; r * 32 < bytes; ++r) {  // raw still holds the bytes before the change
-                if (std::memcmp(live + since + r * 32, v->raw.data() + since + r * 32,
-                                std::min<uint32_t>(32, bytes - r * 32)) != 0) {
-                  s.runs[r >> 6] |= uint64_t(1) << (r & 63);
-                }
-              }
-              volume_mark_suspects_.push_back(s);
+              volume_mark_suspects_.push_back({(address >> 12) + p, frame_});  // judged at later looks
             }
             std::memcpy(v->raw.data() + since, live + since, bytes);
             v->hashes[p] = XXH3_64bits(v->raw.data() + since, bytes);
@@ -14539,7 +14532,6 @@ class VulkanDrawsImpl final : public VulkanDraws {
   struct VolumeSuspect {
     uint32_t physical_page;  // guest physical address >> 12
     uint64_t frame;          // frame_ when the check saw it changed without a mark
-    uint64_t runs[2];        // its changed 32-byte runs then (bit n = page offset n x 32): the miss detail's shape
   };
   // Was 4. Runs mw2sp_035/036/038/039: late marks come in bursts (2-20 pages a 10 s window, several times a run) and
   // every miss was 2-4 pages (one or two bricks) a few minutes into such stretches, while sub_8239F480 is the only
