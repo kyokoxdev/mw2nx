@@ -5448,16 +5448,22 @@ class VulkanDrawsImpl final : public VulkanDraws {
       // The vertex cache by write stamps first, before the same-frame dedupe (run mw2sp_055, invasion: ~96 % of the
       // bindings hit the cache and only ~2 % reuse a dedupe entry, yet every binding paid the dedupe's Find and
       // Annotate, two table misses: Find alone was ~4 % of the ring thread). A cache hit is not annotated: a later
-      // draw of the same range hits the cache again. On a miss the cache is not asked a second time below (a second
-      // ask would fill the pool). Not with GPU skinning (its ranges must not be served from the cache) or the
+      // draw of the same range hits the cache again. This first ask only looks (vcache_lookup_only_): on a miss the
+      // dedupe and the cache's usual ask below run as before. Run mw2sp_059 let it mark and fill: a range written
+      // every frame and bound twice was marked seen by its first binding and filled into the pool by its second
+      // (before, a dedupe hit), then dropped by the next frame's write: pool copies x3 (~650 MB per 10 s) and a
+      // ChangeSum per fill. Not with GPU skinning (its ranges must not be served from the cache) or the
       // hashing cache (it takes the dedupe's hash).
       const bool cache_first = vcache_first_ && vcache_active_ && vcache_by_writes_ && !skin_on_;
       if (cache_first) {
         const VkDeviceSize alignment =
             vertices_base_cero_ && input.bindings.size() == 1 ? VkDeviceSize(input.bindings[0].stride) : 4;
         uint64_t hash_unused = 0;
-        if (VertexCache(source.data, source.bytes, source.order, source.address, alignment, hash_unused, offset,
-                        source.start, source.available)) {
+        vcache_lookup_only_ = true;
+        const bool hit = VertexCache(source.data, source.bytes, source.order, source.address, alignment, hash_unused,
+                                     offset, source.start, source.available);
+        vcache_lookup_only_ = false;
+        if (hit) {
           offsets_vertices[b] = offset;
           SamplerPath(41, t_binding);
           continue;
@@ -5491,7 +5497,7 @@ class VulkanDrawsImpl final : public VulkanDraws {
       }
       // mw2mp_native_vertex_cache: bound from a persistent copy when its bytes did not change (the offset then
       // carries kVertexPoolTag; see ResolveVertexBinding).
-      if (vcache_active_ && !cache_first) {
+      if (vcache_active_) {
         const VkDeviceSize alignment =
             vertices_base_cero_ && input.bindings.size() == 1 ? VkDeviceSize(input.bindings[0].stride) : 4;
         uint64_t hash_cache = hash_dedupe;
@@ -11100,7 +11106,7 @@ class VulkanDrawsImpl final : public VulkanDraws {
         }
         return VertexCacheByWrites(data, bytes, order, address, alignment, tagged);
       }
-      if (available > vcache_whole_bytes_) {
+      if (available > vcache_whole_bytes_ && !vcache_lookup_only_) {
         ++vcache_over_whole_;  // measurement: binds the whole-buffer copy cannot cover, and the biggest buffer
         vcache_over_whole_max_ = std::max(vcache_over_whole_max_, available);
       }
@@ -11224,6 +11230,9 @@ class VulkanDrawsImpl final : public VulkanDraws {
       vpools_[e.pool].frame_read = frame_;
       memo = VertexCacheMemo{key, frame_, e.generation, e.copy_epoch, e.pool, tagged};
       return true;
+    }
+    if (vcache_lookup_only_) {
+      return false;  // the cache-first ask: the seen mark and the fill wait for the ask after the dedupe
     }
     // A copy dropped by a pool switch, with no stamp on its pages since: copied again at once, keeping its sum and
     // hit count (no ChangeSum, no first-hit guards; the 1-in-64 guard goes on). Run mw2sp_013: pools switching every
@@ -19360,6 +19369,7 @@ class VulkanDrawsImpl final : public VulkanDraws {
   bool vcache_ready_ = false, vcache_active_ = false, vcache_off_ = false, vcache_coherent_ = false;
   bool vcache_by_writes_ = false;  // mw2mp_native_vertex_cache_by_writes
   bool vcache_first_ = true;       // mw2mp_native_vertex_cache_first (UploadVertices)
+  bool vcache_lookup_only_ = false;  // VertexCacheByWrites: hits only, no seen mark and no pool fill (cache first)
   // VertexCacheByWrites' last guarded hits, direct-mapped by key (mw2mp_native_vertex_cache_memo).
   struct VertexCacheMemo {
     uint64_t key = 0;

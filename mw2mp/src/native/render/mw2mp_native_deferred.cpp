@@ -21,8 +21,8 @@
 // call it sleeps on a condition variable, and the ring thread wakes it when kWakeBytes more have been queued since it
 // last looked (and in Drain). Spinning between records was tried first, up to 30 us at a time; on the PC that was 88 %
 // of the recorder's samples (22 % of a core for about 2 % of real work), and on the console, with all three cores
-// busy, a spinning thread at the ring's priority takes time from the game. Waking in batches costs one wake per ~4 KB
-// of records (about 70 per frame) and leaves at most that much to be made at the frame's end.
+// busy, a spinning thread at the ring's priority takes time from the game. Waking in batches costs one wake per
+// kWakeBytes of records and leaves at most that much to be made at the frame's end.
 
 #include "mw2mp_native_deferred.h"
 
@@ -210,13 +210,16 @@ enum Op : uint32_t {
 
 // Wakes the recorder if it went to sleep. The fence orders the ring thread's last g_written store before its look at
 // g_recorder_sleeping; the recorder sets g_recorder_sleeping before its last look at g_written (both seq_cst), so one
-// of the two sees the other's store.
+// of the two sees the other's store. The mutex is taken and released before the notification, not held through it:
+// the lock orders the store before the recorder's look under the lock (or the recorder is already waiting), and a
+// recorder woken while the ring still held the mutex blocked on it at once, and the ring's unlock then had to hand it
+// over through the kernel (svcArbitrateLock / svcArbitrateUnlock, ~3.5 % of the ring's samples in run mw2sp_059).
 void Wake() {
   g_looked = g_cursor;
   std::atomic_thread_fence(std::memory_order_seq_cst);
   if (g_recorder_sleeping.load(std::memory_order_relaxed)) {
     ++g_wakes;
-    std::lock_guard lock(g_mutex);
+    { std::lock_guard lock(g_mutex); }
     g_cv_recorder.notify_one();
   }
 }
@@ -275,7 +278,9 @@ uint8_t* Reserve(uint32_t op, size_t payload) {
 
 // A record is published at once (the recorder, when awake, takes it); whether the recorder must be woken is looked at
 // once kWakeBytes more were queued (see the header comment) and in Drain.
-constexpr uint64_t kWakeBytes = 4096;
+// 8 KB (was 4 KB): run mw2sp_059 woke the recorder ~4,500 times a second, each one a kernel signal on the ring
+// thread; the cost is at most 8 KB of records (~200 calls, ~0.1 ms) left for the recorder at a Drain.
+constexpr uint64_t kWakeBytes = 8192;
 void Commit() {
   g_cursor += g_pending;
   g_bytes += g_pending;
@@ -1248,7 +1253,7 @@ void Loop(int ring_core) {
     // Same pairing as Wake, the other way round: the ring thread sets g_producer_waiting before its last look at g_done.
     std::atomic_thread_fence(std::memory_order_seq_cst);
     if (g_producer_waiting.load(std::memory_order_relaxed)) {
-      std::lock_guard lock(g_mutex);
+      { std::lock_guard lock(g_mutex); }  // as in Wake: released before the notification
       g_cv_producer.notify_all();
     }
   }
