@@ -2188,7 +2188,10 @@ class NativeRenderSystem final : public rex::system::IGraphicsSystem {
     // Timer on 1 of every kStopwatchPacketsEvery packets, with the time scaled up: there are ~14,000 per
     // frame, and two clock reads per packet cost more than writing the register. WAIT_REG_MEM, long and
     // infrequent, is always timed.
-    const bool time = (++stopwatch_packets_ & (kStopwatchPacketsEvery - 1)) == 0;
+    if (stopwatches_ < 0) [[unlikely]] {
+      stopwatches_ = StopwatchesOn() ? 1 : 0;  // on the first packet: the log level is set by then
+    }
+    const bool time = stopwatches_ && (++stopwatch_packets_ & (kStopwatchPacketsEvery - 1)) == 0;
     const auto start = time ? Clock::now() : Clock::time_point{};
     switch (packet >> 30) {
       case 0: {
@@ -6488,6 +6491,7 @@ class NativeRenderSystem final : public rex::system::IGraphicsSystem {
   uint32_t warnings_draw_marker_ = 0;
   uint64_t words_loose_ = 0;
   uint64_t stopwatch_packets_ = 0;
+  int8_t stopwatches_ = -1;  // StopwatchesOn() (mw2mp_native_draws.h), read on the first packet
   std::array<uint64_t, 128> time_opcode_ns_{};
   std::array<uint64_t, 128> count_opcode_{};
   // WAIT_REG_MEM per polled register or address since the last report.

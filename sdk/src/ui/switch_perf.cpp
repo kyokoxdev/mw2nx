@@ -82,6 +82,7 @@ Result __real_nwindowQueueBuffer(NWindow* nw, s32 slot, const NvMultiFence* fenc
 Result __real_bqDequeueBuffer(Binder* b, bool async, u32 width, u32 height, s32 format, u32 usage, s32* buf,
                               NvMultiFence* fence);
 void __real_svcSleepThread(s64 nano);
+Result __real_svcSendSyncRequest(Handle session);
 }
 
 namespace {
@@ -174,6 +175,7 @@ enum : unsigned {
   kSleepYield,        // svcSleepThread(-1 o -2)
   kSleepShort,        // up to 1 ms
   kSleepLong,        // over 1 ms
+  kSyncRequest,       // svcSendSyncRequest (every IPC call)
   kCallsCount,
 };
 struct Calls {
@@ -182,6 +184,18 @@ struct Calls {
   std::atomic<u64> bytes{0};
 };
 Calls g_calls[kCallsCount];
+
+// svcSendSyncRequest by caller (the libnx function that sent the IPC): run mw2sp_055 put ~4 % of the ring thread's
+// samples on `svc #0x21`, more than the counted IPC (window queue, kickoff, fences) explains. Open addressing on the
+// return address; a full table drops new callers. libnx inlines serviceDispatch, so every command site is its own
+// caller: 32 slots filled up at boot (run mw2sp_059) and the steady callers never got in.
+struct SyncCaller {
+  std::atomic<u64> addr{0};
+  std::atomic<u64> n{0};
+  std::atomic<u64> ticks{0};
+};
+constexpr size_t kSyncCallers = 1024;
+SyncCaller g_sync_callers[kSyncCallers];
 
 inline void Annotate(unsigned id, u64 since, u64 bytes = 0) {
   const u64 ticks = armGetSystemTick() - since;
@@ -558,6 +572,33 @@ void Report(u64 elapsed_ticks, u64 tick_freq, u64 counters_last[kCounterCount],
                  n[kMappingGpu], mb[kMappingGpu], ms[kMappingGpu], n[kCacheClean], mb[kCacheClean], ms[kCacheClean],
                  n[kQueueBuffer], ms[kQueueBuffer], n[kDequeueBuffer], ms[kDequeueBuffer], n[kSleep0],
                  n[kSleepYield], ms[kSleepYield], n[kSleepShort], ms[kSleepShort], n[kSleepLong]);
+    // Every IPC call, and the busiest callers (all threads) since the previous report.
+    static u64 last_caller[kSyncCallers][2];
+    static struct Row {
+      u64 addr;
+      double n, ms;
+    } rows[kSyncCallers];
+    size_t count = 0;
+    for (size_t i = 0; i < kSyncCallers; ++i) {
+      const u64 addr = g_sync_callers[i].addr.load(std::memory_order_relaxed);
+      const u64 vn = g_sync_callers[i].n.load(std::memory_order_relaxed);
+      const u64 vt = g_sync_callers[i].ticks.load(std::memory_order_relaxed);
+      if (addr && vn != last_caller[i][0]) {
+        rows[count++] = {addr, double(vn - last_caller[i][0]) / seconds,
+                         double(vt - last_caller[i][1]) * 1000.0 / double(tick_freq) / seconds};
+      }
+      last_caller[i][0] = vn;
+      last_caller[i][1] = vt;
+    }
+    std::sort(rows, rows + count, [](const Row& a, const Row& b) { return a.ms > b.ms; });
+    std::fprintf(f, "     IPC (svcSendSyncRequest) per second: %.0f (%.1f ms); by caller:", n[kSyncRequest],
+                 ms[kSyncRequest]);
+    for (size_t i = 0; i < count && i < 8; ++i) {
+      std::fprintf(f, " ");
+      PrintAddr(f, rows[i].addr);
+      std::fprintf(f, " %.0f (%.1f ms)", rows[i].n, rows[i].ms);
+    }
+    std::fprintf(f, "\n");
   }
   if (frames > 0) {
     std::fprintf(f,
@@ -1210,6 +1251,27 @@ Result __wrap_bqDequeueBuffer(Binder* b, bool async, u32 width, u32 height, s32 
 
 uint32_t RexSwitchPerfTakeDequeueWaitUs(void) {
   return g_dequeue_wait_us.exchange(0, std::memory_order_relaxed);
+}
+
+Result __wrap_svcSendSyncRequest(Handle session) {
+  const u64 since = armGetSystemTick();
+  const Result rc = __real_svcSendSyncRequest(session);
+  Annotate(kSyncRequest, since);
+  const u64 ticks = armGetSystemTick() - since;
+  const u64 caller = reinterpret_cast<u64>(__builtin_return_address(0));
+  for (size_t i = 0, slot = (caller >> 2) % kSyncCallers; i < kSyncCallers; ++i, slot = (slot + 1) % kSyncCallers) {
+    SyncCaller& c = g_sync_callers[slot];
+    u64 seen = c.addr.load(std::memory_order_relaxed);
+    if (seen == 0 && c.addr.compare_exchange_strong(seen, caller, std::memory_order_relaxed)) {
+      seen = caller;
+    }
+    if (seen == caller) {
+      c.n.fetch_add(1, std::memory_order_relaxed);
+      c.ticks.fetch_add(ticks, std::memory_order_relaxed);
+      break;
+    }
+  }
+  return rc;
 }
 
 void __wrap_svcSleepThread(s64 nano) {

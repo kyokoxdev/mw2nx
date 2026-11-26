@@ -402,6 +402,11 @@ extern std::atomic<bool> g_syncs_on_flush_waits;
  */
 void ReportDeferred(std::string line);
 
+// The sampled stopwatches (C6 stages and substages, times per packet, NVK by parts) feed info-level reports only: on
+// when the log takes info lines, off at the players' default (warn). Read once by each user at its start. Run
+// mw2sp_055: ~2.7 % of the ring thread was clock reads, at a log level where nobody reads the results.
+bool StopwatchesOn();
+
 // Like REXLOG_INFO, but the report thread does the SD write (ReportDeferred). Not even formatted below info (the
 // default log_level is warn).
 #define MW2MP_REPORT_RING(...)                                                                \
