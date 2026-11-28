@@ -295,6 +295,22 @@ extern "C" int RexSwitchLaunchTitle(const char* guest_path, const uint8_t* launc
   if (launch_data_size > kRequestMax - kHeaderSize) {
     launch_data_size = 0;  // the 360 caps launch data well below this; never seen
   }
+  // MW2's Sys_Error relaunches the title with "e<message>" for the next start to show. An error the relaunched program
+  // hits again before it gets there relaunches it forever behind a black screen (issue #2: a disc TU6 does not patch,
+  // ~3 s per start). The same error twice in a row: show it and let the title end instead.
+  const LaunchRequest& started = mw2mp::Request();
+  if (launch_data && launch_data_size && launch_data[0] == 'e' && started.data.size() == launch_data_size &&
+      memcmp(started.data.data(), launch_data, launch_data_size) == 0) {
+    char message[512];
+    snprintf(message, sizeof(message), "%.*s", int(strnlen(reinterpret_cast<const char*>(launch_data) + 1,
+                                                           launch_data_size - 1)),
+             reinterpret_cast<const char*>(launch_data) + 1);
+    ErrorApplicationConfig error;
+    if (R_SUCCEEDED(errorApplicationCreate(&error, "Modern Warfare 2 stopped on an error at every start.", message))) {
+      errorApplicationShow(&error);
+    }
+    return 0;
+  }
   static uint8_t request[kRequestMax];
   const uint32_t header[2] = {kLaunchMagic, uint32_t(launch_data_size)};
   memcpy(request, header, sizeof(header));

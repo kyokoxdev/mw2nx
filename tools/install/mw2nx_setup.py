@@ -41,6 +41,11 @@ TU_NAME = "TU_10LC20N_0000018000000.00000000001GA"
 TU_URL = ("https://raw.githubusercontent.com/codxenon/xbox360-title-updates/25de2389ce214dae6159fcd45a9581cb3b640bd9/"
           "games/Call%20of%20Duty%20-%20Modern%20Warfare%202%20%28USA%2C%20Europe%29/TU6/" + TU_NAME)
 TU_XEXP = ("default_mp.xexp", "default.xexp")
+# What TU6's patches are made against: the SHA-1 of each disc XEX's RSA signature, the digest_source in the .xexp's
+# delta descriptor. Another disc passes the default_mp.xex test but the patch lands on the wrong image, and
+# Multiplayer's Sys_Error then relaunches it forever (issue #2: a black screen).
+BASE_XEX_SHA1 = {"default_mp.xex": "f5724d3aba1cee2861c4708880c701bf6d00d2f0",
+                 "default.xex": "6ec31e8be11f4409bcbe2fea8f73076b36786438"}
 TU_FF = ("patch_mp.ff", "dlc1_ui_mp.ff", "dlc2_ui_mp.ff")
 # DXC v1.9.2609, the version the released shader libraries are built with (same output on both systems).
 DXC = {
@@ -101,13 +106,31 @@ def find_iso(given):
     return input("Path to your Modern Warfare 2 disc image (.iso): ").strip().strip('"')
 
 
+def wrong_xex(x):
+    """The executables on an open disc that Title Update 6 does not patch (missing or another version)."""
+    root = {name.lower(): (start, size) for name, _, start, size in x.root()}
+    wrong = []
+    for name, want in BASE_XEX_SHA1.items():
+        start, size = root.get(name, (0, 0))
+        head = x._read(start, min(size, 0x10000)) if size else b""
+        security = struct.unpack_from(">I", head, 0x10)[0] if head[:4] == b"XEX2" else len(head)
+        signature = head[security + 8:security + 8 + 0x100]
+        if len(signature) != 0x100 or hashlib.sha1(signature).hexdigest() != want:
+            wrong.append(name)
+    return wrong
+
+
 def check_disc(iso):
     try:
         with xiso.Xiso(iso) as x:
             if "default_mp.xex" not in {name.lower() for name, _, _, _ in x.root()}:
                 sys.exit(f"{iso}: there is no default_mp.xex on it, it is not a Modern Warfare 2 disc")
+            wrong = wrong_xex(x)
     except (xiso.XisoError, OSError) as e:
         sys.exit(f"cannot read the disc {iso}: {e}")
+    if wrong:
+        sys.exit(f"{iso}: {' and '.join(wrong)} on this disc are not the version Title Update 6 patches (1.0.557, "
+                 "USA/Europe). mw2nx is built for that disc only; another one starts to a black screen.")
 
 
 def title_update(iso, cache):

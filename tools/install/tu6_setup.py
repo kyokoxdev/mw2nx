@@ -19,6 +19,7 @@ ROOT = os.path.dirname(os.path.dirname(HERE))
 sys.path[:0] = [HERE, os.path.join(ROOT, "tools", "inspect")]
 import xiso  # noqa: E402
 from stfs_extract import Stfs  # noqa: E402
+from mw2nx_setup import wrong_xex  # noqa: E402
 
 TITLE_ID = 0x41560817
 TU_NAME = "TU_10LC20N_0000018000000.00000000001GA"
@@ -67,6 +68,9 @@ def run(iso, out, log):
         with xiso.Xiso(iso) as x:
             if "default_mp.xex" not in {name.lower() for name, _, _, _ in x.root()}:
                 raise ValueError("there is no default_mp.xex on it: it is not a Modern Warfare 2 disc")
+            wrong = wrong_xex(x)
+            if wrong:
+                raise ValueError(f"{' and '.join(wrong)} on it are not the version Title Update 6 patches")
     except (xiso.XisoError, OSError) as e:
         raise ValueError(f"cannot read the disc: {e}") from e
 

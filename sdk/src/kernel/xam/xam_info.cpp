@@ -300,8 +300,14 @@ void XamLoaderLaunchTitle_entry(mapped_string raw_name_ptr, u32 flags) {
     if (c >= 0x20 && c < 0x7F) data.push_back(char(c));
     else if (!data.empty() && data.back() != ' ') data.push_back(' ');
   }
-  REXKRNL_INFO("XamLoaderLaunchTitle('{}', flags {:08X}): ending the title; launch data ({} bytes): {}",
-               loader_data.launch_path, uint32_t(flags), loader_data.launch_data.size(), data);
+  // A Sys_Error ("e...") at warning level: release logs keep only warnings, and the message is the one clue (issue #2).
+  if (!data.empty() && data[0] == 'e') {
+    REXKRNL_WARN("XamLoaderLaunchTitle('{}', flags {:08X}): ending the title on an error; launch data ({} bytes): {}",
+                 loader_data.launch_path, uint32_t(flags), loader_data.launch_data.size(), data);
+  } else {
+    REXKRNL_INFO("XamLoaderLaunchTitle('{}', flags {:08X}): ending the title; launch data ({} bytes): {}",
+                 loader_data.launch_path, uint32_t(flags), loader_data.launch_data.size(), data);
+  }
 
 #if defined(__SWITCH__)
   // The app may start the other executable itself (mw2nx restarts the program into it, mw2mp/src/mw2mp_launch.cpp).
