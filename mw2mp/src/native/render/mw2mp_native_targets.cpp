@@ -1668,14 +1668,27 @@ class VulkanTargets final : public NativeTargets, public TargetContext {
         // formats BO2 also resolves to, 4 for the rest.
         const uint32_t base_x = uint32_t(x0) & ~uint32_t(31);
         const uint32_t base_y = uint32_t(y0) & ~uint32_t(31);
-        const uint32_t base =
+        const uint32_t log2_bytes = mw2mp_formats::Log2BytesCopy(format_target);
+        uint32_t base =
             reg.rb_copy_dest_base +
-            uint32_t(OffsetTiled2D(int32_t(base_x), int32_t(base_y), pitch_target,
-                                             mw2mp_formats::Log2BytesCopy(format_target)));
+            uint32_t(OffsetTiled2D(int32_t(base_x), int32_t(base_y), pitch_target, log2_bytes));
         dx = uint32_t(x0) - base_x;
         dy = uint32_t(y0) - base_y;
-        resolved = GetResolved(base & 0x1FFFFFFF, pitch_target, height_target, format_target,
-                                   (info_target >> 24) & 0x1, FormatHostResolved(info_target));
+        // mw2nx: a copy into part of a texture already resolved (split screen's second view, written below the
+        // first and sampled with it at the texture's base) goes into that texture, as the shadow atlases do.
+        const VkFormat format_host = FormatHostResolved(info_target);
+        uint32_t width_resolved = pitch_target, height_resolved = height_target;
+        uint32_t ax = 0, ay = 0, atlas_base = 0;
+        if (const Resolved* atlas = ContainingResolved(base & 0x1FFFFFFF, pitch_target, format_host, log2_bytes,
+                                                       atlas_base, ax, ay)) {
+          base = atlas_base;
+          dx += ax;
+          dy += ay;
+          width_resolved = atlas->image.width;
+          height_resolved = atlas->image.height;
+        }
+        resolved = GetResolved(base & 0x1FFFFFFF, width_resolved, height_resolved, format_target,
+                                   (info_target >> 24) & 0x1, format_host);
         base_resolved = base & 0x1FFFFFFF;
         if (resolved) {
           AnnotateCopy(base & 0x1FFFFFFF, pitch_target, height_target, draws_before);
@@ -2136,7 +2149,7 @@ class VulkanTargets final : public NativeTargets, public TargetContext {
     if (!depth->width_guest || depth->width_guest == depth->width) {  // not the scaled shadow map
       uint32_t ax = 0, ay = 0, atlas_base = 0;
       if (const Resolved* atlas =
-              ContainingResolved(base & 0x1FFFFFFF, pitch_target, format_depth_, atlas_base, ax, ay)) {
+              ContainingResolved(base & 0x1FFFFFFF, pitch_target, format_depth_, 2, atlas_base, ax, ay)) {
         base = atlas_base;
         dx += ax;
         dy += ay;
@@ -5209,19 +5222,21 @@ class VulkanTargets final : public NativeTargets, public TargetContext {
   // own nothing sampled: half the sun atlas stale (a circle of wrong shadow around the player, run 025). An address
   // inside an atlas already resolved with the same pitch and format is that atlas at a 32-aligned texel (x, y); the
   // lowest such base wins, so a stray slice image from before the atlas existed is never taken as one.
-  // ponytail: linear scan of resolved_ and of the atlas's tiles per depth copy (a few per frame); cache by address if
+  // Color copies go through it too: split screen resolves each view into its own part of one texture.
+  // ponytail: linear scan of resolved_ and of the atlas's tiles per copy (a few per frame); cache by address if
   // it ever shows in the copy stage.
-  const Resolved* ContainingResolved(uint32_t address, uint32_t pitch, VkFormat format, uint32_t& atlas_base,
-                                     uint32_t& x, uint32_t& y) const {
+  const Resolved* ContainingResolved(uint32_t address, uint32_t pitch, VkFormat format, uint32_t log2_bytes,
+                                     uint32_t& atlas_base, uint32_t& x, uint32_t& y) const {
     const Resolved* found = nullptr;
     for (const auto& [base, r] : resolved_) {
       if (base >= address || r.image.width != pitch || r.image.format != format ||
-          uint64_t(address - base) >= uint64_t(r.image.width) * r.image.height * 4 || (found && base > atlas_base)) {
+          uint64_t(address - base) >= (uint64_t(r.image.width) * r.image.height << log2_bytes) ||
+          (found && base > atlas_base)) {
         continue;
       }
       for (uint32_t ty = 0; ty < r.image.height; ty += 32) {
         for (uint32_t tx = 0; tx < pitch; tx += 32) {
-          if (base + uint32_t(OffsetTiled2D(int32_t(tx), int32_t(ty), pitch, 2)) == address) {
+          if (base + uint32_t(OffsetTiled2D(int32_t(tx), int32_t(ty), pitch, log2_bytes)) == address) {
             found = &r;
             atlas_base = base;
             x = tx;
