@@ -153,6 +153,13 @@ def main():
                        ("Multiplayer ELF", args.mp_elf), ("hacbrewpack", args.hacbrewpack)):
         if not os.path.isfile(path):
             sys.exit(f"{what} not found: {path}")
+    # The in-game version comes from `git describe` at configure time: only a build of the tagged commit says
+    # exactly this version (1.0.2 shipped labelled rexglue-v1.0.1.3-dev because it was built before the tag).
+    built_as = re.compile(rb"rexglue-v" + re.escape(args.version.encode()) + rb"-(?!dev\.|rc\.)")
+    for elf in (args.sp_elf, args.mp_elf):
+        with open(elf, "rb") as f:
+            if not built_as.search(f.read()):
+                sys.exit(f"{elf} is not a build of tag v{args.version}: tag the release commit, rebuild, then pack")
     usage = subprocess.run([args.hacbrewpack, "--help"], capture_output=True)
     if b"--extraprogram" not in usage.stdout + usage.stderr:
         sys.exit(f"{args.hacbrewpack} lacks --extraprogram: apply patches/hacbrewpack-extraprogram.patch and rebuild")

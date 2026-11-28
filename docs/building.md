@@ -128,9 +128,14 @@ NPDM (`tools/nsp/mw2nx.npdm.json`: application type 1, four cores, 39-bit addres
 them with `appletExecuteProgram`, passing the Switch user along so both programs share one save.
 
 ```bash
-# the last LTO+PGO builds of both programs, then:
+# tag the release commit first: the in-game version is `git describe` at configure time
+git tag v1.0.2            # local only; push it when the release goes out
+# the LTO+PGO builds of both programs from that tag, then:
 python3 -I tools/make_nsp.py --version 1.0.2
 ```
+
+`make_nsp.py` refuses ELFs whose embedded version is not exactly `--version` (an untagged or older build says
+`rexglue-v<last tag>.<commits>-dev.g<sha>`).
 
 | Needs | Where |
 |---|---|
